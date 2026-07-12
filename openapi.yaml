@@ -1,0 +1,1022 @@
+openapi: 3.1.0
+info:
+  title: Split-Flap Gateway API
+  version: "3.1"
+  description: |
+    REST API for the ESP32-S3 Split-Flap Gateway firmware (firmware v3.1).
+
+    **Base URL:** `http://<gateway-ip>` — replace with the gateway's IP
+    (shown on the Status page), or use `http://192.168.4.1` when connected to
+    the AP fallback network.
+
+    All `POST` endpoints accept and return `application/json`.
+    All endpoints include `Access-Control-Allow-Origin: *`.
+
+servers:
+  - url: http://192.168.4.1
+    description: AP fallback (default)
+  - url: http://{ip}
+    description: Station IP (after WiFi connect)
+    variables:
+      ip:
+        default: "192.168.1.100"
+        description: Gateway IP address
+
+tags:
+  - name: Bus
+    description: Raw RS-485 bus access
+  - name: Modules
+    description: Split-flap module display control
+  - name: Display
+    description: The visual state of the wall
+  - name: Status
+    description: System status and diagnostics
+  - name: Config
+    description: Persistent configuration
+  - name: Companion
+    description: Companion-app registration and its settings blob store
+  - name: OTA
+    description: Over-the-air firmware update
+
+paths:
+
+  # ── RS-485 Bus ──────────────────────────────────────────────────
+
+  /api/log:
+    get:
+      tags: [Bus]
+      summary: Drain the command log
+      description: >-
+        Returns the commands received (REST and MQTT) since the last call, up to 64, then
+        advances the cursor. On this firmware there is no physical bus, so this is a log of
+        commands the gateway acted on, not an RX/TX wire trace. Each call drains what is new.
+      responses:
+        "200":
+          description: Array of log entries (may be empty)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LogEntry"
+
+  /api/rs485/send:
+    post:
+      tags: [Bus]
+      summary: Send a raw ASCII frame to the bus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data:
+                  type: string
+                  description: >
+                    ASCII frame to transmit. A trailing newline is optional — the
+                    gateway normalizes framing (adds/strips the terminator and trims
+                    any bytes past a complete known command) unless `raw` is true.
+                raw:
+                  type: boolean
+                  default: false
+                  description: >
+                    When true, the bytes in `data` are sent verbatim with no
+                    sanitization or terminator changes (debugging escape hatch).
+            examples:
+              home_all:
+                value: { data: "m*h" }
+              version_all:
+                value: { data: "m*v" }
+              show_char:
+                value: { data: "m5-A" }
+              raw_verbatim:
+                value: { data: "m4vDSassa", raw: true }
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/rs485/batch:
+    post:
+      tags: [Bus]
+      summary: Send many raw frames in one request (v3.0)
+      description: >
+        Sends each frame in `frames`, normalized like `/api/rs485/send`, so a host can draw a
+        whole animated page in one HTTP call instead of one request per module. Capped at 512
+        frames. An optional `step_ms` paces the cascade: the request returns immediately and the
+        frames are delivered on a schedule by the bus task (so a paced batch never blocks the web
+        server). `step_ms` 0 sends everything at once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [frames]
+              properties:
+                frames:
+                  type: array
+                  items: { type: string }
+                  description: ASCII frames, e.g. ["m00-A\n","m01-B\n"]
+                step_ms:
+                  type: integer
+                  default: 0
+                  description: Delay (0–30 ms) between frames, for a paced cascade.
+            example: { frames: ["m00-A\n", "m01-B\n", "m02-y\n"], step_ms: 15 }
+      responses:
+        "200":
+          description: How many frames were sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:   { type: boolean, example: true }
+                  sent: { type: integer, example: 45 }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  # ── Module display control ──────────────────────────────────────
+
+  /api/display/state:
+    get:
+      tags: [Display]
+      summary: Current visual state of the split-flap wall
+      description: |
+        Returns the configured grid dimensions and the character shown in each
+        cell. Cells map to module IDs left-to-right, top-to-bottom (cell index =
+        row*cols + col == module id). Each cell is the tracked character, "?" if
+        a module is present but its character is unknown (e.g. after a home or an
+        index set), or null if no module has that id. Drives the Live Display.
+      responses:
+        "200":
+          description: Display state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rows:  { type: integer, example: 3 }
+                  cols:  { type: integer, example: 15 }
+                  cells:
+                    type: array
+                    items: { type: [string, "null"] }
+                    example: [" ","1","2",":","0","4","A","M",null,null]
+
+  /api/flap/modules:
+    get:
+      tags: [Modules]
+      summary: List all known modules
+      responses:
+        "200":
+          description: Array of module objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Module"
+
+  /api/flap/identify:
+    post:
+      tags: [Modules]
+      summary: Clear the module list and re-discover all modules
+      description: |
+        Wipes both the in-memory registry and the persisted module file, then
+        broadcasts `m*v` so every module re-announces its version and serial
+        number. This is the "Identify All" action in the web UI. Allow a few
+        seconds for all modules to respond before reading `/api/flap/modules`.
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+
+  /api/flap/char:
+    post:
+      tags: [Modules]
+      summary: Show a character on a module
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, char]
+              properties:
+                id:
+                  type: integer
+                  description: Module ID (0–254), or -1 to broadcast to all
+                char:
+                  type: string
+                  description: >
+                    A single character (UTF-8). The gateway uppercases ASCII
+                    letters — except the seven lowercase colour codes r/o/y/g/b/p/w,
+                    which address the colour flaps and are sent as-is — and transcodes
+                    the character to a single Windows-1252 byte (so € and accented
+                    letters work), then sends m<id>-<char>; the module firmware maps
+                    the byte to a flap index. Characters with no Windows-1252
+                    representation are rejected.
+            example: { id: 5, char: "A" }
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/flap/index:
+    post:
+      tags: [Modules]
+      summary: Show a flap by index
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, index]
+              properties:
+                id:
+                  type: integer
+                index:
+                  type: integer
+                  minimum: 0
+                  maximum: 63
+            example: { id: 5, index: 1 }
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/flap/text:
+    post:
+      tags: [Modules]
+      summary: Send a text string across sequential modules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text, start]
+              properties:
+                text:
+                  type: string
+                start:
+                  type: integer
+                  description: ID of the first module
+            example: { text: "HELLO", start: 0 }
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  chars: { type: integer }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/flap/home:
+    post:
+      tags: [Modules]
+      summary: Home one or all modules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id:
+                  type: integer
+                  description: Module ID, or -1 to home all
+            examples:
+              single: { value: { id: 5 } }
+              all:    { value: { id: -1 } }
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+
+  /api/flap/version:
+    post:
+      tags: [Modules]
+      summary: Query firmware version (synchronous — waits up to 500ms)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: integer, minimum: 0, maximum: 254 }
+            example: { id: 5 }
+      responses:
+        "200":
+          description: Version response or timeout
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncReply"
+              examples:
+                success:
+                  value: { ok: true, id: 5, ver: "12", sn: "AABBCCDD", stale: false, lastSeen: 45231 }
+                stale:
+                  value: { ok: true, id: 5, ver: "12", sn: "AABBCCDD", stale: true, lastSeen: 38000 }
+                timeout:
+                  value: { ok: false, error: "no response from module" }
+
+  /api/flap/all:
+    post:
+      tags: [Modules]
+      summary: Refresh version and EEPROM together (uses the v25+ combined 'A' command when possible)
+      description: |
+        Returns a module's firmware version, serial number, and full EEPROM dump
+        in one response. For a module known to be firmware v25+, the gateway issues
+        a single combined `A` command (one bus transaction) instead of a version
+        query followed by a dump. Older firmware (or a module whose version isn't
+        known yet) falls back to the classic version-then-dump sequence. The `mode`
+        field reports which path ran (`"A"` or `"vd"`). Data is fetched fresh each
+        call; `stale:true` (with cached/empty fields) indicates no reply arrived.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: integer, minimum: 0, maximum: 254 }
+            example: { id: 5 }
+      responses:
+        "200":
+          description: Combined version + EEPROM state, or stale on timeout
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SyncReply"
+                  - type: object
+                    properties:
+                      ver:  { type: string, description: Firmware version, example: "25" }
+                      dump:
+                        type: string
+                        description: Raw EEPROM string — `homeOffset:totalSteps:0=pos,1=pos,...`
+                        example: "42:4096:0=210,1=320"
+                      mode:
+                        type: string
+                        enum: ["A", "vd"]
+                        description: Which path ran — single `A` transaction, or version+dump fallback
+                      autoHome:
+                        type: integer
+                        description: >-
+                          Auto-home setting — `1` = home on boot, `0` = restore saved position.
+                          Only the `A` path carries this; `-99` when not provided (the `vd`
+                          fallback or a stale read).
+                        example: 1
+                      curIndex:
+                        type: integer
+                        description: >-
+                          Module's current flap index (live state) — `0..63`, `-1` unknown,
+                          `-2` motor released. `A` path only; `-99` when not provided.
+                        example: 5
+                      reportedId:
+                        type: integer
+                        description: >-
+                          Module's self-reported ID from the `A` reply, for diagnosing an
+                          address/identity mismatch against `id`. `-99` when not provided.
+                        example: 5
+                      flapCount:
+                        type: integer
+                        description: >-
+                          Active flap count (1..64) from the configurable flap set. Firmware
+                          v31+ only; `-99` when not provided (older firmware, the `vd`
+                          fallback, or a stale read).
+                        example: 40
+                      flapChars:
+                        type: string
+                        description: >-
+                          Ordered character set (character at each flap index) from the
+                          configurable flap set, as UTF-8 (the gateway transcodes the
+                          module's Windows-1252 bytes, so € and accents round-trip).
+                          Firmware v31+ only; empty string when not provided.
+                        example: " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+              examples:
+                combined_A:
+                  value: { ok: true, id: 5, ver: "31", sn: "AABBCCDD", dump: "42:4096:0=210,1=320", autoHome: 1, curIndex: 5, reportedId: 5, flapCount: 40, flapChars: " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", stale: false, mode: "A" }
+                fallback_vd:
+                  value: { ok: true, id: 5, ver: "23", sn: "AABBCCDD", dump: "42:4096:0=210,1=320", autoHome: -99, curIndex: -99, reportedId: -99, flapCount: -99, flapChars: "", stale: false, mode: "vd" }
+                stale:
+                  value: { ok: true, id: 5, ver: "31", sn: "AABBCCDD", dump: "", autoHome: -99, curIndex: -99, reportedId: -99, flapCount: -99, flapChars: "", stale: true, mode: "A" }
+
+  /api/flap/flapconfig:
+    post:
+      tags: [Modules]
+      summary: Configure a module's flap count and/or character set (firmware v31+)
+      description: |
+        Sets the runtime-configurable flap set introduced in module firmware v31:
+        the active flap count (1–64) and the ordered character set (the character
+        at each flap index). `flapCount` and `charSet` are **independent and
+        optional** — supply either or both; an omitted side is left unchanged on
+        the module. Target a module by `id` (use `id: -1` to broadcast the same
+        flap set to every module on the bus) or by serial number (`sn`). The
+        module applies the change silently (no reply); read it back with
+        `/api/flap/all`. `charSet` is UTF-8 and may use any character representable
+        in Windows-1252 — ASCII plus the euro sign and Western-European
+        accents; the gateway transcodes it to the single-byte form the bus uses.
+        Characters with no Windows-1252 representation are rejected. At most 64
+        characters. On modules older than v31 the command is ignored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:        { type: integer, minimum: -1, maximum: 254, description: "Module ID; -1 broadcasts. Use this OR sn." }
+                sn:        { type: string, description: "Target by serial number instead of id." }
+                flapCount: { type: integer, minimum: 1, maximum: 64, description: "Active flap count; omit to leave unchanged." }
+                charSet:   { type: string, maxLength: 64, description: "Ordered character set (index 0..n), UTF-8; any Windows-1252 char (ASCII + € + accents). Omit to leave unchanged." }
+            examples:
+              byId:
+                value: { id: 5, flapCount: 40, charSet: " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" }
+              euroAndAccents:
+                value: { id: 5, charSet: " ABCDEFGHIJKLMNOPQRSTUVWXYZ€éàüöç0123456789" }
+              broadcast:
+                value: { id: -1, charSet: " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" }
+              bySerial:
+                value: { sn: "AABBCCDD0011223344", flapCount: 48 }
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/status:
+    get:
+      tags: [Status]
+      summary: System status
+      responses:
+        "200":
+          description: Current system status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+
+  /api/mqtt/test:
+    post:
+      tags: [Status]
+      summary: Test MQTT broker connectivity and credentials
+      description: |
+        Performs a TCP reachability check (3s cap) followed by a real MQTT
+        CONNECT/CONNACK exchange using a throwaway client, without touching the
+        gateway's live MQTT connection. Body fields are optional; omitted fields
+        default to the saved configuration, so settings can be verified before
+        saving.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                host: { type: string, example: "192.168.1.65" }
+                port: { type: integer, example: 1883 }
+                user: { type: string }
+                pass: { type: string }
+      responses:
+        "200":
+          description: Test result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:     { type: boolean, description: "true if MQTT CONNECT succeeded" }
+                  tcp:    { type: boolean, description: "TCP connection succeeded" }
+                  mqtt:   { type: boolean, description: "MQTT CONNECT/CONNACK succeeded" }
+                  state:  { type: integer, description: "PubSubClient state code" }
+                  detail: { type: string,  example: "bad username or password" }
+
+  /api/maintenance:
+    get:
+      tags: [Status]
+      summary: Get maintenance-mode state
+      responses:
+        "200":
+          description: Current state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  on: { type: boolean, example: false }
+    post:
+      tags: [Status]
+      summary: Enable or disable maintenance mode
+      description: |
+        When enabled, the gateway ignores all commands arriving via MQTT and
+        does not relay them to the RS-485 bus. The web UI / REST API continue to
+        work normally. Always resets to off on reboot (not persisted).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [on]
+              properties:
+                on: { type: boolean }
+            example: { on: true }
+      responses:
+        "200":
+          description: New state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  on: { type: boolean, example: true }
+
+  /api/quiet:
+    get:
+      tags: [Status]
+      summary: Get quiet-time state
+      responses:
+        "200":
+          description: Current state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  on: { type: boolean, example: false }
+    post:
+      tags: [Status]
+      summary: Enable or disable quiet time
+      description: |
+        When enabled, the gateway still accepts and acknowledges every command,
+        but does not transmit normal display-motion frames (show character, show
+        index, home), so the flaps stay still. Deliberate calibration moves
+        (calibrate, goto, nudge) are still allowed. Display tracking is left
+        unchanged. When disabled, the reels resync to the display each module was
+        last asked to show while quiet. Always resets to off on reboot (not
+        persisted). Also settable over MQTT (`<prefix>/quiet/set`) and from Home
+        Assistant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [on]
+              properties:
+                on: { type: boolean }
+            example: { on: true }
+      responses:
+        "200":
+          description: New state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, example: true }
+                  on: { type: boolean, example: true }
+
+  /api/quiet/schedule:
+    get:
+      tags: [Status]
+      summary: Get the daily quiet-time schedule (v3.0)
+      responses:
+        "200":
+          description: Current schedule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QuietSchedule" }
+    post:
+      tags: [Status]
+      summary: Set the daily quiet-time schedule (v3.0)
+      description: |
+        When enabled, quiet time is toggled automatically as local time crosses
+        the window (overnight windows supported). Transition-based, so a manual
+        toggle within a window is respected until the next boundary. Persisted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QuietSchedule" }
+            example: { enabled: true, start: "22:00", end: "07:00", days: 127 }
+      responses:
+        "200":
+          description: New schedule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QuietSchedule" }
+
+  # ── Companion app ───────────────────────────────────────────────
+
+  /api/companion:
+    get:
+      tags: [Companion]
+      summary: Get the registered companion app (v3.0)
+      responses:
+        "200":
+          description: Registered companion URL and its last reported status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Companion" }
+    post:
+      tags: [Companion]
+      summary: Register the companion app and heartbeat its status (v3.0)
+      description: |
+        The companion app posts its own URL here so the gateway can show a
+        **Companion** tab linking back to it. The URL is persisted in NVS (and
+        only rewritten when it actually changes, to spare the flash from
+        heartbeats); the status is runtime-only and clears on reboot.
+
+        An empty `url` deregisters the companion. Either field may be sent alone.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Companion" }
+            example: { url: "http://192.168.1.60:8000", status: "Running: Weather" }
+      responses:
+        "200":
+          description: The stored registration after the update
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Companion" }
+
+  /api/companion/settings:
+    get:
+      tags: [Companion]
+      summary: Fetch the companion's stored settings blob (v3.1)
+      description: |
+        Returns the blob exactly as it was stored by `PUT`, byte for byte.
+
+        The body is `gzip(minified JSON)` whose schema belongs entirely to the
+        companion — the gateway never parses it. It is served as
+        `application/gzip` and **not** with `Content-Encoding: gzip`: these bytes
+        are the payload, not a transfer encoding of it, so HTTP clients must not
+        transparently decompress them. The caller decompresses it itself.
+      responses:
+        "200":
+          description: The stored gzipped JSON blob
+          content:
+            application/gzip:
+              schema: { type: string, format: binary }
+        "404":
+          description: Nothing stored yet (or the filesystem is unavailable)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    put:
+      tags: [Companion]
+      summary: Store the companion's settings blob (v3.1)
+      description: |
+        Stores the request body **verbatim** and **atomically**: it streams to a
+        temp file on the FATFS partition and is renamed over the live copy only
+        once the final byte lands, so an interrupted upload can never corrupt
+        settings that were already good. The blob survives OTA firmware updates.
+
+        The body must be `gzip(minified JSON)`, at most 64 KB (real blobs are
+        1–2 KB). The gateway stores whatever bytes it is given and does not
+        validate that they are valid gzip or valid JSON.
+      requestBody:
+        required: true
+        content:
+          application/gzip:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:    { type: boolean, example: true }
+                  bytes: { type: integer, description: "Bytes stored", example: 1284 }
+        "400":
+          description: Empty or truncated body — nothing was changed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "413":
+          description: Blob larger than 64 KB — nothing was changed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Filesystem not mounted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "507":
+          description: Write failed (storage full or I/O error)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/config:
+    get:
+      tags: [Config]
+      summary: Get current configuration (passwords excluded)
+      responses:
+        "200":
+          description: Current configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Config"
+
+  /api/config/wifi:
+    post:
+      tags: [Config]
+      summary: Save WiFi credentials and reconnect
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ssid, pass]
+              properties:
+                ssid: { type: string, example: "MyNetwork" }
+                pass: { type: string, example: "mypassword" }
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+
+  /api/config/mqtt:
+    post:
+      tags: [Config]
+      summary: Save MQTT broker settings and reconnect
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host, port, prefix]
+              properties:
+                host:   { type: string, example: "192.168.1.50" }
+                port:   { type: integer, default: 1883 }
+                user:   { type: string, example: "" }
+                pass:   { type: string, example: "" }
+                prefix: { type: string, default: "splitflap" }
+            example: { host: "192.168.1.50", port: 1883, user: "", pass: "", prefix: "splitflap" }
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+
+  /api/config/rs485:
+    post:
+      tags: [Config]
+      summary: Save RS-485 bus settings
+      description: Updates the serial bus parameters. Takes effect on the next bus reinitialisation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                baud:     { type: integer, default: 9600, example: 9600 }
+                dataBits: { type: integer, default: 8, example: 8 }
+                parity:   { type: integer, description: "0=None 1=Even 2=Odd", default: 0, example: 0 }
+                stopBits: { type: integer, default: 1, example: 1 }
+            example: { baud: 9600, dataBits: 8, parity: 0, stopBits: 1 }
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+
+  /api/config/settings:
+    post:
+      tags: [Config]
+      summary: Save timezone, serial debug, or OTA password
+      description: Send only the fields you want to change. Each takes effect immediately.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                posixTZ:     { type: string, example: "EST5EDT,M3.2.0,M11.1.0" }
+                ntpServer:   { type: string, example: "pool.ntp.org", description: "NTP server hostname; blank resets to pool.ntp.org" }
+                gridRows:    { type: integer, minimum: 1, maximum: 64, example: 3,  description: "Display wall rows" }
+                gridCols:    { type: integer, minimum: 1, maximum: 64, example: 15, description: "Display wall columns" }
+                serialDebug: { type: boolean, example: true }
+                haEnabled:   { type: boolean, example: true, description: "Enable Home Assistant MQTT auto-discovery and entity state topics" }
+                otaPassword: { type: string, example: "mysecret" }
+            examples:
+              timezone:
+                value:
+                  posixTZ: "EST5EDT,M3.2.0,M11.1.0"
+              ntp_server:
+                value:
+                  ntpServer: "time.google.com"
+              debug_on:
+                value:
+                  serialDebug: true
+              home_assistant:
+                value:
+                  haEnabled: true
+              ota_password:
+                value:
+                  otaPassword: "mysecret"
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+
+  # ── OTA ─────────────────────────────────────────────────────────
+
+  /ota:
+    get:
+      tags: [OTA]
+      summary: Browser-based firmware upload page
+      description: Returns an HTML page with a file picker for uploading a compiled `.bin` file.
+      responses:
+        "200":
+          description: HTML upload page
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /api/ota/upload:
+    post:
+      tags: [OTA]
+      summary: Upload compiled firmware binary
+      description: |
+        Accepts a raw binary POST body (the compiled `.bin` file).
+        The gateway reboots automatically on success.
+        Obtain the binary via Arduino IDE **Sketch → Export Compiled Binary**.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Upload successful — gateway rebooting
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "OK"
+        "500":
+          description: Update failed
+          content:
+            text/plain:
+              schema:
+                type: string
+
+# ── Reusable components ──────────────────────────────────────────
+
+components:
+  responses:
+    Ok:
+      description: Success
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok:
+                type: boolean
+                example: true
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok:    { type: boolean, example: false }
+              error: { type: string, example: "id required" }
+
+  schemas:
+    Error:
+      type: object
+      description: The error body sent by a failing endpoint.
+      properties:
+        error: { type: string, example: "Settings blob too large" }
+
+    Companion:
+      type: object
+      description: Companion-app registration (v3.0).
+      properties:
+        url:
+          type: string
+          description: "The companion's own base URL. Persisted; blank means no companion is registered. Posting a blank url deregisters it"
+          example: "http://192.168.1.60:8000"
+        status:
+          type: string
+          description: "The companion's last reported running status. Runtime-only -- clears on reboot. Quotes, backslashes and control characters are sanitised"
+          example: "Running: Weather"
+
+    QuietSchedule:
+      type: object
+      description: Daily quiet-time schedule (v3.0).
+      properties:
+        enabled: { type: boolean, example: true }
+        start:   { type: string, description: "Window start HH:MM", example: "22:00" }
+        end:     { type: string, description: "Window end HH:MM (overnight allowed)", example: "07:00" }
+        days:    { type: integer, description: "Active-day bitmask, bit0=Sun … bit6=Sat", example: 127 }
+        offset:  { type: integer, description: "Client UTC offset in minutes east of UTC; the window is evaluated in this local time. The web UI sends it on load.", example: -300 }
+    LogEntry:
+      type: object
+      properties:
+        ts:   { type: integer, description: "Milliseconds since boot", example: 12345 }
+        ep:   { type: integer, description: "UTC epoch at capture (0 if RTC not set); UI renders in browser-local time", example: 1781210380 }
+        wt:   { type: string,  description: "Gateway wall-clock timestamp", example: "2026-06-10 14:32:01" }
+        src:  { type: string,  enum: [R, M], description: "Command source: R=REST, M=MQTT" }
+        text: { type: string,  description: "The command, JSON-safe (control chars stripped, high CP1252 flap bytes shown as their real UTF-8 glyph)", example: "send m5-A" }
+
+    Module:
+      type: object
+      properties:
+        id:          { type: integer, description: "Module ID (255 = unprovisioned slot)", example: 5 }
+        sn:          { type: string,  description: "Serial number hex string", example: "AABBCCDD11223344" }
+        provisioned: { type: boolean, example: true }
+        flapIndex:   { type: integer, description: "Last known flap index (-1 = unknown)", example: 1 }
+        flapChar:    { type: string,  description: "Last known displayed character", example: "A" }
+        fwVersion:   { type: string,  description: "Firmware version string (empty for legacy v7-or-earlier modules, which do not answer the version command)", example: "12" }
+        lastSeen:    { type: integer, description: "millis() of last activity (0 if not seen since boot; restored entries start at 0)", example: 45000 }
+        lastSeenEpoch: { type: integer, description: "RTC wall-clock epoch (seconds) of last activity; survives reboot. 0 if the RTC clock has never been set.", example: 1781210380 }
+
+    SyncReply:
+      type: object
+      description: Response from a synchronous wait-for-reply endpoint
+      properties:
+        ok:       { type: boolean }
+        id:       { type: integer, description: "Module ID" }
+        sn:       { type: string,  description: "Serial number" }
+        stale:    { type: boolean, description: "true if data is from cache (module did not respond to this request)" }
+        lastSeen: { type: integer, description: "millis() of last module activity" }
+        error:    { type: string,  description: "Present only when ok is false" }
+
+    Status:
+      type: object
+      properties:
+        uptime:    { type: integer, description: "Seconds since boot", example: 3842 }
+        rx:        { type: integer, description: "Frames received since boot", example: 124 }
+        tx:        { type: integer, description: "Frames transmitted since boot", example: 37 }
+        baud:      { type: integer, example: 9600 }
+        wifi:      { type: boolean, example: true }
+        ip:        { type: string,  example: "192.168.1.105" }
+        apip:      { type: string,  example: "192.168.4.1" }
+        heap:      { type: integer, description: "Free heap bytes", example: 187432 }
+        mqtt:      { type: boolean, example: true }
+        modules:   { type: integer, example: 6 }
+        time:      { type: string,  description: "Local RTC time", example: "2026-06-10 14:32:01" }
+        ntpSynced: { type: boolean, example: true }
+        maint:     { type: boolean, description: "true if maintenance mode is on (external MQTT commands ignored)", example: false }
+        quiet:     { type: boolean, description: "true if quiet time is on (flaps do not move for display updates)", example: false }
+        minheap:   { type: integer, description: "Minimum free heap ever observed (bytes)", example: 98000 }
+        stk:
+          type: object
+          description: "Per-task minimum-ever free stack in bytes (stack high-water marks)"
+          properties:
+            rs485: { type: integer, example: 3100 }
+            web:   { type: integer, example: 5200 }
+            net:   { type: integer, example: 2900 }
+            ota:   { type: integer, example: 2400 }
+            rtc:   { type: integer, example: 900 }
+
+    Config:
+      type: object
+      properties:
+        version:      { type: string,  example: "3.1.0", description: "Gateway firmware version (v3.1+). Absent on older firmware, which is how a client detects a pre-3.1 gateway" }
+        wSSID:        { type: string,  example: "MyNetwork" }
+        mqHost:       { type: string,  example: "192.168.1.50" }
+        mqPort:       { type: integer, example: 1883 }
+        mqUser:       { type: string,  example: "" }
+        mqPfx:        { type: string,  example: "splitflap" }
+        baud:         { type: integer, example: 9600 }
+        dataBits:     { type: integer, example: 8 }
+        parity:       { type: integer, description: "0=None 1=Even 2=Odd", example: 0 }
+        stopBits:     { type: integer, example: 1 }
+        posixTZ:      { type: string,  example: "EST5EDT,M3.2.0,M11.1.0" }
+        ntpServer:    { type: string,  example: "pool.ntp.org" }
+        gridRows:     { type: integer, example: 3,  description: "Display wall rows" }
+        gridCols:     { type: integer, example: 15, description: "Display wall columns" }
+        serialDebug:  { type: boolean, example: false }
+        haEnabled:    { type: boolean, description: "true if Home Assistant MQTT discovery is enabled", example: false }
+        otaPasswordSet: { type: boolean, description: "true if an OTA password is configured", example: false }
