@@ -81,19 +81,40 @@ static void busIngestByte(uint8_t c) {
 void taskRS485(void* pv) {
   static uint8_t rxFrame[TX_MAX_BYTES];   // one polled reply; this task is its only reader
 
-  // Startup discovery: if we booted with an empty registry (first boot, or after
-  // an Identify-All / cleared list), broadcast m*v so every module reports its
-  // version + serial and populates the initial list. Delayed briefly so the bus
-  // and the RX path here are fully up before we transmit.
+  // Startup discovery, RECONCILED AGAINST THE WALL.
+  //
+  // The wall is this firmware's ground truth: every cell of it *is* a module, and its id is
+  // fixed by position (0..vmCount-1). So a healthy registry holds exactly vmCount entries.
+  // Anything else means the grid was resized since the registry was last written.
+  //
+  // This used to broadcast only when the registry was completely EMPTY. That rule is correct
+  // on a real RS-485 bus, where the gateway cannot know what is out there and the sticky
+  // registry is all it has to go on. Here it was wrong, and the failure was silent: growing
+  // the wall from 15x3 to 15x5 left the registry holding the 45 modules it had loaded from
+  // FATFS, so it was not empty, so the 30 NEW modules were never asked to announce
+  // themselves. The Modules tab read "45 known modules" forever, the two new rows rendered
+  // as empty cells (a cell with no registry entry means "no module here"), and any client
+  // driving the wall from /api/flap/modules kept addressing only the first 45 -- so the
+  // panel really did keep showing a 15x3 picture on a 15x5 wall. The only way out was to
+  // press Identify All and know to do it.
+  //
+  // So rebuild whenever the registry disagrees with the wall. Rediscovery is nearly free
+  // here -- the modules are software and answer immediately -- and nothing durable is lost:
+  // every persisted field is derived, the serial being a deterministic function of the MAC
+  // and the cell index. It self-heals a dropped reply on the next boot for the same reason.
+  //
+  // Delayed briefly so the bus and the RX path here are fully up before we transmit.
   {
     vTaskDelay(pdMS_TO_TICKS(1500));
-    bool empty;
+    int known;
     if (sfMutex) xSemaphoreTake(sfMutex, portMAX_DELAY);
-    empty = (sfModuleCount == 0);
+    known = sfModuleCount;
     if (sfMutex) xSemaphoreGive(sfMutex);
-    if (empty) {
-      printf("[MOD] empty registry at boot -- broadcasting m*v to discover modules\n");
-      rs485SendStr("m*v\n");
+    if (known != vmCount) {
+      printf("[MOD] registry holds %d module(s) but the wall has %d -- rediscovering\n",
+             known, vmCount);
+      sfModulesClear();               // drop the stale wall, memory and FATFS alike
+      rs485SendStr("m*v\n");          // every cell reports version + serial
     }
   }
 

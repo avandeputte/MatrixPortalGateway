@@ -38,6 +38,10 @@ volatile bool gQuietTime = false;
 char gWallChars[256] = {0};
 // v3.0: last status the companion app reported, and when (millis). Runtime-only.
 char gCompanionStatus[80] = "";
+// The tab list the companion advertised, kept as ready-made JSON so the 4-second
+// dashboard poll can splice it into the response without re-serialising it. Empty
+// = this companion never advertised any, and the dashboard uses its built-in list.
+char gCompanionTabs[COMPANION_TABS_MAX] = "";
 volatile unsigned long gCompanionSeenMs = 0;
 volatile bool          gCompanionUrlDirty   = false;   // URL changed, not yet in flash
 volatile unsigned long gCompanionUrlDirtyMs = 0;       // millis() of the LAST change

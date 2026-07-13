@@ -140,7 +140,7 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define RTC_YEAR_OFFSET   2000
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "1.3.0"   // this product's version (UI + boot log)
+#define FW_VERSION           "1.4.0"   // this product's version (UI + boot log)
 // The gateway REST/MQTT surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it
@@ -340,6 +340,17 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define COMPANION_TMP        "/compset.tmp"
 #define COMPANION_MAX_BYTES  (64UL * 1024UL)
 
+/* ---- Companion tab advertisement (v1.4) --------------------------------------------
+   The two apps tell each other which tabs they have, so each nav can deep-link the
+   other's screens instead of hard-coding a list that goes stale. The companion POSTs
+   its `tabs` to /api/companion; the response always carries this firmware's `gwTabs`.
+   Either side may say nothing (an older peer), and the other then falls back to its
+   own built-in list. */
+#define COMPANION_TABS_MAX     384
+#define COMPANION_TABS_MAX_N   10    // max tabs accepted from a companion
+#define COMPANION_TAB_ID_MAX   24    // max chars of one tab's id (the URL hash)
+#define COMPANION_TAB_LBL_MAX  24    // max chars of one tab's label
+
 /* ==========================================================================*/
 #define DBG(...) do { if (gSerialDebug) printf(__VA_ARGS__); } while(0)
 
@@ -350,6 +361,7 @@ extern volatile bool gSerialDebug;
 extern volatile bool gMaintenanceMode;
 extern volatile bool gQuietTime;
 extern char gCompanionStatus[80];
+extern char gCompanionTabs[COMPANION_TABS_MAX];   // the companion's tabs, already serialised JSON
 extern volatile unsigned long gCompanionSeenMs;
 // The companion URL is persisted on a DEBOUNCE, not on every change. Two companions
 // pointed at the same gateway will each re-register their own URL on their heartbeat,

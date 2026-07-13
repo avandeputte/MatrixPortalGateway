@@ -31,6 +31,25 @@ tell the difference.
 
 ---
 
+## New in 1.4
+
+- **The registry now reconciles against the wall at boot.** Discovery only ran when the
+  registry was *completely empty*, so growing the wall (15×3 → 15×5) left it holding the 45
+  modules it had loaded from FATFS and never asked the 30 new ones to announce themselves.
+  The Modules tab read "45 known modules" forever, the new rows rendered as empty cells, and
+  any client driving the wall from `/api/flap/modules` kept addressing only the first 45 — so
+  the panel really did keep showing a 15×3 picture on a 15×5 wall. Pressing **Identify All**
+  was the only way out, and you had to know to do it. It now rebuilds whenever the registry
+  disagrees with the wall, in either direction.
+
+- **Companion tab advertisement — the whole feature was missing.** `/api/companion` accepted
+  the companion's `tabs` and *silently discarded them*, and never advertised the gateway's own
+  `gwTabs`. So neither app could link to the other's screens. Both directions now work. The
+  gateway advertises **Modules, Display, Monitor, Settings, Status** — deliberately *not*
+  Provision or Calibration, which the split-flap gateway has and this product cannot.
+
+---
+
 ## New in 1.3
 
 - **A 15 × 5 geometry preset for 128 × 64 panels — 75 modules, filling the wall.** The firmware

@@ -1149,6 +1149,48 @@ static void handleApiQuietSchedule() {
 // and heartbeats its running status. The URL is persisted (only rewritten to
 // NVS when it changes, to avoid flash wear from heartbeats); the status is
 // runtime-only. An empty url deregisters.
+/* The tabs THIS firmware has, advertised to the companion at registration so its nav can
+   deep-link exactly the screens that exist here, rather than a list hard-coded over there
+   that goes stale whenever this one changes.
+
+   Deliberately SHORTER than the split-flap gateway's list: this product has no Provision
+   and no Calibration tab, because its modules are drawn rather than driven and there is
+   nothing to calibrate. Advertising them would send the companion linking to panes that do
+   not exist. The id is the public one used in the URL hash ("status", not the pane id
+   "statusp"); keep it in step with the <nav> in ui/index.html and the M map beside it. */
+static const char* const GW_TAB_ID[]  = {"modules", "display", "monitor", "settings", "status"};
+static const char* const GW_TAB_LBL[] = {"Modules", "Display", "Monitor", "Settings", "Status"};
+static const size_t GW_TAB_N = sizeof(GW_TAB_ID) / sizeof(GW_TAB_ID[0]);
+
+// Store the tab list a companion advertised, re-serialised into gCompanionTabs.
+// Anything malformed, oversized, or over the caps leaves the buffer EMPTY rather than
+// half-filled: the dashboard then falls back to its built-in companion tabs, which is the
+// same behaviour as an older companion that advertises nothing.
+static void storeCompanionTabs(JsonArrayConst tabs) {
+  gCompanionTabs[0] = '\0';
+  if (tabs.isNull() || tabs.size() == 0 || tabs.size() > COMPANION_TABS_MAX_N) return;
+
+  JsonDocument out;
+  JsonArray arr = out.to<JsonArray>();
+  for (JsonObjectConst t : tabs) {
+    const char* id  = t["id"].is<const char*>()    ? t["id"].as<const char*>()    : nullptr;
+    const char* lbl = t["label"].is<const char*>() ? t["label"].as<const char*>() : nullptr;
+    if (!id || !lbl || !id[0] || !lbl[0]) return;
+    if (strlen(id) > COMPANION_TAB_ID_MAX || strlen(lbl) > COMPANION_TAB_LBL_MAX) return;
+    // The id lands in a URL hash and the label in the nav, so keep both to plain printable
+    // ASCII -- no quotes, no control characters, nothing to escape.
+    for (const char* p = id; *p; p++)
+      if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_') return;
+    for (const char* p = lbl; *p; p++)
+      if ((unsigned char)*p < 0x20 || (unsigned char)*p > 0x7e || *p == '"' || *p == '\\') return;
+    JsonObject e = arr.add<JsonObject>();
+    e["id"]    = id;
+    e["label"] = lbl;
+  }
+  if (measureJson(out) >= sizeof(gCompanionTabs)) return;   // would not fit: advertise nothing
+  serializeJson(out, gCompanionTabs, sizeof(gCompanionTabs));
+}
+
 static void handleApiCompanion() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   if (server.method() == HTTP_POST) {
@@ -1171,9 +1213,14 @@ static void handleApiCompanion() {
         gCompanionUrlDirtyMs = millis();   // restart the clock on EVERY change
         DBG("[CFG] Companion URL set to %s\n", cfg.companionUrl);
       }
-      if (url[0] == '\0') { gCompanionStatus[0] = '\0'; gCompanionSeenMs = 0; }  // deregister
-      else gCompanionSeenMs = millis();
+      if (url[0] == '\0') {                                                      // deregister
+        gCompanionStatus[0] = '\0'; gCompanionTabs[0] = '\0'; gCompanionSeenMs = 0;
+      } else gCompanionSeenMs = millis();
     }
+    // A companion that advertises its tabs re-sends them on every heartbeat, so this is a
+    // plain overwrite. One that never mentions `tabs` leaves whatever we hold alone -- a
+    // heartbeat carrying only a status must not wipe the list.
+    if (doc["tabs"].is<JsonArrayConst>()) storeCompanionTabs(doc["tabs"].as<JsonArrayConst>());
     if (doc["status"].is<const char*>()) {
       // Copy + sanitise so the string is always JSON-safe when echoed back.
       const char* st = doc["status"].as<const char*>();
@@ -1191,7 +1238,21 @@ static void handleApiCompanion() {
   JsonDocument out;
   out["url"]    = cfg.companionUrl;
   out["status"] = gCompanionStatus;
-  char buf[256];
+  // The companion's tabs, for THIS dashboard's nav. Already valid JSON (we wrote it with
+  // serializeJson), so splice it in verbatim rather than re-parsing it. An empty array
+  // means this companion never advertised any, and the dashboard uses its built-in list.
+  out["tabs"]   = serialized(gCompanionTabs[0] ? gCompanionTabs : "[]");
+  // ...and ours, for the COMPANION's nav.
+  JsonArray gw = out["gwTabs"].to<JsonArray>();
+  for (size_t i = 0; i < GW_TAB_N; i++) {
+    JsonObject e = gw.add<JsonObject>();
+    e["id"]    = GW_TAB_ID[i];
+    e["label"] = GW_TAB_LBL[i];
+  }
+  // Sized for the worst case: a full-size companion list (384) + our gwTabs (~230) + the
+  // URL (128) + the status (80) + keys. A String would heap-allocate on every heartbeat,
+  // and the dashboard polls this endpoint every 4 s.
+  char buf[COMPANION_TABS_MAX + 768];
   serializeJson(out, buf, sizeof(buf));
   server.send(200, "application/json", buf);
 }
