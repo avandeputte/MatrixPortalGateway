@@ -1,9 +1,19 @@
 openapi: 3.1.0
 info:
-  title: Split-Flap Gateway API
+  title: Matrix Portal Gateway API
   version: "3.1"
   description: |
-    REST API for the ESP32-S3 Split-Flap Gateway firmware (firmware v3.1).
+    REST API for the **Matrix Portal Gateway** firmware (this firmware: v1.1.0), running on an
+    Adafruit MatrixPortal ESP32-S3. It emulates a wall of split-flap modules on a HUB75 LED
+    matrix and speaks the Split-Flap Gateway's API, so existing clients work unchanged.
+
+    **The `version` above is the gateway API level (3.1), not this firmware's version.** That is
+    deliberate: the companion app gates its features on reading `>= 3.1` from `GET /api/config`,
+    so this firmware answers `3.1.0` there and reports its own `1.1.0` in `fwVersion`, next to
+    `product`. See ARCHITECTURE.md → "Firmware identity vs API level".
+
+    Endpoints for calibration and provisioning are absent by design — this product's modules are
+    *drawn*, not driven, so there is nothing to calibrate.
 
     **Base URL:** `http://<gateway-ip>` — replace with the gateway's IP
     (shown on the Status page), or use `http://192.168.4.1` when connected to
@@ -729,6 +739,63 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+
+  /lang/{code}:
+    get:
+      tags: [UI]
+      summary: One UI translation dictionary (gzipped JSON)
+      description: |
+        Serves the dashboard's translation dictionary for `code` — a JSON object mapping the
+        **English source text** to its translation, e.g. `{"Save Panel": "Panel speichern"}`.
+
+        The dictionaries are baked into the firmware image, one gzipped blob per language, and
+        the browser fetches only the one it is using. **English has no dictionary**: it is the
+        text already in the page, and the per-key fallback for every other language, so a
+        missing key degrades to English rather than breaking the page.
+
+        `Content-Encoding: gzip` is a *transfer* encoding here — the browser inflates the body
+        before `fetch().json()` ever sees it. (This is the opposite of
+        `/api/companion/settings`, where the gzip **is** the payload and the header is
+        deliberately not set.)
+
+        Only the languages this firmware actually ships are routed; any other code 404s.
+        `ETag` changes on every reflash, so a conditional GET normally costs a 304.
+
+        The gateway stores **no** language preference. The dashboard resolves it in the browser:
+        `?lang=` in the URL (a one-off view — not saved), then a Settings override in
+        `localStorage`, then `navigator.languages`, then English.
+      parameters:
+        - name: code
+          in: path
+          required: true
+          description: BCP-47 language tag, as advertised by the page's built-in language list.
+          schema:
+            type: string
+            enum: [en-GB, en-AU, fr, de, es, it, pt, pt-BR, nl, da, sv, nb, fi]
+          example: de
+      responses:
+        "200":
+          description: The dictionary. Body is gzip-compressed JSON.
+          headers:
+            Content-Encoding:
+              schema: { type: string, enum: [gzip] }
+            ETag:
+              schema: { type: string }
+            Cache-Control:
+              schema: { type: string, example: no-cache }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: { type: string }
+              example:
+                Save Panel: Panel speichern
+                Panel width (px): Panelbreite (px)
+                Module Wall: Modulwand
+        "304":
+          description: Not modified (the client's `If-None-Match` matches the current build)
+        "404":
+          description: This firmware does not ship that language (English is never routed)
 
   /api/config:
     get:

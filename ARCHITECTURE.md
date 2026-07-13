@@ -268,7 +268,8 @@ FATFS.
 
 Do **not** substitute a generic 8 MB table. The board manifest flashes `tinyuf2.bin` at
 `0x410000`, which lands inside `app1` on most of them, and losing tinyuf2 costs the
-double-tap-reset UF2 bootloader. The firmware currently uses 1.35 MB of the 2 MB app slot.
+double-tap-reset UF2 bootloader. The firmware currently uses **1.33 MB of the 2 MB app slot**
+(63%), of which the 13 UI translation dictionaries are 61 KB. There is room for many more.
 
 ## Firmware identity vs API level
 
@@ -280,3 +281,52 @@ local settings storage.
 This firmware's own version lives in `fwVersion`, alongside `product`. `FW_VERSION` and
 `API_VERSION` are separate macros in `common.h` for exactly this reason, and the comment there
 says so.
+
+v1.1 adds `GET /lang/<code>`, but `API_VERSION` deliberately stays at `3.1.0`. The language
+endpoint is a *dashboard* concern, not part of the contract the companion negotiates. Raising
+the API level to 3.5 to "match" the split-flap gateway would advertise calibration and
+provisioning endpoints this product does not have and cannot have — its modules are drawn, not
+driven.
+
+## Multi-language UI
+
+`src/web_ui.h` is **generated** from `ui/index.html` + `ui/strings/*.json` by
+`tools/build_ui.py`. The page is no longer edited as a C string; edit the HTML and regenerate.
+(`pio run` compiles the header, not the HTML, so a forgotten `build_ui.py` silently ships the
+old page. `--check` exists to assert freshness.)
+
+**Strings are keyed by their English text.** That is safe here because the UI has no homographs:
+every string that repeats means the same thing in each place. Keying by text means the markup
+needs no `data-i18n` tagging at all, so the static page is translated with zero edits to it.
+
+Two mechanisms, because neither covers both cases:
+
+- A **DOM walk + `MutationObserver`** translates text nodes. That covers the static page *and*
+  the markup the JS builds later (module cards, the flap wall, the status tiles) — the observer
+  sees them when they are inserted.
+- **`t("...")`** wraps messages the JS *composes* (`"Error: " + e`). A walk only ever sees the
+  finished string, which is not a key.
+
+The bus monitor (`#log`) is explicitly skipped by the walk. It renders protocol — the raw command
+text and the channel it arrived on — not chrome.
+
+Two traps are worth knowing about, because both fail *silently* (the string simply stays English
+and nothing reports it):
+
+- `is_key()` in `tools/i18n_extract.py` rejects a bare lowercase identifier-shaped word, because
+  in markup that shape is a CSS selector or an element id, not prose. So `t("panel")` can never
+  have a key. Composed messages therefore use labelled, capitalised or multi-word keys — which
+  also read better for a translator, who sees `Panel` as a label rather than a bare noun.
+- The catalog key is the **decoded** string. A source literal written `"Homing…"` is six
+  characters of escape in the file but one ellipsis at runtime, which is what `t()` is handed.
+  `js_unescape()` exists for exactly this.
+
+**No language state lives on the gateway** — no config field, no NVS write, no API. Resolution is
+the browser's: `?lang=` (a one-off view for the companion, deliberately not saved) → the Settings
+override in `localStorage` → `navigator.languages` → English. Dictionaries are gzipped into flash
+and served with `Content-Encoding: gzip`, which is *correct* here — those bytes are a transfer
+encoding of JSON the browser inflates. (Contrast `/api/companion/settings`, where the gzip **is**
+the payload and the header would be a lie.)
+
+English ships no dictionary. It is the text already in the page, and the per-key fallback for
+every other language, so a partial translation degrades to English instead of breaking.

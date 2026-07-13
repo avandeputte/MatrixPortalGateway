@@ -112,12 +112,18 @@
 #define RTC_YEAR_OFFSET   2000
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "1.0.1"   // this product's version (UI + boot log)
+#define FW_VERSION           "1.1.0"   // this product's version (UI + boot log)
 // The gateway REST/MQTT surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it
 // must answer 3.1.0 -- not FW_VERSION. GET /api/config also returns "product"
 // and "fwVersion" so a client can tell the two apart.
+//
+// v1.1 adds GET /lang/<code> (the UI's translation dictionaries), but that is a
+// DASHBOARD concern, not part of the contract the companion negotiates -- so this
+// stays 3.1.0. Raising it would advertise split-flap 3.5 endpoints (calibration,
+// provisioning) that this product does not have and cannot have: its modules are
+// drawn, not driven.
 #define API_VERSION          "3.1.0"
 #define PRODUCT_NAME         "Matrix Portal Gateway"
 
