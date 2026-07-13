@@ -32,6 +32,7 @@ static void handleApiCompanionSettingsPut();
 static void handleApiCompanionSettingsRaw();
 static void handleApiSend();
 static void handleApiSendBatch();
+static void handleApiDisplayCells();
 static void handleApiStatus();
 static void handleApiText();
 static void handleApiVersion();
@@ -226,6 +227,126 @@ static void handleApiSendBatch() {
   }
   char resp[48];
   snprintf(resp, sizeof(resp), "{\"ok\":true,\"sent\":%d}", sent);
+  server.send(200, "application/json", resp);
+}
+
+
+/* POST /api/display/cells  -- the index-addressed display API (v1.6)
+ *
+ * WHY THIS EXISTS. The legacy protocol sets a flap by CHARACTER: m<id>-<char>, one byte.
+ * Two things are therefore impossible on it, and no amount of care fixes either:
+ *
+ *   * LOWERCASE. The byte for 'r' already means RED -- the seven colour flaps are addressed
+ *     by r o y g b p w, by protocol. So a lowercase letter must fold to uppercase, or the
+ *     colours break. You cannot have both on one byte.
+ *   * PICTOGRAPHS. A heart has no Windows-1252 byte at all, so there is no byte to send.
+ *
+ * Both flaps EXIST on the reel (163..222 lowercase, 223..236 pictographs). They are simply
+ * unreachable by character. This endpoint addresses them by INDEX -- m<id>+<n> -- which the
+ * modules have always understood, and names colours explicitly instead of stealing letters
+ * for them. That is the whole design: a different way in, not a different reel.
+ *
+ * Body:
+ *   { "start": 0, "step_ms": 15, "cells": [ ... ] }
+ *
+ *   start     first module id the cells land on (default 0)
+ *   step_ms   0..30, paces the cascade (scheduled, never a delay() -- see the batch API)
+ *   cells     one entry per module, left to right. Each is exactly one of:
+ *               {"ch":"e"}        any character -- lowercase and accents kept as typed
+ *               {"ch":"♥"}   a pictograph, by character
+ *               {"color":"red"}   a colour flap, NAMED: red orange yellow green blue
+ *                                 purple white
+ *               {"blank":true}    home the module (flap 0)
+ *               {"skip":true}     leave that module alone
+ *
+ * A cell whose character has no flap is REJECTED, not silently blanked: a request that
+ * cannot be shown is a bug in the caller, and swallowing it would show a hole in a wall of
+ * text with nothing to explain it.
+ */
+static void handleApiDisplayCells() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
+  JsonDocument doc;
+  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
+    sendJsonError(400, "Bad JSON"); return;
+  }
+  JsonArray cells = doc["cells"].as<JsonArray>();
+  if (cells.isNull()) { sendJsonError(400, "'cells' array required"); return; }
+
+  int start = doc["start"] | 0;
+  if (start < 0 || start > 254) { sendJsonError(400, "'start' must be 0..254"); return; }
+  int step = doc["step_ms"] | 0;
+  if (step < 0)  step = 0;
+  if (step > 30) step = 30;
+
+  // Resolve EVERY cell before sending ANY of it. A half-written wall is worse than a
+  // rejected request: the caller cannot tell how far it got, and the wall is left showing
+  // a sentence that was never asked for.
+  static int16_t flap[VM_MAX_MODULES];      // -1 = skip
+  int n = 0;
+  for (JsonObjectConst c : cells) {
+    if (n >= VM_MAX_MODULES) break;
+    if (start + n > 254)     break;
+
+    if (c["skip"].is<bool>() && c["skip"].as<bool>())  { flap[n++] = -1; continue; }
+    if (c["blank"].is<bool>() && c["blank"].as<bool>()) { flap[n++] = 0;  continue; }
+
+    if (c["color"].is<const char*>()) {
+      int idx = reelColourIndex(c["color"].as<const char*>());
+      if (idx < 0) {
+        char e[96];
+        snprintf(e, sizeof(e), "cell %d: unknown color '%.16s' (red orange yellow green "
+                 "blue purple white)", n, c["color"].as<const char*>());
+        sendJsonError(400, e); return;
+      }
+      flap[n++] = (int16_t)idx;
+      continue;
+    }
+
+    if (c["ch"].is<const char*>()) {
+      const char* ch = c["ch"].as<const char*>();
+      uint32_t cp = 0;
+      if (!ch || !*ch || utf8Next(ch, &cp) == 0) {
+        char e[64]; snprintf(e, sizeof(e), "cell %d: 'ch' is not valid UTF-8", n);
+        sendJsonError(400, e); return;
+      }
+      int idx = vmFlapIndexOfCodepoint(cp);
+      if (idx < 0) {
+        char e[96];
+        snprintf(e, sizeof(e), "cell %d: no flap for U+%04X -- the reel cannot show it",
+                 n, (unsigned)cp);
+        sendJsonError(400, e); return;
+      }
+      flap[n++] = (int16_t)idx;
+      continue;
+    }
+
+    char e[80];
+    snprintf(e, sizeof(e), "cell %d: need one of ch, color, blank, skip", n);
+    sendJsonError(400, e); return;
+  }
+
+  { char cd[64]; snprintf(cd, sizeof(cd), "cells %d from id %d, step=%dms", n, start, step);
+    logCommand('R', cd); }
+
+  // Send by INDEX. This is the ordinary m<id>+<n> command -- the modules have understood it
+  // all along; it is only the gateway that never had a reason to speak it.
+  int sent = 0;
+  uint32_t due = millis();
+  for (int i = 0; i < n; i++) {
+    if (flap[i] < 0) continue;                       // skip: leave the module as it is
+    char f[16];
+    int len = snprintf(f, sizeof(f), "m%d+%d\n", start + i, (int)flap[i]);
+    if (step > 0 && rs485SendScheduled((const uint8_t*)f, (size_t)len, due)) {
+      due += (uint32_t)step;
+    } else {
+      rs485Send((const uint8_t*)f, (size_t)len, false);
+    }
+    sent++;
+    wdgWebMs = millis();
+  }
+  char resp[64];
+  snprintf(resp, sizeof(resp), "{\"ok\":true,\"cells\":%d,\"sent\":%d}", n, sent);
   server.send(200, "application/json", resp);
 }
 
@@ -1332,6 +1453,8 @@ void webInit() {
   server.on("/api/rs485/batch",      HTTP_OPTIONS, handleOptions);
   server.on("/api/flap/modules",     HTTP_GET,     handleApiModules);
   server.on("/api/display/state",    HTTP_GET,     handleApiDisplayState);
+  server.on("/api/display/cells",    HTTP_POST,    handleApiDisplayCells);
+  server.on("/api/display/cells",    HTTP_OPTIONS, handleOptions);
   server.on("/api/flap/identify",    HTTP_POST,    handleApiIdentify);
   server.on("/api/flap/identify",    HTTP_OPTIONS, handleOptions);
   server.on("/api/flap/char",        HTTP_POST,    handleApiChar);

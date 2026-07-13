@@ -35,9 +35,21 @@ static inline Ink fade(const uint8_t rgb[3], uint8_t pct) {
 
 // One flap face, snapshotted out from under vmMutex so the (slow) drawing loop
 // never holds the module lock.
-struct FaceSnap { char ch; int8_t colour; };           // colour < 0 => draw ch
+// One flap face. `glyph` is an index into the font's row table -- NOT a character byte:
+// the pictographs have no byte at all, which is the whole reason they exist here. `ink`
+// is the flap's own colour (a heart is red); {0,0,0} means "use the normal text ink".
+struct FaceSnap { int16_t glyph; int8_t colour; uint8_t ink[3]; };  // colour >= 0 => swatch
 struct CellSnap { FaceSnap cur, next; uint8_t phase; };
 static CellSnap snap[VM_MAX_MODULES];
+
+// Snapshot one flap: which glyph it draws, whether it is a colour swatch, and whether it
+// brings its own ink (the pictographs do -- a white heart is not a heart).
+static inline void snapFace(FaceSnap& f, int flap) {
+  f.colour = vmFlapIsColour(flap) ? (int8_t)(flap - VM_COLOUR_BASE) : -1;
+  f.glyph  = (int16_t)vmFlapGlyph(flap);
+  f.ink[0] = f.ink[1] = f.ink[2] = 0;
+  vmFlapInk(flap, f.ink);
+}
 
 // ---- file-private forward declarations ----
 static void drawCell(int col, int row, const CellSnap& c);
@@ -199,11 +211,11 @@ static void drawFace(int cx, int cy, const FaceSnap& f, Ink ink, int rowFrom, in
     if (a < b) panelFillRect(cx + padX, cy + a, fn.width, b - a, ink.r, ink.g, ink.b);
     return;
   }
-  // The reel now carries a real '"' flap, so the old q->" substitution that used to
-  // live here is gone: 'q' is resolved to the quote flap by vmFlapIndexOf, one layer
-  // down, and what arrives here is already the character the flap shows.
-  uint8_t gi = FONT1252_INDEX[(uint8_t)f.ch];
-  if (gi == 0xFF) return;                       // no glyph (blank flap)
+  // Draw by GLYPH INDEX. The flap already knows which glyph it carries -- reelGlyph()
+  // resolved that, and it is the only thing that knows a pictograph's bitmap lives past
+  // the CP1252 block rather than being reachable through FONT1252_INDEX.
+  if (f.glyph < 0) return;                      // no glyph: a blank flap
+  uint8_t gi = (uint8_t)f.glyph;
   int gx = cx + padX, gy = cy + padY;
   int wide = (fn.width < gPanel.cellW) ? fn.width : gPanel.cellW;
   for (int r = 0; r < fn.height; r++) {
@@ -258,12 +270,19 @@ static void drawGrid() {
     panelHLine(x0, y0 + r * gPanel.cellH - 1, wallW, k.r, k.g, k.b);
 }
 
+// A colour flap is its swatch; a pictograph is its own ink; everything else is the warm
+// split-flap white the letters are printed in.
+static inline Ink faceInk(const FaceSnap& f) {
+  if (f.colour >= 0)                      return fade(COLOUR_RGB[f.colour], 255);
+  if (f.ink[0] || f.ink[1] || f.ink[2])   return fade(f.ink, 255);
+  return fade(GLYPH_RGB, 255);
+}
+
 static void drawCell(int col, int row, const CellSnap& c) {
   int cx = gPanel.originX + col * gPanel.cellW;
   int cy = gPanel.originY + row * gPanel.cellH;
 
-  Ink cur = (c.cur.colour >= 0) ? fade(COLOUR_RGB[c.cur.colour], 255)
-                                : fade(GLYPH_RGB, 255);
+  Ink cur = faceInk(c.cur);
 
   // Settled: nothing but the face. A real flap shows no fold once it has landed.
   if (c.phase == 0) {
@@ -282,8 +301,7 @@ static void drawCell(int col, int row, const CellSnap& c) {
   if (seam < 1) seam = 1;
   if (seam > gPanel.cellH - 2) seam = gPanel.cellH - 2;
 
-  Ink nxt  = (c.next.colour >= 0) ? fade(COLOUR_RGB[c.next.colour], 255)
-                                  : fade(GLYPH_RGB, 255);
+  Ink nxt  = faceInk(c.next);
   Ink fold = fade(GLYPH_RGB, 150);
   drawFace(cx, cy, c.next, nxt, 0, seam);
   drawFace(cx, cy, c.cur,  cur, seam + 1, gPanel.cellH);
@@ -310,15 +328,9 @@ bool dispRender() {
     const VModule& m = vmods[i];
     int cur  = (m.curIndex >= 0 && m.curIndex < SF_MAX_FLAPS) ? m.curIndex : 0;
     int next = (cur + 1) % SF_MAX_FLAPS;
-    snap[i].phase       = m.flipPhase;
-    snap[i].cur.ch      = vmFlapCharAt(cur);
-    snap[i].cur.colour  = vmFlapIsColour(cur)  ? (int8_t)(cur  - VM_COLOUR_BASE) : -1;
-    snap[i].next.ch     = vmFlapCharAt(next);
-    snap[i].next.colour = vmFlapIsColour(next) ? (int8_t)(next - VM_COLOUR_BASE) : -1;
-    // The reel is fixed now, so a colour index can no longer be pushed past the palette
-    // by a reconfigured reel -- but the clamp costs nothing and the palette is only 7.
-    if (snap[i].cur.colour  >= SF_COLOUR_FLAPS) snap[i].cur.colour  = -1;
-    if (snap[i].next.colour >= SF_COLOUR_FLAPS) snap[i].next.colour = -1;
+    snap[i].phase = m.flipPhase;
+    snapFace(snap[i].cur,  cur);
+    snapFace(snap[i].next, next);
   }
   if (vmMutex) xSemaphoreGive(vmMutex);
 

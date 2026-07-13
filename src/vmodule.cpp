@@ -42,6 +42,11 @@ void vmBuildReel() {
 const char* vmReel()          { return sReel; }
 char vmFlapCharAt(int i)      { return reelCharAt(sReel, i); }
 int  vmFlapIndexOf(char c)    { return reelIndexOf(sReel, c); }
+int  vmFlapGlyph(int i)       { return reelGlyph(sReel, i); }
+bool vmFlapInk(int i, uint8_t rgb[3]) { return reelInk(i, rgb); }
+// The index-addressed path, for POST /api/display/cells: no folding, no colour-stealing,
+// and it reaches the lowercase and pictograph flaps the legacy protocol cannot name.
+int  vmFlapIndexOfCodepoint(uint32_t cp) { return reelIndexOfCodepoint(sReel, cp); }
 
 // A deterministic, obviously-fake serial number: 20 uppercase hex chars over
 // {0xFA, 0x5E, <the board's 6 MAC bytes>, <module index>, <crc8>}. It reads
@@ -392,11 +397,19 @@ size_t vmRenderReply(uint8_t mod, VmReplyKind kind, int32_t arg,
       // with <map> empty.
       n = snprintf(o, outSize, "m%dA:%d:%d:%s:%d:%d:%d:%d::%u:",
                    m.id, VM_FW_VERSION, m.id, m.sn, VM_HOME_OFFSET, VM_TOTAL_STEPS,
-                   m.autoHome ? 1 : 0, m.curIndex, SF_MAX_FLAPS);
-      // The reel is raw bytes, not a C string. Copy it verbatim; it is the final field,
-      // read to end-of-line. It is ~163 bytes, so the whole frame runs to ~225 -- well
-      // inside TX_MAX_BYTES, but the clamp below stays: never half-write a reel.
-      size_t cl = SF_MAX_FLAPS;
+                   m.autoHome ? 1 : 0, m.curIndex, SF_LEGACY_FLAPS);
+      // Report the LEGACY reel only -- the 163 flaps this protocol can actually name.
+      //
+      // It must stop there, and not merely as a matter of taste: the flaps past 163 are
+      // the lowercase letters and the pictographs, and a pictograph HAS NO BYTE. Copying
+      // the whole reel would splice fourteen NUL bytes into the middle of an ASCII frame
+      // and the parser at the other end would read a truncated string. The extra flaps are
+      // simply not part of this protocol; they are reachable by index, and a controller
+      // that wants them uses the index-addressed API.
+      //
+      // The 163 bytes bring the frame to ~225 -- well inside TX_MAX_BYTES. The clamp stays
+      // regardless: never half-write a reel.
+      size_t cl = SF_LEGACY_FLAPS;
       if (n + cl + 2 > outSize) cl = (outSize > n + 2) ? outSize - n - 2 : 0;
       memcpy(o + n, vmReel(), cl);
       n += cl;

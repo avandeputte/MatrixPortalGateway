@@ -5,17 +5,23 @@
 // identical. That tests the copy, not the code.)
 //
 // What it pins down:
-//   * the reel is 163 flaps -- 156 CP1252 glyphs + 7 colours -- and flap 0 is blank
-//   * the colour flaps are the LAST seven, and 'r' resolves to RED, never to a letter
+//   * the reel is 237 flaps -- 156 CP1252 glyphs, 7 colours, 60 lowercase, 14 pictographs
+//   * the LEGACY indices never moved, so an existing controller still works
+//   * on the legacy path 'r' resolves to RED and lowercase folds -- as it always has
+//   * on the INDEX path 'r' is the letter r, 'a' != 'A', and a heart has a flap
+//   * the colour flaps deliberately share a byte with 7 lowercase letters -- the exact
+//     ambiguity a one-byte protocol cannot resolve, and why there are two resolvers
 //   * lowercase folds to uppercase, INCLUDING every trap (y-diaeresis -> 0x9F, not eszett;
 //     the division sign is not a letter; eszett has no uppercase; oe/s-caron/z-caron)
 //   * EVERY printable Windows-1252 character resolves to a flap -- the whole point of the
 //     change, and the thing the old 64-flap reel could not do for 99 of them
 //   * 'q' still reaches the double-quote flap (splitflap-os's legacy alias)
 //   * no byte sits on two flaps, and every glyph flap is a valid flap byte
-//   * the 'A' reply -- which now carries all 163 flaps -- still fits TX_MAX_BYTES
+//   * the 'A' reply carries the 163 LEGACY flaps only, and is byte-clean (a pictograph
+//     has no byte: splicing one into an ASCII frame would truncate it at a NUL)
 //
-// Build:  c++ -std=c++17 -Isrc tools/reel_test.cpp src/charset.cpp -o /tmp/reel_test && /tmp/reel_test
+// Build:  c++ -std=c++17 -Isrc tools/reel_test.cpp src/charset.cpp src/font1252.cpp \
+//             -o /tmp/reel_test && /tmp/reel_test
 #include "reel.h"
 #include <cstdio>
 #include <cstring>
@@ -41,7 +47,7 @@ int main() {
 
   printf("shape:\n");
   cki(glyphs, SF_CHAR_FLAPS, "glyph flaps built");
-  cki(SF_MAX_FLAPS, 163, "total flaps (glyphs + colours)");
+  cki(SF_MAX_FLAPS, 237, "total flaps (156 glyph + 7 colour + 60 lower + 14 pictograph)");
   ck(reel[0] == ' ', "flap 0 is blank (the home position)");
   ck(memcmp(reel + VM_COLOUR_BASE, "roygbpw", 7) == 0,
      "the colour flaps are the LAST seven");
@@ -100,23 +106,92 @@ int main() {
      "E-acute, N-tilde, (c), degree  all resolve now");
 
   printf("\nintegrity:\n");
+  // Within a SECTION a byte must be unique, or a lookup would be ambiguous.
   int dupes = 0;
-  for (int i = 0; i < SF_MAX_FLAPS; i++)
-    for (int j = i + 1; j < SF_MAX_FLAPS; j++)
+  for (int i = 0; i < SF_CHAR_FLAPS; i++)
+    for (int j = i + 1; j < SF_CHAR_FLAPS; j++)
       if (reel[i] == reel[j]) dupes++;
-  cki(dupes, 0, "bytes sitting on two flaps");
+  cki(dupes, 0, "duplicate bytes inside the glyph section");
+  dupes = 0;
+  for (int i = 0; i < SF_LOWER_FLAPS; i++)
+    for (int j = i + 1; j < SF_LOWER_FLAPS; j++)
+      if (reel[SF_LOWER_BASE + i] == reel[SF_LOWER_BASE + j]) dupes++;
+  cki(dupes, 0, "duplicate bytes inside the lowercase section");
+
+  // ACROSS sections, one collision is deliberate and is the crux of the whole design: the
+  // seven colour flaps carry the SAME bytes as seven lowercase letters (r o y g b p w).
+  // That is the ambiguity a one-byte protocol cannot resolve, and the reason there are two
+  // resolvers. Assert it explicitly rather than pretending it is not there.
+  int collide = 0;
+  for (int c = 0; c < SF_COLOUR_FLAPS; c++)
+    for (int l = 0; l < SF_LOWER_FLAPS; l++)
+      if (reel[VM_COLOUR_BASE + c] == reel[SF_LOWER_BASE + l]) collide++;
+  cki(collide, SF_COLOUR_FLAPS,
+      "colour flaps DELIBERATELY share a byte with 7 lowercase letters");
+  ck(reelIndexOf(reel, 'r') != reelIndexOfCodepoint(reel, 'r'),
+     "...and the two resolvers send that byte to different flaps");
+
   int notflap = 0;
   for (int i = 0; i < SF_CHAR_FLAPS; i++)
     if (!isFlapByte((uint8_t)reel[i])) notflap++;
   cki(notflap, 0, "glyph flaps that are not valid flap bytes");
+  notflap = 0;
+  for (int i = 0; i < SF_LOWER_FLAPS; i++)
+    if (!isFlapByte((uint8_t)reel[SF_LOWER_BASE + i])) notflap++;
+  cki(notflap, 0, "lowercase flaps that are not valid flap bytes");
+  int withbyte = 0;
+  for (int i = 0; i < SF_EMOJI_FLAPS; i++)
+    if (reel[SF_EMOJI_BASE + i] != 0) withbyte++;
+  cki(withbyte, 0, "pictograph flaps carrying a byte (they must not -- there is none)");
+
+  printf("\nthe INDEX-ADDRESSED path -- everything the legacy protocol cannot do:\n");
+  // lowercase is a REAL flap here, not a fold
+  int lo_r = reelIndexOfCodepoint(reel, 'r');
+  ck(lo_r >= SF_LOWER_BASE && lo_r < SF_LOWER_BASE + SF_LOWER_FLAPS,
+     "'r' -> a real LOWERCASE flap, not the red swatch");
+  ck(lo_r != reelIndexOf(reel, 'r'), "...and NOT where the legacy path sends it");
+  ck(reelIndexOf(reel, 'r') == VM_COLOUR_BASE, "...while the legacy path still says RED");
+  ck(reelIndexOfCodepoint(reel, 'a') != reelIndexOfCodepoint(reel, 'A'),
+     "'a' and 'A' are different flaps (no folding here)");
+  ck(reelIndexOfCodepoint(reel, 0xE9) != reelIndexOfCodepoint(reel, 0xC9),
+     "e-acute and E-acute are different flaps");
+
+  printf("\npictographs -- no byte, so no legacy address at all:\n");
+  int heart = reelIndexOfCodepoint(reel, 0x2665);
+  ck(heart >= SF_EMOJI_BASE, "heart U+2665 resolves to a pictograph flap");
+  ck(reelIsEmoji(heart), "...and reelIsEmoji() agrees");
+  ck(cp1252FromUnicode(0x2665) < 0, "...while CP1252 has no byte for it, as expected");
+  ck(reelGlyph(reel, heart) >= FONT_EXTRA_BASE, "the heart draws a real font glyph");
+  uint8_t ink[3] = {0, 0, 0};
+  ck(reelInk(heart, ink) && ink[0] > 0x80 && ink[1] < 0x80,
+     "the heart brings its own RED ink");
+  ck(reelIndexOfCodepoint(reel, 0x1F600) < 0,
+     "an emoji we do NOT carry is rejected, not silently blanked");
+
+  printf("\ncolours by NAME (the legacy letters are letters here):\n");
+  cki(reelColourIndex("red"),   VM_COLOUR_BASE + 0, "\"red\"");
+  cki(reelColourIndex("white"), VM_COLOUR_BASE + 6, "\"white\"");
+  cki(reelColourIndex("mauve"), -1, "an unknown colour name is rejected");
+
+  printf("\nthe legacy indices did not move -- an old controller still works:\n");
+  cki(reelIndexOf(reel, ' '), 0,               "blank is still flap 0");
+  cki(reelIndexOf(reel, 'r'), VM_COLOUR_BASE,  "red is still the first colour flap");
+  ck(reelIndexOf(reel, 'A') < SF_CHAR_FLAPS,   "'A' is still in the glyph section");
+  cki(SF_LEGACY_FLAPS, 163, "the legacy reel is still 163 flaps");
+
+  printf("\nthe 'A' reply carries the LEGACY reel -- does it fit, and is it byte-clean?\n");
+  int nul = 0;
+  for (int i = 0; i < SF_LEGACY_FLAPS; i++) if (reel[i] == 0) nul++;
+  cki(nul, 0, "no NUL byte inside the 163 legacy flaps");
+  ck(reel[SF_EMOJI_BASE] == 0, "...while a pictograph flap HAS no byte (hence the cap)");
 
   printf("\nthe 'A' reply now carries the whole reel -- does it still fit the wire?\n");
   char frame[TX_MAX_BYTES + 1];
   int n = snprintf(frame, sizeof(frame), "m%dA:%d:%d:%s:%d:%d:%d:%d::%u:",
                    254, 31, 254, "FA5E4827E2205AC80010", 2832, 4096, 1, 162,
-                   (unsigned)SF_MAX_FLAPS);
-  memcpy(frame + n, reel, SF_MAX_FLAPS);
-  n += SF_MAX_FLAPS;
+                   (unsigned)SF_LEGACY_FLAPS);
+  memcpy(frame + n, reel, SF_LEGACY_FLAPS);
+  n += SF_LEGACY_FLAPS;
   frame[n++] = '\n';
   printf("        worst-case 'A' frame: %d bytes (TX_MAX_BYTES = %d)\n", n, TX_MAX_BYTES);
   ck(n < TX_MAX_BYTES, "the 'A' reply fits inside TX_MAX_BYTES");

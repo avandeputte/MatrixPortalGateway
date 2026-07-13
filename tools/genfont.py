@@ -55,6 +55,48 @@ CP1252_HIGH = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# The EXTRA glyphs: the pictographs the reel carries beyond Windows-1252.
+#
+# CP1252 has 256 slots and the split-flap wire protocol carries exactly one byte
+# per character, so a heart simply has nowhere to live in the legacy protocol.
+# These flaps are therefore reachable only by INDEX -- which is what the new
+# /api/display/cells endpoint uses, and why that endpoint exists at all.
+#
+# They are NOT hand-drawn. The vendored X11 "misc-fixed" BDFs already carry
+# thousands of glyphs, these among them, so they are generated from exactly the
+# same source as every letter. The one exception is the sun at 5x8, which that
+# face genuinely lacks -- see FALLBACK below.
+#
+# (codepoint, name, default ink)
+#   The ink is what the flap is drawn in when nothing overrides it. A heart that
+#   comes out white is not a heart. `null` means "use the normal text ink".
+EXTRA_GLYPHS = [
+    (0x2665, "heart",   (0xE0, 0x30, 0x40)),   # red
+    (0x2666, "diamond", (0xE0, 0x30, 0x40)),   # red -- it is a card suit
+    (0x2663, "club",    None),
+    (0x2660, "spade",   None),
+    (0x263A, "smiley",  (0xF0, 0xC0, 0x20)),   # yellow
+    (0x266A, "note",    None),
+    (0x25CF, "circle",  None),
+    (0x25A0, "square",  None),
+    (0x2302, "house",   None),
+    (0x2190, "left",    None),
+    (0x2191, "up",      None),
+    (0x2192, "right",   None),
+    (0x2193, "down",    None),
+    (0x2600, "sun",     (0xF0, 0xC0, 0x20)),   # yellow
+]
+
+# The only glyph any bundled face is missing. 5x8 has no U+2600, so it is drawn
+# here rather than dropping the sun on small panels. One byte per row, bit 7 =
+# leftmost column, 5 columns used.
+#         ..#..   #...#   .###.   #####   .###.   #...#   ..#..
+FALLBACK = {
+    ("5x8", 0x2600): [0x20, 0x88, 0x70, 0xF8, 0x70, 0x88, 0x20, 0x00],
+}
+
+
 def cp1252_printable():
     """The CP1252 bytes that carry a printable glyph, ascending.
 
@@ -176,8 +218,24 @@ def main():
         for _byte, cp in printable:
             data.extend(render(font_bb, glyphs[cp], bbw, bbh))
         validate(name, printable, index, bbw, bbh, data)
+        # ...then the extra pictographs, at glyph indices count..count+len(EXTRA)-1.
+        n_fb = 0
+        for cp, gname, _ink in EXTRA_GLYPHS:
+            if cp in glyphs:
+                data.extend(render(font_bb, glyphs[cp], bbw, bbh))
+            elif (name, cp) in FALLBACK:
+                rows = FALLBACK[(name, cp)]
+                if len(rows) != bbh:
+                    raise SystemExit(f"{name}: fallback for U+{cp:04X} is "
+                                     f"{len(rows)} rows, face is {bbh}")
+                data.extend(rows)
+                n_fb += 1
+            else:
+                raise SystemExit(f"{name}: no glyph for U+{cp:04X} ({gname}) and no "
+                                 f"FALLBACK -- add one, or drop it from EXTRA_GLYPHS")
         blobs.append((name, bbw, bbh, bbh + bbyoff, data))
-        print(f"  {name}: {count} glyphs, {bbw}x{bbh}, ascent {bbh + bbyoff}, "
+        print(f"  {name}: {count} glyphs + {len(EXTRA_GLYPHS)} extra "
+              f"({n_fb} hand-drawn), {bbw}x{bbh}, ascent {bbh + bbyoff}, "
               f"{len(data)} bytes", file=sys.stderr)
 
     with open(OUT_CPP, "w") as out:
@@ -203,16 +261,41 @@ const uint8_t FONT1252_INDEX[256] = {{
             out.write("  " + " ".join(f"0x{v:02X}," for v in index[r:r + 16]) + "\n")
         out.write("};\n")
 
+        total = count + len(EXTRA_GLYPHS)
         for name, w, h, ascent, data in blobs:
-            sym = name.replace("x", "x")
-            out.write(f"\nstatic const uint8_t F{sym}_ROWS[{count} * {h}] = {{\n")
+            sym = name
+            out.write(f"\nstatic const uint8_t F{sym}_ROWS[{total} * {h}] = {{\n")
             for gi in range(count):
                 byte = printable[gi][0]
                 rows = data[gi * h:(gi + 1) * h]
                 out.write("  " + " ".join(f"0x{v:02X}," for v in rows)
                           + f"  // 0x{byte:02X}\n")
+            out.write(f"  // --- the {len(EXTRA_GLYPHS)} extra pictographs "
+                      f"(glyph index {count}..{total - 1}) ---\n")
+            for k, (cp, gname, _ink) in enumerate(EXTRA_GLYPHS):
+                gi = count + k
+                rows = data[gi * h:(gi + 1) * h]
+                out.write("  " + " ".join(f"0x{v:02X}," for v in rows)
+                          + f"  // U+{cp:04X} {gname}\n")
             out.write("};\n")
             out.write(f"const Font1252 FONT_{sym} = {{ {w}, {h}, {ascent}, F{sym}_ROWS }};\n")
+
+        # The extras' identity, so reel.h can find a flap for a code point without
+        # a second copy of this list. THIS is the single source of truth.
+        out.write(f"\n// The extra pictographs, in glyph-index order from FONT_EXTRA_BASE.\n")
+        out.write(f"const uint32_t FONT_EXTRA_CP[FONT_EXTRA_COUNT] = {{\n")
+        for cp, gname, _ink in EXTRA_GLYPHS:
+            out.write(f"  0x{cp:04X},   // {gname}\n")
+        out.write("};\n")
+        out.write(f"const char* const FONT_EXTRA_NAME[FONT_EXTRA_COUNT] = {{\n")
+        out.write("  " + ", ".join(f'"{g}"' for _cp, g, _i in EXTRA_GLYPHS) + "\n};\n")
+        out.write("// Default ink. A heart that comes out white is not a heart.\n"
+                  "// {0,0,0} means \"use the normal text ink\".\n")
+        out.write(f"const uint8_t FONT_EXTRA_INK[FONT_EXTRA_COUNT][3] = {{\n")
+        for cp, gname, ink in EXTRA_GLYPHS:
+            r, g, b = ink if ink else (0, 0, 0)
+            out.write(f"  {{ 0x{r:02X}, 0x{g:02X}, 0x{b:02X} }},   // {gname}\n")
+        out.write("};\n")
 
         out.write(f"""
 // Largest-first, so font1252Best() returns the roomiest face that fits.

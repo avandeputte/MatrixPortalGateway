@@ -31,6 +31,20 @@ tell the difference.
 
 ---
 
+## New in 1.6
+
+- **Lowercase, and emoji.** The reel grows to **237 flaps**: the 156 Windows-1252 glyphs and
+  7 colours as before, plus the **60 lowercase letters** and **14 pictographs**
+  (♥ ♦ ♣ ♠ ☺ ♪ ● ■ ⌂ ← ↑ → ↓ ☀).
+- **A new endpoint to reach them: `POST /api/display/cells`.** The legacy protocol carries one
+  byte per character and *cannot* express either — the byte for `r` already means red, and a
+  heart has no byte at all. The new endpoint addresses flaps **by index** and names colours
+  explicitly. See [Two ways in](#two-ways-in-and-they-are-not-the-same).
+- **The legacy protocol is untouched.** `m5-r` is still red, `hello` still renders `HELLO`, and
+  the legacy flap indices never moved.
+
+---
+
 ## New in 1.5
 
 - **The reel carries every Windows-1252 character.** 64 flaps became **163** — 156 glyphs +
@@ -162,11 +176,16 @@ A physical reel has 64 leaves because it is a physical object. These modules are
 there is nothing to ration — the reel simply carries **one flap for every character**, and any
 Windows-1252 character you send has somewhere to land.
 
-| Index | Contents |
-|---|---|
-| `0` | blank (the home position) |
-| `0`–`155` | the CP1252 repertoire in code-point order, **minus the lowercase letters** |
-| `156`–`162` | the seven colour flaps: `r o y g b p w` |
+| Index | Contents | Reachable from |
+|---|---|---|
+| `0` | blank (the home position) | both |
+| `0`–`155` | the CP1252 repertoire in code-point order, **minus the lowercase letters** | both |
+| `156`–`162` | the seven colour flaps: `r o y g b p w` | both |
+| `163`–`222` | the 60 **lowercase** letters | index only |
+| `223`–`236` | 14 **pictographs**: ♥ ♦ ♣ ♠ ☺ ♪ ● ■ ⌂ ← ↑ → ↓ ☀ | index only |
+
+The legacy sections come **first** and keep the indices they have always had, so growing the
+reel can never move a flap an existing controller already addresses by number.
 
 ```
  !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`{|}~€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™›Ÿ
@@ -184,7 +203,55 @@ the reel grows a flap for it; it cannot drift from the font or from the folding 
 whole thing lives in `src/reel.h`, deliberately free of Arduino, so `tools/reel_test.cpp`
 compiles the *same* code rather than a copy of it.
 
-### No lowercase — and that is load-bearing
+### Two ways in, and they are not the same
+
+The legacy wire protocol carries **one byte** per character, and it has a problem it can never
+solve: **the byte for lowercase `r` already means red.** The seven colour flaps are addressed
+by `r o y g b p w` — that is the protocol, not a choice. So on that path lowercase *must* fold
+to uppercase, and a heart — which has no Windows-1252 byte at all — cannot be addressed by
+character in **any** way.
+
+That is not a limitation of this firmware. It is a limitation of a one-byte alphabet that
+spent seven of its letters on colours.
+
+So there are two resolvers, and the reel has flaps the old protocol simply cannot name:
+
+| | `m<id>-<char>` (legacy) | `POST /api/display/cells` |
+|---|---|---|
+| `r` | the **red** flap | the **letter** r |
+| `a` vs `A` | both → `A` (folded) | two different flaps |
+| `♥` | impossible — no byte exists | flap 223 |
+| colours | the letters `r o y g b p w` | named: `{"color":"red"}` |
+
+**The legacy protocol is untouched.** `m5-r` is still red, `hello` still renders `HELLO`, and
+every existing controller works exactly as it did. The new endpoint is a *different way in*,
+not a different reel:
+
+```jsonc
+POST /api/display/cells
+{
+  "start": 0,
+  "step_ms": 15,
+  "cells": [
+    {"ch": "H"}, {"ch": "e"}, {"ch": "l"}, {"ch": "l"}, {"ch": "o"},
+    {"ch": "♥"},              // a pictograph, drawn in its own red
+    {"color": "red"},         // a colour flap, NAMED — 'r' here would be the letter r
+    {"blank": true},          // home it
+    {"skip": true}            // leave that module alone
+  ]
+}
+```
+
+It sends `m<id>+<n>` — the index command the modules have understood all along. Every cell is
+resolved **before anything is sent**: a character the reel cannot show is a `400`, not a
+silent blank, because a half-written wall is worse than a rejected request.
+
+The pictographs come from the **bundled X11 fonts**, which already carry thousands of glyphs —
+not from hand-drawn bitmaps. The only exception is `☀` at 5×8, which that face genuinely
+lacks, so it is drawn by hand in `tools/genfont.py`. Each one can bring its own ink: a heart
+that comes out white is not a heart.
+
+### No lowercase *on the legacy path* — and that is load-bearing
 
 The reel is printed in capitals, like a real one, so **lowercase folds to uppercase**
 (`cp1252ToUpper`). That is not a stylistic choice. The seven colour flaps are addressed by the

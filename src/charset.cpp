@@ -23,7 +23,7 @@ static uint32_t cp1252ToUnicode(uint8_t b) {
 }
 
 // Map a Unicode code point to its CP1252 byte, or -1 if unrepresentable.
-static int unicodeToCp1252(uint32_t cp) {
+int cp1252FromUnicode(uint32_t cp) {
   if (cp >= 0x20 && cp <= 0x7E) return (int)cp;          // ASCII printable
   if (cp >= 0xA0 && cp <= 0xFF) return (int)cp;          // Latin-1 high range
   for (int i = 0; i < 32; i++)                           // the 0x80-0x9F extras
@@ -85,7 +85,7 @@ size_t utf8ToFlap(const char* in, char* out, size_t outSize, bool* allMapped) {
     if (!ok) { p++; mapped = false; continue; }          // truncated sequence
     p += n;
 
-    int fb = unicodeToCp1252(cp);
+    int fb = cp1252FromUnicode(cp);
     if (fb < 0 || !isFlapByte((uint8_t)fb)) { mapped = false; continue; }
     if (oi + 1 >= outSize)             { mapped = false; break; }   // no room left
     out[oi++] = (char)(uint8_t)fb;
@@ -135,4 +135,26 @@ size_t flapToJsonUtf8(const char* in, size_t inLen, char* out, size_t outSize, c
   }
   out[oi] = '\0';
   return oi;
+}
+
+
+// Decode ONE UTF-8 code point. The same state machine utf8ToFlap uses inline; hoisted so
+// the index-addressed display API can walk a string a character at a time without a second
+// (and inevitably different) copy of it.
+size_t utf8Next(const char* in, uint32_t* cpOut) {
+  const uint8_t* p = (const uint8_t*)in;
+  uint8_t b = p[0];
+  uint32_t cp;
+  int n;
+  if      (b < 0x80)           { cp = b;        n = 1; }
+  else if ((b & 0xE0) == 0xC0) { cp = b & 0x1F; n = 2; }
+  else if ((b & 0xF0) == 0xE0) { cp = b & 0x0F; n = 3; }
+  else if ((b & 0xF8) == 0xF0) { cp = b & 0x07; n = 4; }
+  else return 0;                                        // continuation byte or invalid lead
+  for (int k = 1; k < n; k++) {
+    if ((p[k] & 0xC0) != 0x80) return 0;                // truncated / not a continuation
+    cp = (cp << 6) | (p[k] & 0x3F);
+  }
+  if (cpOut) *cpOut = cp;
+  return (size_t)n;
 }

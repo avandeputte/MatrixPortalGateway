@@ -147,6 +147,13 @@ char vmFlapCharAt(int i);
 //   3. cp1252ToUpper(c), because the reel is printed in capitals like a real one;
 //   4. a scan of the 156 glyph flaps -- never the colours, which step 1 already owns.
 int  vmFlapIndexOf(char c);
+// The index-addressed resolver: a Unicode code point -> a flap, WITHOUT folding case and
+// WITHOUT treating r/o/y/g/b/p/w as colours. Reaches the lowercase and pictograph flaps.
+int  vmFlapIndexOfCodepoint(uint32_t cp);
+// The font glyph a flap draws, or -1 (a colour flap has no glyph).
+int  vmFlapGlyph(int i);
+// The flap's own ink, if it has one (the pictographs do). False => normal text ink.
+bool vmFlapInk(int i, uint8_t rgb[3]);
 // True when flap `i` is a colour swatch rather than a glyph.
 static inline bool vmFlapIsColour(int i) {
   return i >= VM_COLOUR_BASE && i < VM_COLOUR_BASE + SF_COLOUR_FLAPS;

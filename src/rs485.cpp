@@ -1,4 +1,5 @@
 #include "gateway.h"
+#include "vmodule.h"   // vmFlapCharAt: an index-addressed frame still has to track the wall
 
 
 
@@ -207,17 +208,29 @@ static void sfTrackFromFrame(const uint8_t* data, size_t len) {
       j++;
       if (idx >= SF_MAX_FLAPS) { idx = -1; break; }   // out of flap range -> unknown
     }
+    // The index-addressed API (POST /api/display/cells) drives the wall entirely through
+    // '+', so the display wall has to be tracked here too -- otherwise everything that API
+    // writes is invisible to the Live Preview and to /api/display/state, and only the panel
+    // itself would know what it is showing. Resolve the index back to its flap byte.
+    //
+    // A pictograph flap has NO byte (that is why it is index-addressed in the first place),
+    // so it tracks as 0 -- "present, character unknown" -- which the preview renders as '?'.
+    // The panel draws the heart correctly regardless; it is only the text mirror that has
+    // no way to say "heart" in a byte.
+    char fc = (idx >= 0) ? vmFlapCharAt((int)idx) : 0;
     if (xSemaphoreTake(sfMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
       if (addr < 0) {
         for (int k = 0; k < sfModuleCount; k++) {
           if (sfModules[k].provisioned) {
             sfModules[k].flapIndex = (int)idx;
-            sfModules[k].flapChar  = 0;
+            sfModules[k].flapChar  = fc;
           }
         }
+        memset(gWallChars, fc, sizeof(gWallChars));
       } else {
         SFModule* m = sfFindById((uint8_t)addr);
-        if (m) { m->flapIndex = (int)idx; m->flapChar = 0; }
+        if (m) { m->flapIndex = (int)idx; m->flapChar = fc; }
+        if (addr < (int)sizeof(gWallChars)) gWallChars[addr] = fc;
       }
       xSemaphoreGive(sfMutex);
     }

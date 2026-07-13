@@ -176,6 +176,100 @@ paths:
                     items: { type: [string, "null"] }
                     example: [" ","1","2",":","0","4","A","M",null,null]
 
+  /api/display/cells:
+    post:
+      tags: [Display]
+      summary: Set the wall by flap INDEX — lowercase, pictographs, named colours (v1.6)
+      description: |
+        The index-addressed display API. It exists because two things are **impossible** on
+        the legacy character protocol, and no amount of care fixes either:
+
+        * **Lowercase.** `m<id>-<char>` carries one byte, and the byte for `r` already means
+          **red** — the seven colour flaps are addressed by `r o y g b p w`, by protocol. So
+          on that path a lowercase letter must fold to uppercase, or the colours break. You
+          cannot have both on one byte.
+        * **Pictographs.** A heart has no Windows-1252 byte at all, so there is no byte to
+          send.
+
+        Both flaps *exist* on the reel (163–222 lowercase, 223–236 pictographs). They are
+        simply unreachable by character. This endpoint addresses them **by index** — the
+        ordinary `m<id>+<n>` command, which the modules have always understood — and names
+        colours explicitly instead of stealing letters for them.
+
+        The legacy endpoints are untouched and still work exactly as before.
+
+        Every cell is resolved **before anything is sent**. A character with no flap is a
+        `400`, not a silent blank: a half-written wall is worse than a rejected request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cells]
+              properties:
+                start:
+                  type: integer
+                  default: 0
+                  description: First module id the cells land on.
+                step_ms:
+                  type: integer
+                  default: 0
+                  description: >
+                    0–30 ms between cells, for a paced cascade. Scheduled, never a delay()
+                    — the request returns immediately.
+                cells:
+                  type: array
+                  description: One entry per module, left to right. Exactly one key each.
+                  items:
+                    type: object
+                    properties:
+                      ch:
+                        type: string
+                        description: >
+                          One character, UTF-8. Lowercase and accents are kept as typed.
+                          A pictograph goes here as itself.
+                      color:
+                        type: string
+                        enum: [red, orange, yellow, green, blue, purple, white]
+                        description: A colour flap, NAMED. On this path `r` is the letter r.
+                      blank:
+                        type: boolean
+                        description: Home the module (flap 0).
+                      skip:
+                        type: boolean
+                        description: Leave that module exactly as it is.
+            example:
+              start: 0
+              step_ms: 15
+              cells:
+                - { ch: "H" }
+                - { ch: "e" }
+                - { ch: "l" }
+                - { ch: "l" }
+                - { ch: "o" }
+                - { ch: "♥" }
+                - { color: "red" }
+                - { blank: true }
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:    { type: boolean, example: true }
+                  cells: { type: integer, example: 8 }
+                  sent:  { type: integer, example: 7, description: "cells actually transmitted (skips are not)" }
+        "400":
+          description: >
+            Bad request — including a character the reel cannot show
+            ("no flap for U+1F600") or an unknown colour name.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /api/flap/modules:
     get:
       tags: [Modules]

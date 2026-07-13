@@ -23,6 +23,23 @@
 #define FONT1252_GLYPHS 216   // printable CP1252 glyphs (see tools/genfont.py)
 #define FONT1252_COUNT    4   // bundled faces
 
+// The EXTRA pictographs, beyond Windows-1252: heart, smiley, arrows, card suits...
+// They live at glyph indices FONT_EXTRA_BASE .. +FONT_EXTRA_COUNT-1 in the same row
+// tables, so the renderer needs no second code path -- only a glyph index.
+//
+// They exist because the wire protocol carries ONE BYTE per character and CP1252 has
+// no heart. These flaps are reachable only by INDEX, which is exactly what the
+// /api/display/cells endpoint sends -- and the reason that endpoint exists.
+//
+// FONT_EXTRA_CP is the single source of truth for which pictographs exist: reel.h
+// derives its flap layout from it, rather than keeping a second list that could drift.
+#define FONT_EXTRA_COUNT 14
+#define FONT_EXTRA_BASE  FONT1252_GLYPHS
+
+extern const uint32_t    FONT_EXTRA_CP[FONT_EXTRA_COUNT];      // U+2665, ...
+extern const char* const FONT_EXTRA_NAME[FONT_EXTRA_COUNT];    // "heart", ...
+extern const uint8_t     FONT_EXTRA_INK[FONT_EXTRA_COUNT][3];  // {0,0,0} = normal ink
+
 // One bitmap face. `rows` is FONT1252_GLYPHS * height bytes, glyph-major; within
 // a glyph, one byte per row top-to-bottom, bit 7 = leftmost column. `ascent` is
 // the number of rows above the baseline -- the renderer only needs it to sit

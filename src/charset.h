@@ -65,6 +65,14 @@ bool isFlapByte(uint8_t b);
 bool    cp1252IsLower(uint8_t b);
 uint8_t cp1252ToUpper(uint8_t b);   // returns `b` unchanged if it is not a lowercase letter
 
+// Decode ONE UTF-8 code point from `in`. Returns the bytes consumed (1-4), or 0 if `in`
+// does not start a valid sequence. `*cp` receives the code point.
+size_t utf8Next(const char* in, uint32_t* cp);
+
+// The CP1252 byte for a Unicode code point, or -1 if it has none. A heart has none --
+// which is exactly why the pictograph flaps are reachable only by index.
+int cp1252FromUnicode(uint32_t cp);
+
 // Append the UTF-8 encoding of one flap byte to `out` (1-3 bytes, NOT
 // NUL-terminated); returns the number of bytes written. `out` must have room for
 // at least 3 bytes.
