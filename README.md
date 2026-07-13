@@ -31,6 +31,18 @@ tell the difference.
 
 ---
 
+## New in 1.3
+
+- **A 15 × 5 geometry preset for 128 × 64 panels — 75 modules, filling the wall.** The firmware
+  already supported it (`VM_MAX_MODULES` is 128, and the emulated bus's reply queue is sized for
+  a full 128-module wall); it simply was not offered. Every 128 × 64 preset was three rows tall,
+  which leaves two thirds of the panel as bezel. Pick it in Settings → *Geometry preset*.
+
+  A 64-row chain halves the refresh rate (~157 Hz → ~78 Hz) and doubles the framebuffer
+  (38 KB → 77 KB of internal DMA RAM). Both are within budget. See [The panel](#the-panel).
+
+---
+
 ## New in 1.2.1
 
 - **Every board now has its own identity.** The auto hostname, the MQTT client id and the
@@ -202,12 +214,26 @@ hold even the 5×8 face is quietly reduced, and the boot log says so.
 The default is a **15 × 3 wall on a 128 × 32 chain** — two 64×32 panels in series, or one
 native 128×32. Fifteen columns need 120 px, so this wall does not fit a 64-wide panel.
 
-| Panel | px per module | Font | Verdict |
-|---|---|---|---|
-| 64 × 32 | 4 × 10 | — | 15 columns don't fit; auto-reduced to 10 |
-| 64 × 64 | 4 × 21 | — | too narrow for 15 columns |
-| **128 × 32** | **8 × 10** | **6×9** | the default. Tight, every glyph legible |
-| **128 × 64** (2 × 64×64) | **8 × 21** | **6×13** | roomy, with real bezels |
+| Panel | Grid | px per module | Font | Verdict |
+|---|---|---|---|---|
+| 64 × 32 | 15 × 3 | 4 × 10 | — | 15 columns don't fit; auto-reduced to 10 |
+| 64 × 64 | 15 × 3 | 4 × 21 | — | too narrow for 15 columns |
+| **128 × 32** | **15 × 3** | **8 × 10** | **6×9** | the default. Tight, every glyph legible |
+| 128 × 64 | 16 × 3 | 8 × 21 | 6×13 | roomy, with real bezels — but three rows leave the wall looking sparse |
+| **128 × 64** | **15 × 5** | **8 × 12** | **6×10** | **75 modules — fills the panel. The one to pick for a 64-row chain.** |
+
+Settings → *Geometry preset* offers each of these; picking one fills the Panel and Module Wall
+cards and saves them. Power-cycle to apply (geometry is read once at boot).
+
+**A 64-row panel halves the refresh rate**, because the same pixel clock now has twice the rows
+to scan: ~157 Hz at 128 × 32 becomes **~78 Hz at 128 × 64**, and the framebuffer grows from 38 KB
+to 77 KB of internal DMA RAM. Both are within budget — `panelBegin()` refuses anything that would
+starve WiFi of internal SRAM (see [Known limitations](#known-limitations)) — but if you see
+flicker, drop `panelBitDepth` to 3, which buys back refresh at the cost of colour depth.
+
+The ceiling on the emulated wall is **`VM_MAX_MODULES` = 128** (`src/vmodule.h`), and the bus's
+reply queue is sized to match, so a 15 × 5 = 75-module wall has room to spare. A grid that
+exceeds the ceiling is quietly reduced, and the boot log says so.
 
 A 64-row panel needs the E address line, which is GPIO 21 on this board. A solder jumper on the
 MatrixPortal selects which HUB75 connector pin that reaches (pin 8 by default, or pin 16); match
@@ -236,7 +262,7 @@ Everything is on the Settings page and in `POST /api/config/settings`.
 
 | Setting | Default | Applies |
 |---|---|---|
-| `gridRows` × `gridCols` | 3 × 15 | **on reboot** — this creates and destroys modules |
+| `gridRows` × `gridCols` | 3 × 15 | **on reboot** — this creates and destroys modules (up to `VM_MAX_MODULES` = 128) |
 | `panelW` × `panelH` | 128 × 32 | **on reboot** — the panel driver takes geometry at init |
 | `panelBitDepth` | 4 | **on reboot** — 1…6; RAM and EMI scale with it |
 | `panelBright` | 160 | next frame |
