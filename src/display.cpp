@@ -224,10 +224,10 @@ static void drawFace(int cx, int cy, const FaceSnap& f, Ink ink, int rowFrom, in
   for (int r = 0; r < fn.height; r++) {
     int local = padY + r;
     if (local < rowFrom || local >= rowTo) continue;
-    uint8_t bits = font1252Row(fn, gi, (uint8_t)r);
+    uint16_t bits = font1252Row(fn, gi, (uint8_t)r);
     if (!bits) continue;
     for (int c = 0; c < wide; c++)
-      if (bits & (0x80 >> c)) panelPixel(gx + c, gy + r, ink.r, ink.g, ink.b);
+      if (bits & (0x8000 >> c)) panelPixel(gx + c, gy + r, ink.r, ink.g, ink.b);
   }
 }
 

@@ -31,6 +31,24 @@ tell the difference.
 
 ---
 
+## New in 1.8
+
+- **256 × 64 panels.** Verified on hardware: a 32 × 5 wall = **160 modules** at ~85 Hz.
+  `VM_MAX_MODULES` went 128 → 192, because a 256px chain at 8px cells is 32 columns and the
+  old ceiling would have *silently* shrunk it to 25 × 5. Must run at **colour depth 3** —
+  depth 4 is over the RAM budget and refused (and would flicker at 40 Hz anyway). The presets
+  carry the depth so you cannot pick a layout that gets refused.
+
+- **Three much bigger fonts: `10x20`, `9x18`, `8x13`.** A 15 × 3 wall on 256 × 64 gives
+  **17 × 21 px cells** — three times the area of a 128-wide chain's — and `6x13` floated in
+  them. The blocker was not the fonts: glyph rows were packed **one byte per row**, which
+  capped every face at **8 pixels wide**. Rows are 16-bit now. +32 KB flash, no RAM cost.
+
+- **`128 × 64 · 10×3` got better for free.** Its 12 × 21 cells were always big enough for a
+  10×20 face — there simply wasn't one. Now there is.
+
+---
+
 ## New in 1.7
 
 - **The Modules tab is gone.** It made sense on the RS-485 gateway, where modules are real
@@ -348,11 +366,23 @@ The module grid *is* the wall. Cell size falls out of it:
 cellW = panelW / gridCols          cellH = panelH / gridRows
 ```
 
-and the renderer then picks the roomiest bundled font that fits with a one-pixel seam. Four
-faces are bundled — `6x13`, `6x10`, `6x9` and `5x8` — all carrying the full 216-glyph CP1252
-set with real diacritics. (`5x7` and `4x6` are deliberately absent: at those sizes the source
-face has no room for accents and draws `À` identically to `A`, which on this reel is a
-correctness bug, not an aesthetic one. `tools/genfont.py` rejects any face that does this.)
+and the renderer then picks the roomiest bundled font that fits with a one-pixel seam. **Seven**
+faces are bundled — `10x20`, `9x18`, `8x13`, `6x13`, `6x10`, `6x9` and `5x8` — all carrying the
+full 216-glyph CP1252 set with real diacritics, plus the 14 pictographs. (`5x7` and `4x6` are
+deliberately absent: at those sizes the source face has no room for accents and draws `À`
+identically to `A`, which on this reel is a correctness bug, not an aesthetic one.
+`tools/genfont.py` rejects any face that does this.)
+
+The three big faces exist because a **256px-wide chain makes big cells possible**: a 15×3 wall
+on 256×64 is **17×21 px per module**, roughly three times the area of the 8×12 cells a 128-wide
+chain gives you — and `6x13` simply floats in that much room.
+
+They were not possible before v1.8, for a reason worth knowing: the glyph rows were packed
+**one byte per row**, which silently capped every face at **8 pixels wide**. That is the whole
+reason nothing bigger than `6x13` had ever been bundled — not a design choice, a packing limit.
+Rows are 16-bit now. (`render()` in `genfont.py` *raised* on a wider glyph rather than dropping
+its right-hand columns, so the limit never shipped as a silent corruption — it just quietly
+stopped anyone from trying.)
 
 Leftover pixels become an even margin, so the wall is centred. A grid whose cells could not
 hold even the 5×8 face is quietly reduced, and the boot log says so.
@@ -367,6 +397,15 @@ native 128×32. Fifteen columns need 120 px, so this wall does not fit a 64-wide
 | **128 × 32** | **15 × 3** | **8 × 10** | **6×9** | the default. Tight, every glyph legible |
 | 128 × 64 | 16 × 3 | 8 × 21 | 6×13 | roomy, with real bezels — but three rows leave the wall looking sparse |
 | **128 × 64** | **15 × 5** | **8 × 12** | **6×10** | **75 modules — fills the panel. The one to pick for a 64-row chain.** |
+| 128 × 64 | 10 × 3 | 12 × 21 | **10×20** | 30 big, detailed flaps |
+| **256 × 64** | **15 × 3** | **17 × 21** | **10×20** | **the biggest, most detailed flaps this firmware can draw.** Depth 3 |
+| 256 × 64 | 32 × 5 | 8 × 12 | 6×10 | 160 modules — a dense wall two panels wide. Depth 3 |
+
+**A 256px chain must run at colour depth 3.** At depth 4 the framebuffer needs 145 KB of
+internal DMA RAM, over the 120 KB budget, and `panelBegin()` refuses it (it logs exactly why
+and runs headless — you are never locked out). Depth 3 needs 102 KB and refreshes at **~85 Hz**,
+which is actually *better* than a 128 × 64 wall at depth 4 (79 Hz). The geometry presets carry
+the depth for you, so you cannot pick a layout that gets refused.
 
 Settings → *Geometry preset* offers each of these; picking one fills the Panel and Module Wall
 cards and saves them. Power-cycle to apply (geometry is read once at boot).
@@ -377,8 +416,8 @@ to 77 KB of internal DMA RAM. Both are within budget — `panelBegin()` refuses 
 starve WiFi of internal SRAM (see [Known limitations](#known-limitations)) — but if you see
 flicker, drop `panelBitDepth` to 3, which buys back refresh at the cost of colour depth.
 
-The ceiling on the emulated wall is **`VM_MAX_MODULES` = 128** (`src/vmodule.h`), and the bus's
-reply queue is sized to match, so a 15 × 5 = 75-module wall has room to spare. A grid that
+The ceiling on the emulated wall is **`VM_MAX_MODULES` = 192** (`src/vmodule.h`), and the bus's
+reply queue is sized to match, so a 32 × 5 = 160-module wall on a 256px chain still has room to spare. A grid that
 exceeds the ceiling is quietly reduced, and the boot log says so.
 
 ### If every colour is wrong
@@ -435,7 +474,7 @@ Everything is on the Settings page and in `POST /api/config/settings`.
 
 | Setting | Default | Applies |
 |---|---|---|
-| `gridRows` × `gridCols` | 3 × 15 | **on reboot** — this creates and destroys modules (up to `VM_MAX_MODULES` = 128) |
+| `gridRows` × `gridCols` | 3 × 15 | **on reboot** — this creates and destroys modules (up to `VM_MAX_MODULES` = 192) |
 | `panelW` × `panelH` | 128 × 32 | **on reboot** — the panel driver takes geometry at init |
 | `panelBitDepth` | 4 | **on reboot** — 1…6 RAM and EMI scale with it |
 | `panelBGR` | false | next frame — see [If every colour is wrong](#if-every-colour-is-wrong) |
@@ -586,7 +625,7 @@ tools/i18n_check.py    validates the dictionaries (stale keys, lost product name
 tools/i18n_context.py  builds CONTEXT.md
 tools/i18n_test.js     regression test for language resolution and t()
 tools/genfont.py    regenerates src/font1252.cpp from the vendored BDFs
-tools/bdf/          public-domain X11 "misc-fixed" fonts (6x13, 6x10, 6x9, 5x8)
+tools/bdf/          public-domain X11 "misc-fixed" fonts (10x20, 9x18, 8x13, 6x13, 6x10, 6x9, 5x8)
 tools/reel_test.cpp native regression test for the reel and the 'A' reply format
 
 platformio.ini      build/upload configuration

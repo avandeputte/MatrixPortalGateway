@@ -37,7 +37,10 @@ enum VmReplyKind : uint8_t {
   VR_ALL,       // m<id>A:... (combined dump, v31 flap-set tail)
 };
 
-#define VBUS_QUEUE_LEN     160   // a broadcast across a full 128-module wall + slack
+// A broadcast (m*v) makes EVERY module answer at once, so this must clear VM_MAX_MODULES
+// with room to spare -- otherwise a wall-wide identify silently drops the tail of its own
+// replies and the registry comes up short.
+#define VBUS_QUEUE_LEN     224   // a broadcast across a full 192-module wall + slack
 // Module think-time before an answer. Non-zero for one reason: rs485Send is still
 // inside its critical section when vbusDeliver runs, so a reply must not be
 // consumed before the command has finished being logged and tracked.

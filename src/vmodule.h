@@ -58,7 +58,14 @@
 
 #include "common.h"
 
-#define VM_MAX_MODULES   128   // ceiling on the emulated wall (grid rows x cols)
+// Ceiling on the emulated wall (grid rows x cols). 192 covers every layout a 256px-wide
+// chain can produce -- 32 columns of 8px cells x 6 rows -- with headroom. It is bounded
+// from above by the protocol (module ids are 0..254) and from below by what it costs: the
+// module array and the display snapshot are both INTERNAL RAM, the same pool the panel's
+// framebuffer and the WiFi stack are already fighting over. At 40 bytes a module that is
+// ~7.7 KB here, which is affordable; it was not when a module carried its own 64-byte flap
+// table (see v1.5).
+#define VM_MAX_MODULES   192
 #define VM_FW_VERSION    31    // module firmware version the emulation reports
 #define VM_SN_CHARS      20    // serial number length, uppercase hex
 

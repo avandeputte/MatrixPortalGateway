@@ -22,9 +22,11 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `.local` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
 | `0 entries` | Monitor tab (live REST/MQTT command log) | INLINE TEXT; RUNTIME MESSAGE (shown after an action, in clearLog()) |
 | `128×32 · 15×3 grid — standard (6×9 font)` | Settings tab | DROPDOWN OPTION |
-| `128×64 · 10×3 grid — large flaps (6×13 font)` | Settings tab | DROPDOWN OPTION |
+| `128×64 · 10×3 grid — large flaps (10×20 font)` | Settings tab | DROPDOWN OPTION |
 | `128×64 · 15×5 grid — full wall, 75 modules (6×10 font)` | Settings tab | DROPDOWN OPTION |
 | `128×64 · 16×3 grid — roomy (6×13 font)` | Settings tab | DROPDOWN OPTION |
+| `256×64 · 15×3 grid — big, detailed flaps (10×20 font, depth 3)` | Settings tab | DROPDOWN OPTION |
+| `256×64 · 32×5 grid — 160 modules, two panels wide (6×10 font, depth 3)` | Settings tab | DROPDOWN OPTION |
 | `64×32 · 10×3 grid — compact (5×8 font)` | Settings tab | DROPDOWN OPTION |
 | `AP IP` | Status tab (diagnostics) | TEXT |
 | `AP fallback:` | — | (built at runtime) |

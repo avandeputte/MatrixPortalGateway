@@ -21,7 +21,7 @@
 #include <stdint.h>
 
 #define FONT1252_GLYPHS 216   // printable CP1252 glyphs (see tools/genfont.py)
-#define FONT1252_COUNT    4   // bundled faces
+#define FONT1252_COUNT    7   // bundled faces: 10x20 9x18 8x13 6x13 6x10 6x9 5x8
 
 // The EXTRA pictographs, beyond Windows-1252: heart, smiley, arrows, card suits...
 // They live at glyph indices FONT_EXTRA_BASE .. +FONT_EXTRA_COUNT-1 in the same row
@@ -49,18 +49,24 @@ extern const int8_t      FONT_EXTRA_COLOUR[FONT_EXTRA_COUNT];
 // a glyph, one byte per row top-to-bottom, bit 7 = leftmost column. `ascent` is
 // the number of rows above the baseline -- the renderer only needs it to sit
 // accented capitals and descenders correctly inside a cell.
+// Rows are 16-BIT, bit 15 = leftmost column. One byte per row used to be enough, and it
+// silently capped every face at 8 pixels wide -- which is the real reason nothing bigger
+// than 6x13 was ever bundled, however much room a cell had.
 struct Font1252 {
-  uint8_t        width;
-  uint8_t        height;
-  uint8_t        ascent;
-  const uint8_t* rows;
+  uint8_t         width;
+  uint8_t         height;
+  uint8_t         ascent;
+  const uint16_t* rows;
 };
 
 // Bundled faces. 5x7 and 4x6 are deliberately absent: at those sizes the source
 // face has no room for diacritics and draws e.g. 'A-grave' identically to 'A',
 // which on a reel carrying the whole CP1252 set is a correctness bug, not just an
 // aesthetic one. tools/genfont.py rejects any face that does this.
-extern const Font1252 FONT_6x13;   // roomiest -- an 8x21 cell on a 128x64 panel
+extern const Font1252 FONT_10x20;  // the big cells a 256px-wide chain makes possible
+extern const Font1252 FONT_9x18;
+extern const Font1252 FONT_8x13;
+extern const Font1252 FONT_6x13;   // an 8x21 cell on a 128x64 panel
 extern const Font1252 FONT_6x10;
 extern const Font1252 FONT_6x9;    // the 8x10 cell of a 15x3 wall on a 128x32
 extern const Font1252 FONT_5x8;    // smallest face that still carries accents
@@ -82,8 +88,8 @@ extern const uint8_t FONT1252_INDEX[256];
 // out of date fails completely silently: it does not crash, it just erases.
 #define FONT1252_TOTAL (FONT1252_GLYPHS + FONT_EXTRA_COUNT)
 
-// Bitmap row `r` of glyph `gi` (bit 7 = leftmost pixel). Returns 0 out of range.
-static inline uint8_t font1252Row(const Font1252& f, uint8_t gi, uint8_t r) {
+// Bitmap row `r` of glyph `gi` (bit 15 = leftmost pixel). Returns 0 out of range.
+static inline uint16_t font1252Row(const Font1252& f, uint8_t gi, uint8_t r) {
   if (gi >= FONT1252_TOTAL || r >= f.height) return 0;
   return f.rows[(uint16_t)gi * f.height + r];
 }

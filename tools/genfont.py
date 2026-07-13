@@ -29,7 +29,11 @@ OUT_CPP = os.path.join(ROOT, "src", "font1252.cpp")
 # a reel showing the full CP1252 set would render A and A-grave the same. The
 # accent check in validate() enforces this -- do not add a face back without
 # running it.
-FONTS = ["6x13", "6x10", "6x9", "5x8"]
+# Largest first: font1252Best() returns the FIRST face that fits the cell, so the order
+# here is the preference order. 10x20 and 9x18 exist for the big cells a 256px-wide chain
+# makes possible (a 15x3 wall on 256x64 is 17x21 px per module -- three times the area of
+# the 8x12 cells a 128-wide chain gives you, and 6x13 simply floats in that much room).
+FONTS = ["10x20", "9x18", "8x13", "6x13", "6x10", "6x9", "5x8"]
 
 # (accented byte, base byte) pairs that must NOT rasterise identically. Covers a
 # grave, a diaeresis, a caron, a cedilla, an acute and a ring -- one per mark
@@ -101,9 +105,10 @@ EXTRA_GLYPHS = [
 # The only glyph any bundled face is missing. 5x8 has no U+2600, so it is drawn
 # here rather than dropping the sun on small panels. One byte per row, bit 7 =
 # leftmost column, 5 columns used.
+# Rows are 16-bit and left-aligned (bit 15 = leftmost column), like every other glyph.
 #         ..#..   #...#   .###.   #####   .###.   #...#   ..#..
 FALLBACK = {
-    ("5x8", 0x2600): [0x20, 0x88, 0x70, 0xF8, 0x70, 0x88, 0x20, 0x00],
+    ("5x8", 0x2600): [0x2000, 0x8800, 0x7000, 0xF800, 0x7000, 0x8800, 0x2000, 0x0000],
 }
 
 
@@ -151,7 +156,13 @@ def parse_bdf(path):
 def render(font_bb, glyph, width, height):
     """Rasterise one BDF glyph into a fixed `width` x `height` cell.
 
-    Returns `height` bytes, bit 7 = leftmost column. BDF puts the origin on the
+    Returns `height` 16-BIT rows, bit 15 = leftmost column. One byte per row used to be
+    enough, and it capped every face at 8 pixels wide -- which is why the biggest bundled
+    face was 6x13 no matter how much room a cell had. Sixteen bits admits 10x20 and 9x18.
+    (render() raised loudly on a wider glyph rather than dropping its right-hand columns,
+    which is the only reason that limit never shipped as a silent corruption.)
+
+    BDF puts the origin on the
     baseline with y growing upward, so a glyph's bitmap row j (0 = top) sits at
     y = byoff + bh - 1 - j. The cell's top row is ascent-1 above the baseline,
     hence cell row = ascent - byoff - bh + j.
@@ -162,8 +173,8 @@ def render(font_bb, glyph, width, height):
     if glyph is None:
         return rows
     bw, bh, bxoff, byoff, bits = glyph
-    if bw > 8:
-        raise SystemExit("glyph wider than 8px -- packing assumes one byte per row")
+    if bw > 16:
+        raise SystemExit("glyph wider than 16px -- packing assumes one uint16 per row")
     # Each BDF bitmap row is hex, padded up to a whole number of bytes.
     for j, hexrow in enumerate(bits):
         val = int(hexrow, 16)
@@ -176,7 +187,7 @@ def render(font_bb, glyph, width, height):
             if val & (1 << (nbits - 1 - i)):
                 c = bxoff + i - bbxoff
                 if 0 <= c < width:
-                    rows[r] |= 0x80 >> c
+                    rows[r] |= 0x8000 >> c
     return rows
 
 
@@ -187,7 +198,7 @@ def validate(name, printable, index, width, height, data):
         return data[gi * height:(gi + 1) * height]
 
     errs = []
-    spill = 0xFF >> width if width < 8 else 0  # bits to the right of the glyph box
+    spill = 0xFFFF >> width if width < 16 else 0  # bits to the right of the glyph box
     for gi in range(len(printable)):
         if any(r & spill for r in data[gi * height:(gi + 1) * height]):
             errs.append(f"glyph 0x{printable[gi][0]:02X} has ink past column {width - 1}")
@@ -259,7 +270,7 @@ def main():
 // Source: X11 "misc-fixed" bitmap fonts, ISO10646-1 -- "Public domain font.
 // Share and enjoy." The BDFs are vendored under tools/bdf/.
 //
-// Row packing: one byte per row, bit 7 = leftmost column.
+// Row packing: one uint16 per row, bit 15 = leftmost column. (One byte capped every face\n// at 8 pixels wide, which is why nothing bigger than 6x13 used to be possible.)
 
 #include "font1252.h"
 
@@ -274,18 +285,18 @@ const uint8_t FONT1252_INDEX[256] = {{
         total = count + len(EXTRA_GLYPHS)
         for name, w, h, ascent, data in blobs:
             sym = name
-            out.write(f"\nstatic const uint8_t F{sym}_ROWS[{total} * {h}] = {{\n")
+            out.write(f"\nstatic const uint16_t F{sym}_ROWS[{total} * {h}] = {{\n")
             for gi in range(count):
                 byte = printable[gi][0]
                 rows = data[gi * h:(gi + 1) * h]
-                out.write("  " + " ".join(f"0x{v:02X}," for v in rows)
+                out.write("  " + " ".join(f"0x{v:04X}," for v in rows)
                           + f"  // 0x{byte:02X}\n")
             out.write(f"  // --- the {len(EXTRA_GLYPHS)} extra pictographs "
                       f"(glyph index {count}..{total - 1}) ---\n")
             for k, (cp, gname, _col) in enumerate(EXTRA_GLYPHS):
                 gi = count + k
                 rows = data[gi * h:(gi + 1) * h]
-                out.write("  " + " ".join(f"0x{v:02X}," for v in rows)
+                out.write("  " + " ".join(f"0x{v:04X}," for v in rows)
                           + f"  // U+{cp:04X} {gname}\n")
             out.write("};\n")
             out.write(f"const Font1252 FONT_{sym} = {{ {w}, {h}, {ascent}, F{sym}_ROWS }};\n")
