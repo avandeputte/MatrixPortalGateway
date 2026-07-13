@@ -21,6 +21,15 @@ volatile bool gMaintenanceMode = false;
 // tracking is left unchanged
 // (it reflects the physically-shown flap). The latest requested display per
 // module is remembered so the reels can resync when Quiet Time turns off.
+//
+// The wall is BLANKED as Quiet Time is entered -- sfSetQuietTime() homes every reel
+// on the rising edge, and it must do so BEFORE raising this flag, because the
+// suppression above would otherwise swallow the very home frame that blanks the
+// wall. What each module was showing is snapshotted first, so the falling-edge
+// resync puts the wall back. The reels are virtual here, but the frame is real: it
+// goes out as m*h through rs485Send -> vbus -> vmodule, so the panel visibly flips
+// down to blank.
+//
 // Runtime-only -- OFF at boot, never persisted -- like maintenance mode.
 volatile bool gQuietTime = false;
 // Last flap byte transmitted to each module id (= grid cell). Drives the display

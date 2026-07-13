@@ -31,6 +31,16 @@ tell the difference.
 
 ---
 
+## New in 1.2
+
+- **Quiet Time now blanks the wall.** Turning it on homes every reel to its blank flap — the
+  same operation as **Home All** — so the panel goes empty for the night instead of freezing
+  mid-message. Turning it off restores what was there. The reels are virtual, but the frame is
+  real: the blank goes out as a broadcast `m*h` through the emulated bus, so the flaps visibly
+  flip down on the panel exactly as physical modules would.
+
+---
+
 ## New in 1.1
 
 - **The dashboard speaks 13 languages**, following your browser the same way light/dark already

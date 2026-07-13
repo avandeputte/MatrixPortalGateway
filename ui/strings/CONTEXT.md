@@ -33,7 +33,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Auto` | Settings tab | EMPHASIS |
 | `Auto (browser)` | — | RUNTIME MESSAGE (shown after an action, in go()) |
 | `Auto-scroll` | — | (built at runtime) |
-| `Automatically enable Quiet Time on a daily schedule. During the window the gateway stops moving flaps for normal display updates and resyncs when it ends. Times are in your browser's local time zone.` | Settings tab | HELP TEXT (a full sentence) |
+| `Automatically enable Quiet Time on a daily schedule. When the window opens the gateway blanks the display and stops moving flaps for normal updates. The display is restored when the window ends. Times are in your browser's local time zone.` | Settings tab | HELP TEXT (a full sentence) |
 | `Azores (UTC-1/0)` | Settings tab | DROPDOWN OPTION |
 | `Bangkok (UTC+7 no DST)` | Settings tab | DROPDOWN OPTION |
 | `Brightness (1-255)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
@@ -163,6 +163,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Power-cycle the gateway to apply.` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()) |
 | `Protects ArduinoOTA (IDE/command-line) uploads. The web updater above is always accessible.` | Settings tab | HELP TEXT (a full sentence) |
 | `Pub: .../rx   .../tx   .../status   .../flap/adv   .../flap/ack` | — | (built at runtime) |
+| `QUIET TIME - the display is blanked and flaps will not move. It is restored when Quiet Time ends (calibration still works)` | — | TEXT |
 | `Quiet Time Schedule` | Settings tab | HEADING (card title -- a noun phrase) |
 | `Raw — send verbatim, skip sanitizing & framing (debug)` | — | (built at runtime) |
 | `Read from module` | — | RUNTIME MESSAGE (shown after an action, in fetchInfo()) |
