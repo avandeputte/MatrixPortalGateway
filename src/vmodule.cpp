@@ -18,65 +18,30 @@
 
 // ---- file-private forward declarations ----
 static void   vmApplyDefaults(VModule& m);
-static void   vmBuildDefaultReel(char* out, uint8_t* lenOut);
 static void   vmMakeSerial(int index, char* out);
-static void   vmSetFlapConfig(VModule& m, int count, const char* chars, int charsLen);
 static void   vmSetTarget(VModule& m, int idx);
 
-const char VM_COLOUR_CHARS[SF_COLOUR_FLAPS + 1] = "roygbpw";
-
-/* The reel: a GERMAN reel. 64 flaps, because the flap COUNT is protocol -- splitflap-os
-   rejects any flapCount outside 1..64 (server/app.py) and we do not get to change it.
-   Within those 64 the CONTENT is ours, and this one trades five characters the original
-   reel spent on symbols ($ ( ) + %) for the five Germany actually needs:
-
-       A-Z  A umlaut, O umlaut, U umlaut, eszett  0-9  ! @ # & EUR - = ; q : ' . , / ? *
-
-   Stored as CP1252 BYTES, not UTF-8. This file is UTF-8, so the glyphs must be written
-   as hex escapes or each would encode as two bytes and the reel would be the wrong
-   length. The literal is split around \xDF and \x80 because a hex escape swallows every
-   following hex digit -- "\xDF0" is one (overflowing) escape, not eszett then zero.
-
-       \xC4 = A umlaut   \xD6 = O umlaut   \xDC = U umlaut
-       \xDF = eszett     \x80 = euro sign
-
-   Two positions are not what they look like:
-     * 'q' (index 49) is the DOUBLE-QUOTE flap. The reel has no lowercase, and the
-       firmware's char map has always addressed the " flap as 'q'; splitflap-os rewrites
-       '"' -> 'q' before sending for exactly this reason. drawFace() renders it back as
-       '"' so the wall shows a quote, not a q.
-     * 'roygbpw' (57..63) are the colour flaps, not letters -- and they must stay the
-       LAST seven, because VM_COLOUR_BASE is defined as SF_MAX_FLAPS - SF_COLOUR_FLAPS.
-       They are the only lowercase on the reel besides 'q', which is what keeps
-       vmFlapIndexOf's first-match scan honest: 'r' can only be red, never 'R'.
-
-   NOTE: this reel is no longer byte-identical to splitflap-os's DEFAULT_FLAP_CHARS.
-   Text still displays correctly, because splitflap-os addresses flaps BY CHARACTER
-   ('-'), never by index -- every character it can send that also exists here resolves
-   normally. What it cannot do is send the umlauts or the euro: its own map lacks them,
-   and its transport encodes frames as UTF-8 anyway. Those glyphs are reachable from the
-   gateway's own web UI / REST / MQTT (which decode UTF-8 via utf8ToFlap). The five
-   dropped symbols ($ ( ) + %) simply no longer resolve if splitflap-os sends them. */
-static const char VM_DEFAULT_REEL[] =
-  " ABCDEFGHIJKLMNOPQRSTUVWXYZ"   // blank + the 26 letters
-  "\xC4\xD6\xDC\xDF"              // A umlaut, O umlaut, U umlaut, eszett
-  "0123456789!@#&"
-  "\x80"                          // euro sign
-  "-=;q:'.,/?*"
-  "roygbpw";                      // the seven colour flaps -- must stay last
-
-// -1 for the NUL: sizeof() on a string literal counts it.
-static_assert(sizeof(VM_DEFAULT_REEL) - 1 == SF_MAX_FLAPS,
-              "VM_DEFAULT_REEL must be exactly SF_MAX_FLAPS (64) flaps");
 
 /* ----------------------------------------------------------
    Reel, identity, defaults
 ---------------------------------------------------------- */
 
-static void vmBuildDefaultReel(char* out, uint8_t* lenOut) {
-  memcpy(out, VM_DEFAULT_REEL, SF_MAX_FLAPS);
-  *lenOut = (uint8_t)SF_MAX_FLAPS;
+/* The reel lives in reel.h -- Arduino-free, so the native test compiles the same code.
+   These are the thin bindings the rest of the firmware calls. */
+static char sReel[SF_MAX_FLAPS];
+
+void vmBuildReel() {
+  int n = reelBuild(sReel);
+  // If this fires, the CP1252 repertoire or the folding rule moved and SF_MAX_FLAPS is now
+  // a lie. Shout: a reel with the wrong glyph count puts the colour flaps at the wrong
+  // index, and every colour on the wall would be silently wrong.
+  if (n != SF_CHAR_FLAPS)
+    printf("[VM] FATAL: reel has %d glyph flaps, expected %d\n", n, SF_CHAR_FLAPS);
 }
+
+const char* vmReel()          { return sReel; }
+char vmFlapCharAt(int i)      { return reelCharAt(sReel, i); }
+int  vmFlapIndexOf(char c)    { return reelIndexOf(sReel, c); }
 
 // A deterministic, obviously-fake serial number: 20 uppercase hex chars over
 // {0xFA, 0x5E, <the board's 6 MAC bytes>, <module index>, <crc8>}. It reads
@@ -100,24 +65,10 @@ static void vmMakeSerial(int index, char* out) {
 }
 
 static void vmApplyDefaults(VModule& m) {
-  m.autoHome        = true;
-  m.flapCharsCustom = false;
-  m.colourBase      = VM_COLOUR_BASE;
-  m.colourCount     = SF_COLOUR_FLAPS;
-  vmBuildDefaultReel(m.flapChars, &m.flapCharsLen);
-  m.flapCount = m.flapCharsLen;
+  m.autoHome = true;      // the reel is shared now: there is nothing else to default
 }
 
-char vmFlapCharAt(const VModule& m, int i) {
-  if (i < 0 || i >= m.flapCharsLen) return 0;
-  return m.flapChars[i];
-}
 
-int vmFlapIndexOf(const VModule& m, char c) {
-  for (int i = 0; i < m.flapCharsLen; i++)
-    if (m.flapChars[i] == c) return (i < m.flapCount) ? i : -1;
-  return -1;
-}
 
 /* ----------------------------------------------------------
    The flip
@@ -130,11 +81,11 @@ int vmFlapIndexOf(const VModule& m, char c) {
 ---------------------------------------------------------- */
 
 static void vmSetTarget(VModule& m, int idx) {
-  if (idx < 0 || idx >= m.flapCount) return;      // out of range: ignored, as in fw
+  if (idx < 0 || idx >= SF_MAX_FLAPS) return;     // out of range: ignored, as in fw
   if (idx == m.curIndex) { m.target = -1; m.flipPhase = 0; return; }
-  int dist = (idx - m.curIndex + m.flapCount) % m.flapCount;
+  int dist = (idx - m.curIndex + SF_MAX_FLAPS) % SF_MAX_FLAPS;
   int cap  = cfg.flapMax ? cfg.flapMax : DEFAULT_FLAP_MAX;
-  if (dist > cap) m.curIndex = (int16_t)((idx - cap + m.flapCount) % m.flapCount);
+  if (dist > cap) m.curIndex = (int16_t)((idx - cap + SF_MAX_FLAPS) % SF_MAX_FLAPS);
   m.target     = (int16_t)idx;
   m.flipPhase  = 0;
   m.nextStepMs = millis();
@@ -159,7 +110,7 @@ bool vmTick(uint32_t now) {
       m.flipPhase  = 1;
       m.nextStepMs = now + half;
     } else {
-      m.curIndex   = (int16_t)((m.curIndex + 1) % m.flapCount);
+      m.curIndex   = (int16_t)((m.curIndex + 1) % SF_MAX_FLAPS);
       m.flipPhase  = 0;
       m.nextStepMs = now + half;
       if (m.curIndex == m.target) m.target = -1;          // arrived
@@ -179,14 +130,8 @@ struct PersistedVModule {
   bool     provisioned;
   char     sn[VM_SN_CHARS + 1];
   bool     autoHome;
-  bool     flapCharsCustom;
-  uint8_t  flapCount;
-  uint8_t  flapCharsLen;
-  uint8_t  colourBase;
-  uint8_t  colourCount;
   uint8_t  bootCount;
   int16_t  curIndex;
-  char     flapChars[SF_MAX_FLAPS];
 };
 
 struct VModulesFileHeader { unsigned long magic; int count; };
@@ -209,11 +154,8 @@ void vmSave() {
     memset(&rec, 0, sizeof(rec));
     rec.id = m.id; rec.provisioned = m.provisioned;
     strlcpy(rec.sn, m.sn, sizeof(rec.sn));
-    rec.autoHome = m.autoHome; rec.flapCharsCustom = m.flapCharsCustom;
-    rec.flapCount = m.flapCount; rec.flapCharsLen = m.flapCharsLen;
-    rec.colourBase = m.colourBase; rec.colourCount = m.colourCount;
+    rec.autoHome = m.autoHome;
     rec.bootCount = m.bootCount; rec.curIndex = m.curIndex;
-    memcpy(rec.flapChars, m.flapChars, SF_MAX_FLAPS);
     vmods[i].dirty = false;
     if (vmMutex) xSemaphoreGive(vmMutex);
     f.write((const uint8_t*)&rec, sizeof(rec));
@@ -248,26 +190,13 @@ void vmLoad() {
     strlcpy(m.sn, rec.sn, sizeof(m.sn));
     m.bootCount = rec.bootCount;
 
-    if (rec.flapCharsCustom) {
-      // A reel this module was GIVEN, by an 'N' command. It is the module's own
-      // state, so restore it verbatim.
-      m.flapCharsCustom = true;
-      m.flapCount    = (rec.flapCount >= 1 && rec.flapCount <= SF_MAX_FLAPS) ? rec.flapCount : SF_MAX_FLAPS;
-      m.flapCharsLen = (rec.flapCharsLen <= SF_MAX_FLAPS) ? rec.flapCharsLen : SF_MAX_FLAPS;
-      m.colourBase   = rec.colourBase;
-      m.colourCount  = rec.colourCount;
-      memcpy(m.flapChars, rec.flapChars, SF_MAX_FLAPS);
-    } else {
-      // The compile-time DEFAULT reel. Rebuild it -- do not restore the copy sitting
-      // in flash. If the firmware's default reel has changed (new glyphs, new order),
-      // that copy is stale, and restoring it would silently resurrect the OLD reel on
-      // every already-provisioned board: the new default would appear to have no
-      // effect at all. VMODULES_MAGIC cannot catch this, because SF_MAX_FLAPS is
-      // unchanged and the record layout still matches byte for byte.
-      vmApplyDefaults(m);           // reel, flapCount, colourBase/colourCount
-    }
-    m.autoHome = rec.autoHome;      // module state either way (vmApplyDefaults forces true)
-    m.curIndex = (rec.curIndex >= 0 && rec.curIndex < m.flapCount) ? rec.curIndex : 0;
+    // No reel to restore: it is shared, complete and rebuilt at boot. The old file
+    // carried a per-module copy, which was its own hazard -- a firmware whose default
+    // reel had changed would silently resurrect the OLD one on every provisioned board.
+    // That whole class of bug is gone with the field. (VMODULES_MAGIC is bumped, so a
+    // file from a build that still had it is discarded rather than misread.)
+    m.autoHome = rec.autoHome;
+    m.curIndex = (rec.curIndex >= 0 && rec.curIndex < SF_MAX_FLAPS) ? rec.curIndex : 0;
     loaded++;
   }
   f.close();
@@ -321,35 +250,16 @@ void vmInit(int count) {
     // autoHome decides only what a *mechanical* module does at boot. These have no
     // position to lose, so the flag is stored and reported but never acted on: the
     // reel comes up showing whatever it showed before.
-    if (m.curIndex < 0 || m.curIndex >= m.flapCount) m.curIndex = 0;
+    if (m.curIndex < 0 || m.curIndex >= SF_MAX_FLAPS) m.curIndex = 0;
   }
   vmDirty = true;   // persist the bumped boot counters
-  printf("[VM] %d virtual modules, %d flaps each, sn %s..\n",
-         vmCount, vmods[0].flapCount, vmods[0].sn);
+  printf("[VM] %d virtual modules, %d flaps each (%d glyphs + %d colours), sn %s..\n",
+         vmCount, SF_MAX_FLAPS, SF_CHAR_FLAPS, SF_COLOUR_FLAPS, vmods[0].sn);
 }
 
 /* ----------------------------------------------------------
    Command dispatch
 ---------------------------------------------------------- */
-
-// 'N' -- set the flap count and/or the character set. Both parts are optional and
-// independent: count < 1 leaves the count alone, charsLen < 1 leaves the set.
-static void vmSetFlapConfig(VModule& m, int count, const char* chars, int charsLen) {
-  bool changed = false;
-  if (count >= 1 && count <= SF_MAX_FLAPS) { m.flapCount = (uint8_t)count; changed = true; }
-  if (chars && charsLen > 0) {
-    if (charsLen > SF_MAX_FLAPS) charsLen = SF_MAX_FLAPS;
-    memcpy(m.flapChars, chars, charsLen);
-    m.flapCharsLen    = (uint8_t)charsLen;
-    m.flapCharsCustom = true;
-    changed = true;
-  }
-  if (!changed) return;
-  // The reel may have shrunk out from under the flap on show.
-  if (m.curIndex >= m.flapCount) m.curIndex = 0;
-  if (m.target   >= m.flapCount) m.target   = -1;
-  m.dirty = true; vmDirty = true;
-}
 
 // By-serial frames: "mX<letter><serial>[...]". Every module inspects them and only
 // the one whose serial matches acts.
@@ -367,13 +277,7 @@ static void vmDispatchBySerial(const char* p, size_t len, uint32_t now) {
     const char* rest = sn + VM_SN_CHARS;             // ':' + payload, or ""
     switch (cmd) {
       case 'A': vbusQueue((uint8_t)i, VR_ALL, 0, now + VBUS_REPLY_MS); return;
-      case 'N': {                                    // mXN<sn>:<count>:<chars>
-        if (*rest != ':') return;
-        const char* cs = strchr(rest + 1, ':');
-        vmSetFlapConfig(m, (int)strtol(rest + 1, NULL, 10),
-                        cs ? cs + 1 : NULL, cs ? (int)strlen(cs + 1) : 0);
-        return;
-      }
+      // 'N' (set the flap set) is gone: the reel is shared, complete and fixed.
       default: return;
     }
   }
@@ -428,7 +332,7 @@ void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
       // ---- display ----
       case '-': {   // show character. An unknown character homes, as of fw v31.
         if (!payload[0]) break;
-        int idx = vmFlapIndexOf(m, payload[0]);
+        int idx = vmFlapIndexOf(payload[0]);
         vmSetTarget(m, idx < 0 ? 0 : idx);
         break;
       }
@@ -437,11 +341,10 @@ void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
         break;
       case 'h': vmSetTarget(m, 0); break;
 
-      // ---- configuration ----
-      case 'N': { const char* c = strchr(payload, ':');
-                  vmSetFlapConfig(m, (int)strtol(payload, NULL, 10),
-                                  c ? c + 1 : NULL, c ? (int)strlen(c + 1) : 0);
-                  break; }
+      // 'N' (set the flap count / character set) is GONE. The reel is shared, carries
+      // every glyph the font can draw, and is not configurable -- so an 'N' frame now
+      // falls through to the default below and is ignored, exactly like any other
+      // command this module does not implement.
       // ---- queries ----
       // 'v' and 'A' answer a broadcast too. Each module gets its own slot so the
       // train stays in ID order; the slots are milliseconds, not the hundreds a
@@ -489,13 +392,13 @@ size_t vmRenderReply(uint8_t mod, VmReplyKind kind, int32_t arg,
       // with <map> empty.
       n = snprintf(o, outSize, "m%dA:%d:%d:%s:%d:%d:%d:%d::%u:",
                    m.id, VM_FW_VERSION, m.id, m.sn, VM_HOME_OFFSET, VM_TOTAL_STEPS,
-                   m.autoHome ? 1 : 0, m.curIndex, m.flapCount);
-      // flapChars is raw bytes, not a C string -- it carries 0xFF (y-diaeresis),
-      // which the real firmware reserves as its unused-flap marker and so can
-      // never show. Copy it verbatim; it is the final field, read to end-of-line.
-      size_t cl = m.flapCharsLen;
+                   m.autoHome ? 1 : 0, m.curIndex, SF_MAX_FLAPS);
+      // The reel is raw bytes, not a C string. Copy it verbatim; it is the final field,
+      // read to end-of-line. It is ~163 bytes, so the whole frame runs to ~225 -- well
+      // inside TX_MAX_BYTES, but the clamp below stays: never half-write a reel.
+      size_t cl = SF_MAX_FLAPS;
       if (n + cl + 2 > outSize) cl = (outSize > n + 2) ? outSize - n - 2 : 0;
-      memcpy(o + n, m.flapChars, cl);
+      memcpy(o + n, vmReel(), cl);
       n += cl;
       if (n + 1 < outSize) o[n++] = '\n';
       break;

@@ -405,18 +405,23 @@ paths:
                       flapCount:
                         type: integer
                         description: >-
-                          Active flap count (1..64) from the configurable flap set. Firmware
-                          v31+ only; `-99` when not provided (older firmware, the `vd`
-                          fallback, or a stale read).
-                        example: 40
+                          Flaps on the reel. Always **163** here: 156 Windows-1252 glyphs +
+                          7 colour flaps. The modules are drawn rather than driven, so the
+                          reel carries one flap for every glyph the font can render and
+                          there is nothing to ration. It is **read-only** — the flap set is
+                          shared, complete and not configurable (there is no `N` command and
+                          no flap-set editor).
+                        example: 163
                       flapChars:
                         type: string
                         description: >-
-                          Ordered character set (character at each flap index) from the
-                          configurable flap set, as UTF-8 (the gateway transcodes the
-                          module's Windows-1252 bytes, so € and accents round-trip).
-                          Firmware v31+ only; empty string when not provided.
-                        example: " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+                          The reel, in flap-index order, as UTF-8 (the gateway transcodes
+                          the module's Windows-1252 bytes, so € and accents round-trip).
+                          Every printable CP1252 character except the lowercase letters —
+                          those fold to their uppercase flap, exactly as on a real reel,
+                          which is also what keeps the seven lowercase colour codes
+                          (`r o y g b p w`) unambiguous. The colours are the last seven.
+                        example: " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ…roygbpw"
               examples:
                 combined_A:
                   value: { ok: true, id: 5, ver: "31", sn: "AABBCCDD", dump: "42:4096:0=210,1=320", autoHome: 1, curIndex: 5, reportedId: 5, flapCount: 40, flapChars: " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", stale: false, mode: "A" }
@@ -424,49 +429,6 @@ paths:
                   value: { ok: true, id: 5, ver: "23", sn: "AABBCCDD", dump: "42:4096:0=210,1=320", autoHome: -99, curIndex: -99, reportedId: -99, flapCount: -99, flapChars: "", stale: false, mode: "vd" }
                 stale:
                   value: { ok: true, id: 5, ver: "31", sn: "AABBCCDD", dump: "", autoHome: -99, curIndex: -99, reportedId: -99, flapCount: -99, flapChars: "", stale: true, mode: "A" }
-
-  /api/flap/flapconfig:
-    post:
-      tags: [Modules]
-      summary: Configure a module's flap count and/or character set (firmware v31+)
-      description: |
-        Sets the runtime-configurable flap set introduced in module firmware v31:
-        the active flap count (1–64) and the ordered character set (the character
-        at each flap index). `flapCount` and `charSet` are **independent and
-        optional** — supply either or both; an omitted side is left unchanged on
-        the module. Target a module by `id` (use `id: -1` to broadcast the same
-        flap set to every module on the bus) or by serial number (`sn`). The
-        module applies the change silently (no reply); read it back with
-        `/api/flap/all`. `charSet` is UTF-8 and may use any character representable
-        in Windows-1252 — ASCII plus the euro sign and Western-European
-        accents; the gateway transcodes it to the single-byte form the bus uses.
-        Characters with no Windows-1252 representation are rejected. At most 64
-        characters. On modules older than v31 the command is ignored.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                id:        { type: integer, minimum: -1, maximum: 254, description: "Module ID; -1 broadcasts. Use this OR sn." }
-                sn:        { type: string, description: "Target by serial number instead of id." }
-                flapCount: { type: integer, minimum: 1, maximum: 64, description: "Active flap count; omit to leave unchanged." }
-                charSet:   { type: string, maxLength: 64, description: "Ordered character set (index 0..n), UTF-8; any Windows-1252 char (ASCII + € + accents). Omit to leave unchanged." }
-            examples:
-              byId:
-                value: { id: 5, flapCount: 40, charSet: " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" }
-              euroAndAccents:
-                value: { id: 5, charSet: " ABCDEFGHIJKLMNOPQRSTUVWXYZ€éàüöç0123456789" }
-              broadcast:
-                value: { id: -1, charSet: " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" }
-              bySerial:
-                value: { sn: "AABBCCDD0011223344", flapCount: 48 }
-      responses:
-        "200":
-          $ref: "#/components/responses/Ok"
-        "400":
-          $ref: "#/components/responses/BadRequest"
 
   /api/status:
     get:

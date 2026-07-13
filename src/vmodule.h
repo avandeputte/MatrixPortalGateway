@@ -24,34 +24,34 @@
 // What the reel does do is FLIP. Changing the displayed flap cascades forward
 // through the reel one flap at a time, so the panel shows the split-flap effect
 // that is the entire point of the display. That is a rendering effect, not a
-// simulation: cfg.flapMax (<= FLAP_ANIM_MAX = 64) bounds how many flaps one
-// change draws, so jumping from 'z' to 'a' takes about a second rather than
-// walking 200 flaps. Set flapMax to 1 for an instant cut.
+// simulation: cfg.flapMax bounds how many flaps one change draws -- a longer jump
+// starts the walk that many flaps short of the destination rather than trudging the
+// whole way round, so the cascade stays the same length however big the reel is.
+// Set flapMax to 1 for an instant cut.
 //
 // The reel
 // --------
-// 64 flaps -- the same count as a real module (the count is protocol; see common.h).
-// The default is a GERMAN layout (VM_DEFAULT_REEL in vmodule.cpp):
+// 163 flaps: EVERY printable Windows-1252 glyph the font can draw, then the seven
+// colours. A physical reel has 64 leaves because it is a physical object; this one is
+// drawn, so there is nothing to ration and every character has somewhere to land.
 //
-//   ` ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜß0123456789!@#&€-=;q:'.,/?*roygbpw`
+//   index 0        ' '                   blank (the home position)
+//   index 0..155   the CP1252 repertoire, in code-point order, MINUS the lowercase
+//                  letters:  !"#$%&'()*+,-./0-9:;<=>?@A-Z[\]^_`{|}~ €‚ƒ„…†‡ˆ‰Š‹ŒŽ...
+//                  ...¡¢£¤¥¦§¨©ª«¬®¯°±²³´µ¶·¸¹º»¼½¾¿ À-Þ ß ÷
+//   index 156..162 r o y g b p w         COLOUR flaps (VM_COLOUR_BASE ..)
 //
-//   index 0        ' '              blank
-//   index 1..26    A..Z
-//   index 27..30   Ä Ö Ü ß
-//   index 31..40   0..9
-//   index 41..56   ! @ # & € - = ; q : ' . , / ? *
-//   index 57..63   r o y g b p w    COLOUR flaps (VM_COLOUR_BASE .. +SF_COLOUR_FLAPS)
+// NO LOWERCASE, and that is load-bearing. The colour flaps are addressed by the
+// lowercase letters r o y g b p w, so if the reel carried lowercase, vmFlapIndexOf()
+// would resolve 'r' to the letter and every colour command ever written would quietly
+// start printing letters. Lowercase folds to uppercase instead (cp1252ToUpper), which
+// is what a real reel -- printed in capitals -- does anyway.
 //
-// The colours sit LAST. vmFlapIndexOf() is a first-match scan, and the only lowercase
-// bytes on the reel are the seven colour codes and 'q' -- so `m5-r` selects the red
-// flap and never the letter 'R' (a distinct byte at index 18). sfSendChar() also
-// uppercases ASCII (except the colour codes), so lowercase letters resolve to their
-// uppercase flap. 'q' (index 49) is the double-quote flap; the renderer draws it as `"`.
-//
-// Which flaps are colour swatches is a property of the reel POSITION, not the
-// character: [colourBase, colourBase + colourCount). The 'N' command reassigns
-// characters, not physical flaps, so reconfiguring the char set leaves the colour
-// flaps where they are.
+// The reel is SHARED and FIXED. It is not stored per module and it is not configurable:
+// a drawn reel that can already render everything has nothing left to reconfigure, so
+// the 'N' command and the flap-set editor are gone. It is built once at boot by
+// vmBuildReel() from isFlapByte() + cp1252IsLower(), rather than typed out, so it cannot
+// drift from the font or from the folding rule.
 
 #ifndef MPGW_VMODULE_H
 #define MPGW_VMODULE_H
@@ -67,12 +67,15 @@
 #define VM_HOME_OFFSET   2832
 #define VM_TOTAL_STEPS   4096
 
-// The reel's colour flaps: the LAST seven, as on the real reel. (The 64-flap reel has
-// no lowercase besides the colour
-// codes and 'q', so the real reel's ordering is safe again -- and it is what the
-// physical modules ship, which is the whole point of matching it.)
-#define VM_COLOUR_BASE   (SF_MAX_FLAPS - SF_COLOUR_FLAPS)   // 57
-extern const char VM_COLOUR_CHARS[SF_COLOUR_FLAPS + 1];   // "roygbpw"
+// The reel's colour flaps: the LAST seven, always. They are addressed by the LOWERCASE
+// letters r o y g b p w, which is exactly why the reel carries no lowercase -- see the
+// flap-set block in common.h. vmFlapIndexOf() checks them before it scans the glyphs, so
+// 'r' can only ever be red.
+// VM_COLOUR_BASE and the colour codes live in reel.h, beside the reel they index.
+
+// The one reel every module shows: 156 CP1252 glyphs then the 7 colours. Built once at
+// boot by vmBuildReel(); read-only thereafter.
+extern const char* vmReel();
 
 // A virtual module. flapChars dominates the footprint (~270 B per module). The array
 // lives in INTERNAL RAM, not PSRAM: taskDisplay walks it at 100 Hz and quad PSRAM is
@@ -85,19 +88,13 @@ struct VModule {
 
   // ---- configuration the protocol reads and writes (persisted) ----
   bool     autoHome;              // set by 'a', reported by 'A'; nothing acts on it
-  bool     flapCharsCustom;       // false = the compile-time default reel
-  uint8_t  flapCount;             // ACTIVE flaps, 1..SF_MAX_FLAPS
-  uint8_t  flapCharsLen;          // bytes used in flapChars
-  uint8_t  colourBase;            // first colour-flap index
-  uint8_t  colourCount;           // number of colour flaps (0 = none)
   uint8_t  bootCount;             // wraps at 255, reported by 'Q'
-  // Length-counted, not NUL-terminated: an 'N' command may set an arbitrary reel,
-  // and the real firmware reserves 0xFF as its "unused flap" sentinel, so a byte
-  // count is the only representation that round-trips every legal reel.
-  // NOTE: this array is embedded in the on-disk record (vmSave/vmLoad). Changing
-  // SF_MAX_FLAPS changes sizeof(VModule) and therefore the record layout -- bump
-  // VMODULES_MAGIC when you do, or a stale file deserialises into garbage.
-  char     flapChars[SF_MAX_FLAPS];
+  // NOTE: there is no flap table here any more. Every module shows the SAME reel -- the
+  // whole CP1252 repertoire (see vmBuildReel) -- so it lives once, in a shared constant,
+  // instead of 163 bytes per module. That is the point of the change: a drawn reel can
+  // render everything, so there is nothing to configure and nothing to store. It also
+  // took sizeof(VModule) from 108 bytes to 40, which is 5 KB of internal RAM back on a
+  // 75-module wall -- the same RAM the panel's framebuffer and WiFi are fighting over.
 
   // ---- runtime ----
   int16_t  curIndex;              // the flap on show; always valid
@@ -135,13 +132,24 @@ void vmDispatch(const uint8_t* frame, size_t len, uint32_t now);
 // if anything moved (so the panel needs a redraw).
 bool vmTick(uint32_t now);
 
-// The character at flap `i` on this module's reel, or 0 if `i` is past the set.
-char vmFlapCharAt(const VModule& m, int i);
-// First flap index carrying `c`, or -1. First-match, so colours beat letters.
-int  vmFlapIndexOf(const VModule& m, char c);
+// Build the shared reel. Call once, before vmInit(). Idempotent.
+void vmBuildReel();
+
+// The character at flap `i`, or 0 if `i` is off the reel.
+char vmFlapCharAt(int i);
+// The flap index carrying `c`, or -1 if the reel cannot show it.
+//
+// Resolution order, and it matters:
+//   1. the colour codes r o y g b p w -- lowercase by protocol, not letters;
+//   2. 'q', the legacy alias splitflap-os uses for the double-quote flap (the classic
+//      reel had no lowercase, so its char map stole that byte). The reel now carries a
+//      real '"', so the alias is honoured rather than dropped;
+//   3. cp1252ToUpper(c), because the reel is printed in capitals like a real one;
+//   4. a scan of the 156 glyph flaps -- never the colours, which step 1 already owns.
+int  vmFlapIndexOf(char c);
 // True when flap `i` is a colour swatch rather than a glyph.
-static inline bool vmFlapIsColour(const VModule& m, int i) {
-  return m.colourCount && i >= m.colourBase && i < m.colourBase + m.colourCount;
+static inline bool vmFlapIsColour(int i) {
+  return i >= VM_COLOUR_BASE && i < VM_COLOUR_BASE + SF_COLOUR_FLAPS;
 }
 
 #endif // MPGW_VMODULE_H

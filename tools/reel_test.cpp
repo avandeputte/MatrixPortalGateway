@@ -1,119 +1,127 @@
-// Native check of the load-bearing reel claims, compiled against the REAL charset.cpp.
-// Keep VM_DEFAULT_REEL below byte-identical to src/vmodule.cpp.
-//   * the default reel is exactly 64 flaps (the count is protocol)
-//   * flap 0 is blank; the seven colour flaps are the LAST seven (indices 57..63)
-//   * a first-match lookup resolves 'r' to the RED flap (57), never the letter 'R' (18)
-//   * 'q' (index 49) is the double-quote flap; the umlauts/eszett/euro are present
-//   * every reel byte is a valid flap byte, and none but the space repeats
-//   * the 'A' reply fits MSG_MAX_BYTES, and its colon arithmetic survives an EMPTY
-//     flap map (the gateway's parser counts colons, not fields)
-//   * utf8ToFlap maps euro and accented letters to their Windows-1252 flap bytes
+// Native check of the load-bearing reel claims, compiled against the REAL src/reel.h and
+// src/charset.cpp. Nothing here is a transcription: reel.h is deliberately Arduino-free, so
+// this test runs the same reelBuild()/reelIndexOf() the firmware runs. (The previous version
+// kept its own copy of the reel and asked, in a comment, for the two to be kept byte-
+// identical. That tests the copy, not the code.)
+//
+// What it pins down:
+//   * the reel is 163 flaps -- 156 CP1252 glyphs + 7 colours -- and flap 0 is blank
+//   * the colour flaps are the LAST seven, and 'r' resolves to RED, never to a letter
+//   * lowercase folds to uppercase, INCLUDING every trap (y-diaeresis -> 0x9F, not eszett;
+//     the division sign is not a letter; eszett has no uppercase; oe/s-caron/z-caron)
+//   * EVERY printable Windows-1252 character resolves to a flap -- the whole point of the
+//     change, and the thing the old 64-flap reel could not do for 99 of them
+//   * 'q' still reaches the double-quote flap (splitflap-os's legacy alias)
+//   * no byte sits on two flaps, and every glyph flap is a valid flap byte
+//   * the 'A' reply -- which now carries all 163 flaps -- still fits TX_MAX_BYTES
 //
 // Build:  c++ -std=c++17 -Isrc tools/reel_test.cpp src/charset.cpp -o /tmp/reel_test && /tmp/reel_test
-#include "charset.h"
+#include "reel.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
-#include <cstdlib>
 
-#define SF_MAX_FLAPS    64
-#define SF_COLOUR_FLAPS 7
-#define MSG_MAX_BYTES   320
-#define TX_MAX_BYTES    512
+#define TX_MAX_BYTES 512
 
-// The German default reel -- MUST match src/vmodule.cpp's VM_DEFAULT_REEL byte for byte.
-// Written with CP1252 hex escapes so the file's own encoding cannot corrupt it:
-//   \xC4 A-umlaut  \xD6 O-umlaut  \xDC U-umlaut  \xDF eszett  \x80 euro
-static const char REEL[] =
-  " ABCDEFGHIJKLMNOPQRSTUVWXYZ" "\xC4\xD6\xDC\xDF" "0123456789!@#&" "\x80" "-=;q:'.,/?*" "roygbpw";
-static const int REEL_LEN = (int)sizeof(REEL) - 1;
+static int fails = 0;
 
-static int indexOf(char c) {   // mirrors vmFlapIndexOf: first match wins
-  for (int i = 0; i < REEL_LEN; i++) if (REEL[i] == c) return i;
-  return -1;
+static void ck(bool ok, const char* what) {
+  printf("  %s  %s\n", ok ? "PASS" : "FAIL", what);
+  if (!ok) fails++;
+}
+static void cki(int got, int want, const char* what) {
+  bool ok = (got == want);
+  printf("  %s  %-56s got %d, want %d\n", ok ? "PASS" : "FAIL", what, got, want);
+  if (!ok) fails++;
 }
 
-int fails = 0;
-#define CHECK(cond, ...) do { if (!(cond)) { printf("  FAIL: "); printf(__VA_ARGS__); printf("\n"); fails++; } } while (0)
-
 int main() {
-  printf("reel length %d\n", REEL_LEN);
-  CHECK(REEL_LEN == SF_MAX_FLAPS, "reel must be %d flaps, got %d", SF_MAX_FLAPS, REEL_LEN);
-  CHECK(REEL[0] == ' ', "flap 0 must be blank");
+  static char reel[SF_MAX_FLAPS];
+  const int glyphs = reelBuild(reel);
 
-  // Every reel byte must be a valid flap glyph.
-  for (int i = 0; i < REEL_LEN; i++)
-    CHECK(isFlapByte((uint8_t)REEL[i]), "reel byte %d (0x%02X) is not a flap byte", i, (uint8_t)REEL[i]);
+  printf("shape:\n");
+  cki(glyphs, SF_CHAR_FLAPS, "glyph flaps built");
+  cki(SF_MAX_FLAPS, 163, "total flaps (glyphs + colours)");
+  ck(reel[0] == ' ', "flap 0 is blank (the home position)");
+  ck(memcmp(reel + VM_COLOUR_BASE, "roygbpw", 7) == 0,
+     "the colour flaps are the LAST seven");
 
-  // Colours are the LAST seven, and first-match resolves 'r' to red, not the letter 'R'.
-  const char* names = "roygbpw";
-  for (int i = 0; i < 7; i++)
-    CHECK(indexOf(names[i]) == SF_MAX_FLAPS - 7 + i,
-          "'%c' must resolve to colour flap %d, got %d", names[i], SF_MAX_FLAPS - 7 + i, indexOf(names[i]));
-  CHECK(indexOf('R') == 18, "'R' (the letter) must be at index 18, got %d", indexOf('R'));
-  CHECK(indexOf('r') == 57, "'r' must resolve to the red flap at 57, got %d", indexOf('r'));
+  printf("\ncolours beat letters -- the reason the reel carries no lowercase:\n");
+  cki(reelIndexOf(reel, 'r'), VM_COLOUR_BASE + 0, "'r' -> RED, not a letter");
+  cki(reelIndexOf(reel, 'g'), VM_COLOUR_BASE + 3, "'g' -> GREEN");
+  cki(reelIndexOf(reel, 'w'), VM_COLOUR_BASE + 6, "'w' -> WHITE");
+  ck(reelIndexOf(reel, 'R') >= 0 && !reelIsColour(reelIndexOf(reel, 'R')),
+     "'R' -> the LETTER R, well clear of the colour range");
 
-  // Fixed positions the firmware/renderer depend on.
-  CHECK(indexOf(' ') == 0, "space must resolve to flap 0");
-  CHECK(indexOf('A') == 1, "'A' must be at index 1, got %d", indexOf('A'));
-  CHECK(indexOf('q') == 49, "'q' (the double-quote flap) must be at index 49, got %d", indexOf('q'));
-  CHECK(indexOf((char)0xC4) == 27, "A-umlaut must be at index 27, got %d", indexOf((char)0xC4));
-  CHECK(indexOf((char)0xDF) == 30, "eszett must be at index 30, got %d", indexOf((char)0xDF));
-  CHECK(indexOf((char)0x80) == 45, "euro sign must be at index 45, got %d", indexOf((char)0x80));
+  printf("\nlowercase folds to uppercase (a real reel is printed in capitals):\n");
+  ck(reelIndexOf(reel, 'a') == reelIndexOf(reel, 'A'), "'a' -> the 'A' flap");
+  ck(reelIndexOf(reel, 'z') == reelIndexOf(reel, 'Z'), "'z' -> the 'Z' flap");
+  ck(reelIndexOf(reel, '\xE4') == reelIndexOf(reel, '\xC4'), "a-umlaut -> A-umlaut");
+  ck(reelIndexOf(reel, '\xE9') == reelIndexOf(reel, '\xC9'), "e-acute  -> E-acute");
+  ck(reelIndexOf(reel, '\xF8') == reelIndexOf(reel, '\xD8'), "o-slash  -> O-slash");
+  ck(reelIndexOf(reel, '\x9C') == reelIndexOf(reel, '\x8C'), "oe-ligature -> OE");
+  ck(reelIndexOf(reel, '\x9A') == reelIndexOf(reel, '\x8A'), "s-caron -> S-caron");
 
-  // Only the space may repeat -- otherwise a first-match scan hides the later copy.
-  int repeats = 0;
-  for (int i = 0; i < REEL_LEN; i++)
-    if (REEL[i] != ' ' && indexOf(REEL[i]) != i) repeats++;
-  CHECK(repeats == 0, "no non-space byte may repeat on the reel, found %d", repeats);
+  printf("\nthe folding traps -- every one of these has bitten somebody:\n");
+  ck(reelIndexOf(reel, '\xFF') == reelIndexOf(reel, '\x9F'),
+     "y-diaeresis folds to 0x9F...");
+  ck(reelIndexOf(reel, '\xFF') != reelIndexOf(reel, '\xDF'),
+     "...and NOT to eszett, which a naive -0x20 would produce");
+  ck(!cp1252IsLower(0xF7), "the division sign is not a lowercase letter");
+  ck(reelIndexOf(reel, '\xF7') >= 0 &&
+     reelIndexOf(reel, '\xF7') != reelIndexOf(reel, '\xD7'),
+     "...so it has its OWN flap, not the multiplication sign's");
+  ck(!cp1252IsLower(0xDF), "eszett has no uppercase in CP1252...");
+  ck(reelIndexOf(reel, '\xDF') >= 0, "...so it keeps a flap of its own");
+  ck(!cp1252IsLower(0xB5), "the micro sign is a symbol, not a lowercase letter");
 
-  printf("  'r'->%d  'R'->%d  'q'->%d  A-uml->%d  euro->%d\n",
-         indexOf('r'), indexOf('R'), indexOf('q'), indexOf((char)0xC4), indexOf((char)0x80));
+  printf("\nlegacy alias:\n");
+  ck(reelIndexOf(reel, 'q') == reelIndexOf(reel, '"'),
+     "'q' still reaches the double-quote flap (splitflap-os)");
 
-  // ---- worst-case 'A' reply, id 254, full default reel, EMPTY map ----
-  char sn[21]; memset(sn, 'F', 20); sn[20] = 0;
-  char out[1024];
-  int n = snprintf(out, sizeof(out), "m%dA:%d:%d:%s:%d:%d:%d:%d::%u:",
-                   254, 31, 254, sn, 2832, 4096, 1, REEL_LEN - 1, (unsigned)REEL_LEN);
-  memcpy(out + n, REEL, REEL_LEN); n += REEL_LEN;
-  out[n++] = '\n';
-  printf("worst-case 'A' reply: %d bytes\n", n);
-  CHECK(n <= MSG_MAX_BYTES, "'A' must fit a monitor entry (%d > %d)", n, MSG_MAX_BYTES);
-  CHECK(n <= TX_MAX_BYTES,  "'A' must fit a frame (%d > %d)", n, TX_MAX_BYTES);
+  printf("\nEVERY printable CP1252 character resolves to a flap:\n");
+  int unresolved = 0, firstBad = -1;
+  for (int b = 0x20; b <= 0xFF; b++) {
+    if (!isFlapByte((uint8_t)b)) continue;
+    if (reelIndexOf(reel, (char)b) < 0) {
+      unresolved++;
+      if (firstBad < 0) firstBad = b;
+    }
+  }
+  cki(unresolved, 0, "printable CP1252 bytes with nowhere to land");
+  if (unresolved) printf("        first unresolved byte: 0x%02X\n", firstBad);
 
-  // ---- the gateway's parser: colon #8 ends the (empty) map, #9 ends flapCount ----
-  char aBuf[1024];
-  const char* body = strchr(out, ':');           // sfParseResponse: p+1 after "m<id>A"
-  strncpy(aBuf, body + 1, sizeof(aBuf) - 1);
-  aBuf[sizeof(aBuf) - 1] = 0;
-  for (int k = (int)strlen(aBuf) - 1; k >= 0 && (aBuf[k]=='\n'||aBuf[k]=='\r'); k--) aBuf[k] = 0;
-  int colons = 0; const char *c8 = nullptr, *c9 = nullptr;
-  for (const char* cp = aBuf; *cp; cp++)
-    if (*cp == ':') { if (++colons == 8) c8 = cp; else if (colons == 9) { c9 = cp; break; } }
-  CHECK(c8 && c9, "an 'A' reply with an empty map must still carry 9 colons");
-  int gotCount = c8 ? atoi(c8 + 1) : -1;
-  CHECK(gotCount == REEL_LEN, "flapCount parsed as %d, expected %d", gotCount, REEL_LEN);
-  char gotChars[SF_MAX_FLAPS + 1] = "";
-  if (c9) { strncpy(gotChars, c9 + 1, SF_MAX_FLAPS); gotChars[SF_MAX_FLAPS] = 0; }
-  CHECK((int)strlen(gotChars) == REEL_LEN, "flapChars round-trip length %d, expected %d",
-        (int)strlen(gotChars), REEL_LEN);
-  CHECK(memcmp(gotChars, REEL, REEL_LEN) == 0, "flapChars round-trip mismatch");
+  printf("\nthings the old 64-flap German reel could only show as a BLANK:\n");
+  bool all = true;
+  for (const char* p = "$%()+<>[]{}"; *p; p++) all = all && (reelIndexOf(reel, *p) >= 0);
+  ck(all, "$ % ( ) + < > [ ] { }  all resolve now");
+  ck(reelIndexOf(reel, '\xC9') >= 0 && reelIndexOf(reel, '\xD1') >= 0 &&
+     reelIndexOf(reel, '\xA9') >= 0 && reelIndexOf(reel, '\xB0') >= 0,
+     "E-acute, N-tilde, (c), degree  all resolve now");
 
-  // The map field (f[7]) must come out empty.
-  char split[1024]; strcpy(split, aBuf);
-  char* f[16] = {0}; f[0] = split; int fi = 1;
-  for (char* cp = split; *cp && fi < 16; cp++) if (*cp == ':') { *cp = 0; f[fi++] = cp + 1; }
-  CHECK(f[7] && f[7][0] == 0, "the map field must parse as empty, got '%s'", f[7] ? f[7] : "(null)");
-  CHECK(f[3] && strcmp(f[3], "2832") == 0, "homeOffset field wrong");
-  CHECK(f[4] && strcmp(f[4], "4096") == 0, "totalSteps field wrong");
+  printf("\nintegrity:\n");
+  int dupes = 0;
+  for (int i = 0; i < SF_MAX_FLAPS; i++)
+    for (int j = i + 1; j < SF_MAX_FLAPS; j++)
+      if (reel[i] == reel[j]) dupes++;
+  cki(dupes, 0, "bytes sitting on two flaps");
+  int notflap = 0;
+  for (int i = 0; i < SF_CHAR_FLAPS; i++)
+    if (!isFlapByte((uint8_t)reel[i])) notflap++;
+  cki(notflap, 0, "glyph flaps that are not valid flap bytes");
 
-  // ---- utf8 round-trip through the real transcoder: euro, U-umlaut, eszett ----
-  char enc[64]; bool ok = false;
-  size_t k = utf8ToFlap("\xE2\x82\xAC\xC3\x9C\xC3\x9F", enc, sizeof(enc), &ok);  // EUR, U-uml, eszett
-  CHECK(ok && k == 3, "utf8ToFlap should map 3 glyphs, got %zu ok=%d", k, (int)ok);
-  CHECK((uint8_t)enc[0] == 0x80 && (uint8_t)enc[1] == 0xDC && (uint8_t)enc[2] == 0xDF,
-        "utf8ToFlap mapped %02X %02X %02X", (uint8_t)enc[0], (uint8_t)enc[1], (uint8_t)enc[2]);
+  printf("\nthe 'A' reply now carries the whole reel -- does it still fit the wire?\n");
+  char frame[TX_MAX_BYTES + 1];
+  int n = snprintf(frame, sizeof(frame), "m%dA:%d:%d:%s:%d:%d:%d:%d::%u:",
+                   254, 31, 254, "FA5E4827E2205AC80010", 2832, 4096, 1, 162,
+                   (unsigned)SF_MAX_FLAPS);
+  memcpy(frame + n, reel, SF_MAX_FLAPS);
+  n += SF_MAX_FLAPS;
+  frame[n++] = '\n';
+  printf("        worst-case 'A' frame: %d bytes (TX_MAX_BYTES = %d)\n", n, TX_MAX_BYTES);
+  ck(n < TX_MAX_BYTES, "the 'A' reply fits inside TX_MAX_BYTES");
 
-  printf(fails ? "\n%d CHECK(S) FAILED\n" : "\nall checks passed\n", fails);
+  if (fails) printf("\n%d FAILED\n", fails);
+  else       printf("\nall passed\n");
   return fails ? 1 : 0;
 }

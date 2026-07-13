@@ -48,7 +48,6 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Changing it creates or destroys modules — reboot to apply.` | Settings tab | EMPHASIS |
 | `Character` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Character Set` | — | (built at runtime) |
-| `Character Set (order = flap index, blank = leave unchanged)` | Status tab (diagnostics) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Choose a layout…` | Settings tab | DROPDOWN OPTION |
 | `Clear` | Monitor tab (live REST/MQTT command log); Settings tab | BUTTON (an action -- use the imperative) |
 | `Clock` | Status tab (diagnostics) | HEADING |
@@ -77,17 +76,14 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Enable schedule` | — | (built at runtime) |
 | `Enable verbose serial output on the native USB serial port (115200 baud). Shows every RX/TX frame, MQTT events, and module activity.` | Settings tab | HELP TEXT (a full sentence) |
 | `Enter a character` | — | RUNTIME MESSAGE (shown after an action, in sendChar()) |
-| `Enter a flap count or character set.` | — | RUNTIME MESSAGE (shown after an action, in saveFlapConfig()) |
 | `Error` | — | RUNTIME MESSAGE (shown after an action, in g()) |
-| `Error:` | — | RUNTIME MESSAGE (shown after an action); RUNTIME MESSAGE (shown after an action, in applyGeomPreset()); RUNTIME MESSAGE (shown after an action, in doSend()); RUNTIME MESSAGE (shown after an action, in g()); RUNTIME MESSAGE (shown after an action, in refreshModules()); RUNTIME MESSAGE (shown after an action, in saveDebug()); RUNTIME MESSAGE (shown after an action, in saveFlapConfig()); RUNTIME MESSAGE (shown after an action, in saveGrid()); RUNTIME MESSAGE (shown after an action, in saveHa()); RUNTIME MESSAGE (shown after an action, in saveHost()); RUNTIME MESSAGE (shown after an action, in saveMqtt()); RUNTIME MESSAGE (shown after an action, in saveOTA()); RUNTIME MESSAGE (shown after an action, in savePanel()); RUNTIME MESSAGE (shown after an action, in saveTz()); RUNTIME MESSAGE (shown after an action, in saveWifi()); RUNTIME MESSAGE (shown after an action, in sendChar()); RUNTIME MESSAGE (shown after an action, in sendIndex()); RUNTIME MESSAGE (shown after an action, in sendText()); RUNTIME MESSAGE (shown after an action, in testMqtt()) |
+| `Error:` | — | RUNTIME MESSAGE (shown after an action); RUNTIME MESSAGE (shown after an action, in applyGeomPreset()); RUNTIME MESSAGE (shown after an action, in doSend()); RUNTIME MESSAGE (shown after an action, in g()); RUNTIME MESSAGE (shown after an action, in refreshModules()); RUNTIME MESSAGE (shown after an action, in saveDebug()); RUNTIME MESSAGE (shown after an action, in saveGrid()); RUNTIME MESSAGE (shown after an action, in saveHa()); RUNTIME MESSAGE (shown after an action, in saveHost()); RUNTIME MESSAGE (shown after an action, in saveMqtt()); RUNTIME MESSAGE (shown after an action, in saveOTA()); RUNTIME MESSAGE (shown after an action, in savePanel()); RUNTIME MESSAGE (shown after an action, in saveTz()); RUNTIME MESSAGE (shown after an action, in saveWifi()); RUNTIME MESSAGE (shown after an action, in sendChar()); RUNTIME MESSAGE (shown after an action, in sendIndex()); RUNTIME MESSAGE (shown after an action, in sendText()); RUNTIME MESSAGE (shown after an action, in testMqtt()) |
 | `FW:` | — | (built at runtime) |
 | `FW: v7 or earlier` | Status tab (diagnostics) | INLINE TEXT |
 | `Failed:` | — | RUNTIME MESSAGE (shown after an action, in testMqtt()) |
 | `Firmware` | — | (built at runtime) |
-| `Flap Count (1-64, blank = leave unchanged)` | Status tab (diagnostics) | FORM LABEL (names the input below it -- a noun phrase) |
-| `Flap Index (0-63)` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
+| `Flap Index (0-162)` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Flap Set` | Status tab (diagnostics) | TEXT |
-| `Flap count must be 1-64.` | — | RUNTIME MESSAGE (shown after an action, in saveFlapConfig()) |
 | `Flip speed (ms per flap)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Frames RX` | Status tab (diagnostics) | TEXT |
 | `Frames TX` | Status tab (diagnostics) | TEXT |
@@ -177,7 +173,6 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `SSID` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Sao Paulo (UTC-3/-2)` | Settings tab | DROPDOWN OPTION |
 | `Save` | Settings tab | BUTTON (an action -- use the imperative) |
-| `Save Flap Config` | Status tab (diagnostics) | BUTTON (an action -- use the imperative) |
 | `Save Layout` | Settings tab | BUTTON (an action -- use the imperative) |
 | `Save MQTT` | Settings tab | BUTTON (an action -- use the imperative) |
 | `Save OTA Password` | Settings tab | BUTTON (an action -- use the imperative) |
@@ -187,8 +182,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Save WiFi` | Settings tab | BUTTON (an action -- use the imperative) |
 | `Saved` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()); RUNTIME MESSAGE (shown after an action, in g()) |
 | `Saved — reboot to apply` | — | (built at runtime) |
-| `Saved. Refreshing...` | — | RUNTIME MESSAGE (shown after an action, in saveFlapConfig()) |
-| `Saving...` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()); RUNTIME MESSAGE (shown after an action, in saveFlapConfig()); RUNTIME MESSAGE (shown after an action, in saveHost()) |
+| `Saving...` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()); RUNTIME MESSAGE (shown after an action, in saveHost()) |
 | `Self-Reported ID` | — | (built at runtime) |
 | `Send` | Monitor tab (live REST/MQTT command log) | BUTTON (an action -- use the imperative) |
 | `Send Character` | Display tab (send text/characters to the wall) | BUTTON (an action -- use the imperative) |
@@ -245,7 +239,6 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `WiFi IP` | Status tab (diagnostics) | TEXT |
 | `WiFi saved - reconnecting...` | — | RUNTIME MESSAGE (shown after an action, in saveWifi()) |
 | `Width, height and color depth are read once at boot — reboot to apply.` | Settings tab | EMPHASIS |
-| `Windows-1252: ASCII plus € and accented letters (é à ü ñ ç …). Each glyph is one flap.` | Status tab (diagnostics) | TEXT |
 | `all modules` | — | RUNTIME MESSAGE (shown after an action, in sendChar()) |
 | `blank = auto (splitflap-gw-xxxxxx)` | Settings tab | INPUT PLACEHOLDER (example text) |
 | `cell(s) shown` | — | RUNTIME MESSAGE (shown after an action, in buildWall()) |

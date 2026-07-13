@@ -140,7 +140,7 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define RTC_YEAR_OFFSET   2000
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "1.4.0"   // this product's version (UI + boot log)
+#define FW_VERSION           "1.5.0"   // this product's version (UI + boot log)
 // The gateway REST/MQTT surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it
@@ -263,19 +263,35 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define TX_BUS_WAIT_CAP_MS   400
 
 /* ---- Flap set sizing ----
-   64 flaps: the real module's reel, exactly. The count is part of the PROTOCOL -- the
-   'A' reply reports flapCount, and the controller (splitflap-os, server/app.py) rejects
-   any flapCount outside 1..64, so a larger virtual reel would make every module-config
-   sync fail silently and the controller fall back to its own map.
+   A physical reel has 64 leaves because it is a physical object. These modules are DRAWN,
+   so there is nothing to ration: the reel carries ONE FLAP FOR EVERY GLYPH THE FONT CAN
+   DRAW. Every printable Windows-1252 character now has somewhere to land, instead of the
+   99 of them ($ % ( ) + [ ] { } © ° « » ¿ À Á Â Ã Å Æ Ç È É ...) that the old 64-flap
+   German reel could only show as a blank.
 
-   The COUNT is protocol; the CONTENT is ours. VM_DEFAULT_REEL in vmodule.cpp is a GERMAN
-   reel: relative to the classic reel it spends five symbol flaps ($ ( ) + %) on the five
-   Germany needs (A/O/U-umlaut, eszett, euro). Flap 0 is blank (the home position); the
-   seven colour flaps sit at the END (57..63) -- VM_COLOUR_BASE is defined from that, so
-   they must stay last. It is safe because the only lowercase on the reel are 'q' and the
-   colour codes, so vmFlapIndexOf's first-match scan resolves 'r' to red, not 'R'. */
-#define SF_MAX_FLAPS         64    // the real reel: 1 blank + 56 glyphs + 7 colours
-#define SF_COLOUR_FLAPS      7     // r o y g b p w, reel indices 57..63
+   The reel is 156 characters + 7 colour flaps = 163, and it is BUILT AT BOOT (vmBuildReel)
+   rather than typed out: every printable CP1252 byte, in code-point order, skipping the
+   lowercase letters. It is not stored per module and it is not configurable -- a reel that
+   can already draw everything has nothing left to reconfigure, so the 'N' command and the
+   flap-set editor are gone.
+
+   NO LOWERCASE, and that is load-bearing, not cosmetic. A real reel is printed in capitals,
+   so lowercase folds to uppercase (cp1252ToUpper) -- and it MUST, because the seven colour
+   flaps are addressed by the lowercase letters r o y g b p w. Put lowercase on the reel and
+   vmFlapIndexOf's scan would resolve 'r' to the letter, and every colour command any
+   controller has ever sent would silently start printing letters instead of colours.
+
+   Flap 0 is blank (the home position). The colours sit LAST -- VM_COLOUR_BASE is derived
+   from that, so they must stay there.
+
+   ONE COMPATIBILITY NOTE, deliberately accepted: the 'A' reply reports flapCount, and
+   splitflap-os (server/app.py) rejects any count outside 1..64, so it will refuse this
+   reel and fall back to its own map. That costs nothing here -- it addresses flaps BY
+   CHARACTER ('-'), never by index, so all of its text still displays exactly as before.
+   The gateway's own UI/REST/MQTT are unaffected: they resolve by character too. */
+#include "reel.h"          // SF_MAX_FLAPS / SF_COLOUR_FLAPS / SF_CHAR_FLAPS, and the reel
+                           // itself -- Arduino-free, so tools/reel_test.cpp compiles the
+                           // very same code rather than a copy of it.
 #define SF_MAX_TEXT          256   // longest text sfSendText will lay across modules
 
 /* ---- Buffer / queue sizes ----
@@ -333,7 +349,11 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 // "VMO" + a layout generation. The saved record embeds flapChars[SF_MAX_FLAPS], so
 // sizeof(VModule) is part of the file format: bump the low byte whenever the record
 // layout changes (e.g. SF_MAX_FLAPS), or vmLoad() will read the old layout as garbage.
-#define VMODULES_MAGIC   0x564D4F01UL   // "VMO" + layout generation 1
+#define VMODULES_MAGIC   0x564D4F02UL   // "VMO" + layout generation 2
+                                        // gen 2: the per-module flap table is gone
+                                        // (shared reel), so VModule and the on-disk
+                                        // record both shrank. A gen-1 file would
+                                        // deserialise into garbage -- reject it.
 
 /* ---- Companion settings blob (FFat) ---- */
 #define COMPANION_FILE       "/compset.gz"

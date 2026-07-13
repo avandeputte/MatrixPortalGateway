@@ -38,6 +38,29 @@ bool isFlapByte(uint8_t b) {
   return b >= 0xA1 && b <= 0xFF;                         // Latin-1 letters, incl. 0xFF
 }
 
+// The lowercase LETTERS of CP1252 -- the ones that fold onto an uppercase flap. See the
+// header for why each exception is here; every one of them is a byte that looks like it
+// belongs in a range but does not.
+bool cp1252IsLower(uint8_t b) {
+  if (b >= 'a' && b <= 'z')                 return true;   // a-z
+  if (b == 0x9A || b == 0x9C || b == 0x9E)  return true;   // s-caron, oe-ligature, z-caron
+  if (b == 0xDF)                            return false;  // eszett: no uppercase exists
+  if (b == 0xF7)                            return false;  // division sign, not a letter
+  if (b >= 0xE0 && b <= 0xFE)               return true;   // a-grave .. thorn
+  if (b == 0xFF)                            return true;   // y-diaeresis -> 0x9F
+  return false;                                            // 0xB5 micro, 0xAA/0xBA ordinals...
+}
+
+uint8_t cp1252ToUpper(uint8_t b) {
+  if (!cp1252IsLower(b)) return b;
+  if (b >= 'a' && b <= 'z') return (uint8_t)(b - 'a' + 'A');
+  if (b == 0x9A) return 0x8A;               // s-caron  -> S-caron
+  if (b == 0x9C) return 0x8C;               // oe       -> OE
+  if (b == 0x9E) return 0x8E;               // z-caron  -> Z-caron
+  if (b == 0xFF) return 0x9F;               // y-diaeresis -> Y-diaeresis (NOT 0xDF!)
+  return (uint8_t)(b - 0x20);               // Latin-1: uppercase sits exactly 0x20 below
+}
+
 size_t utf8ToFlap(const char* in, char* out, size_t outSize, bool* allMapped) {
   size_t oi = 0;
   bool   mapped = true;

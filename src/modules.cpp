@@ -233,26 +233,17 @@ void sfTrackChar(int addr, char c) {
 // with, only 'q' and the colour codes). Accented lowercase is folded too.
 void sfSendChar(int addr, char c) {
   uint8_t b = (uint8_t)c;
-  // The reel has no lowercase, so fold to uppercase or the flap will not resolve.
+  // The reel is printed in capitals -- like a real one -- so lowercase must fold to its
+  // uppercase flap or it will not resolve. The seven colour codes are the exception:
+  // r o y g b p w are lowercase BY PROTOCOL, not letters, and folding them would turn
+  // red into the letter R.
   //
-  // ASCII a-z -- but NOT the seven colour codes, which are lowercase r/o/y/g/b/p/w by
-  // protocol, not letters, and would become R/O/Y/G/B/P/W if folded.
-  if (b >= 'a' && b <= 'z' && !strchr("roygbpw", (char)b)) {
-    b = (uint8_t)(b - 'a' + 'A');
-  }
-  // CP1252 accented lowercase. Latin-1 places every accented uppercase exactly 0x20
-  // below its lowercase, so this folds a-umlaut (0xE4) -> A-umlaut (0xC4), and likewise
-  // o-umlaut and u-umlaut -- without which typing "muenchen" with real umlauts would
-  // show blanks on a reel that only carries the uppercase forms.
-  // Two bytes in that range are NOT letters and must not be folded:
-  //   0xF7 is the division sign (its "uppercase" 0xD7 is the multiplication sign);
-  //   0xFF is y-diaeresis, whose uppercase is 0x9F in CP1252 -- NOT 0xDF. Folding it
-  //         by 0x20 would silently turn it into an eszett.
-  // Eszett (0xDF) itself has no uppercase and is already on the reel, so it passes
-  // through untouched.
-  else if (b >= 0xE0 && b <= 0xFE && b != 0xF7) {
-    b = (uint8_t)(b - 0x20);
-  }
+  // cp1252ToUpper() is the single definition of that rule (charset.cpp). The module folds
+  // with the same function when it resolves a frame, and the reel is BUILT by excluding
+  // exactly what cp1252IsLower() accepts -- so the three cannot drift apart. This used to
+  // be a hand-rolled copy of the rule right here, complete with its own commentary about
+  // 0xF7 and 0xFF.
+  if (!strchr("roygbpw", (char)b)) b = cp1252ToUpper(b);
   if (!isFlapByte(b)) return;                                 // not a valid flap glyph
   char buf[24];
   if (addr < 0)
@@ -275,42 +266,7 @@ void sfSendIndex(int addr, int idx) {
   // Display tracking handled centrally in rs485Send via sfTrackFromFrame.
 }
 
-// Configure the runtime flap set ('N' command, firmware v31+).
-//   m<id>N<count>:<chars>   (direct)        m*N<count>:<chars>   (broadcast)
-// Both parts are optional and independent: a count<1 omits the count digits, and
-// an empty/NULL chars omits the ":<chars>" tail, so the firmware leaves that side
-// unchanged. The char set is sent verbatim (it may contain ':') -- the caller is
-// responsible for stripping CR/LF, which would otherwise terminate the frame.
-// No reply: the module applies 'N' silently (read it back via 'A').
-void sfSetFlapConfig(int addr, int count, const char* chars) {
-  bool hasCount = (count >= 1 && count <= SF_MAX_FLAPS);
-  bool hasChars = (chars && chars[0]);
-  if (!hasCount && !hasChars) return;            // nothing to set
-  char buf[16 + SF_MAX_FLAPS + 1];               // "m255N64:" + up to 64 chars + '\n'
-  int n = (addr < 0) ? snprintf(buf, sizeof(buf), "m*N")
-                     : snprintf(buf, sizeof(buf), "m%dN", addr);
-  if (hasCount) n += snprintf(buf + n, sizeof(buf) - n, "%d", count);
-  if (hasChars) n += snprintf(buf + n, sizeof(buf) - n, ":%s", chars);
-  snprintf(buf + n, sizeof(buf) - n, "\n");
-  rs485SendStr(buf);
-}
 
-// Configure the flap set by serial number (mXN<sn>:<count>:<chars>). The two
-// colons are always emitted so the firmware's field parser (sn / count / chars)
-// stays aligned; an omitted count leaves that field empty (unchanged), and an
-// omitted char set leaves the trailing field empty (unchanged).
-void sfSetFlapConfigBySN(const char* sn, int count, const char* chars) {
-  bool hasCount = (count >= 1 && count <= SF_MAX_FLAPS);
-  bool hasChars = (chars && chars[0]);
-  if (!hasCount && !hasChars) return;
-  char buf[32 + SF_MAX_FLAPS + 1];
-  int n = snprintf(buf, sizeof(buf), "mXN%s:", sn);
-  if (hasCount) n += snprintf(buf + n, sizeof(buf) - n, "%d", count);
-  n += snprintf(buf + n, sizeof(buf) - n, ":");
-  if (hasChars) n += snprintf(buf + n, sizeof(buf) - n, "%s", chars);
-  snprintf(buf + n, sizeof(buf) - n, "\n");
-  rs485SendStr(buf);
-}
 
 // Home one module or all (addr=-1)
 void sfHome(int addr) {
@@ -658,7 +614,7 @@ void sfParseResponse(const uint8_t* data, size_t len) {
     // itself contain ':', so take it verbatim to end-of-string). A pre-v31 'A'
     // reply has only 7 colons and no tail, leaving these at -99/"".
     int  aFlapCount = -99;
-    char aFlapChars[SF_MAX_FLAPS + 1] = "";
+    char aFlapChars[SF_MAX_FLAPS + 1] = "";   // the whole 163-flap reel
     {
       int colons = 0; const char* c8 = nullptr; const char* c9 = nullptr;
       for (const char* cp = aBuf; *cp; cp++) {

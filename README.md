@@ -31,6 +31,24 @@ tell the difference.
 
 ---
 
+## New in 1.5
+
+- **The reel carries every Windows-1252 character.** 64 flaps became **163** — 156 glyphs +
+  7 colours — so the 99 characters that used to come out blank (`$ % ( ) + < > [ ] { } © ° «
+  » ¿ À Á Â Ã Å Æ Ç È É Ê Ë …`) now display. A physical reel has 64 leaves because it is a
+  physical object; these are drawn, so there is nothing to ration.
+- **The flap set is no longer editable, and no longer stored per module.** A reel that can
+  already render everything has nothing to reconfigure, so the `N` command, `POST
+  /api/flap/flapconfig`, the `<prefix>/flap/flapconfig` MQTT topic and the flap-set editor
+  are all gone. That also handed back **5.1 KB of internal RAM** on a 75-module wall
+  (`sizeof(VModule)` 108 → 40 bytes) — the same RAM the panel framebuffer and WiFi contend
+  for.
+- The reel is now **built at boot** from the font's own repertoire and the folding rule,
+  rather than typed out, and lives in `src/reel.h` — free of Arduino, so
+  `tools/reel_test.cpp` compiles the *same* code instead of a copy of it.
+
+---
+
 ## New in 1.4
 
 - **The registry now reconciles against the wall at boot.** Discovery only ran when the
@@ -137,55 +155,75 @@ they live.
 
 ## The reel
 
-Each virtual module carries **64 flaps** — the same count as a real module. The default reel
-is a **German** layout:
+Each virtual module carries **163 flaps**: every printable Windows-1252 glyph the font can
+draw, then the seven colours.
+
+A physical reel has 64 leaves because it is a physical object. These modules are *drawn*, so
+there is nothing to ration — the reel simply carries **one flap for every character**, and any
+Windows-1252 character you send has somewhere to land.
 
 | Index | Contents |
 |---|---|
 | `0` | blank (the home position) |
-| `1`–`26` | `A`–`Z` |
-| `27`–`30` | `Ä Ö Ü ß` |
-| `31`–`40` | `0`–`9` |
-| `41`–`56` | `! @ # & € - = ; q : ' . , / ? *` |
-| `57`–`63` | the seven colour flaps: `r o y g b p w` |
+| `0`–`155` | the CP1252 repertoire in code-point order, **minus the lowercase letters** |
+| `156`–`162` | the seven colour flaps: `r o y g b p w` |
 
 ```
- ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜß0123456789!@#&€-=;q:'.,/?*roygbpw
+ !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`{|}~€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™›Ÿ
+¡¢£¤¥¦§¨©ª«¬®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞß÷roygbpw
 ```
 
-The reel is a *character set*, not a hardware constant: it is set per module by the `N`
-command (`POST /api/flap/flapconfig`) and only defaults to the layout above. It swaps five of
-the classic reel's symbols (`$ ( ) + %`) for the five German needs (`Ä Ö Ü ß` and `€`); the
-rest matches the reel every existing controller assumes. **This is not byte-identical to the
-[companion](../../SplitFlapGatewayCompanion)'s built-in `DEFAULT_FLAP_CHARS`** — text sent by
-character still lands correctly (see below), but a controller that sends one of the five
-dropped symbols will get a blank, and the umlauts and `€` are reachable from *this* gateway's
-own UI/API, which decode UTF-8 to Windows-1252.
+The reel is **shared, complete and fixed**. It is not stored per module, and it is not
+configurable: a drawn reel that can already render everything has nothing left to reconfigure,
+so the `N` command and the flap-set editor are gone. (The split-flap gateway keeps both — its
+reels are real, and what is printed on them is a fact about the hardware.)
 
-The `"` flap lives at index `49` and is addressed as `q` — the classic reel has no lowercase,
-so the firmware's char map has always borrowed that byte for the double quote. The renderer
-draws it back as `"` so the wall shows a quote, not a `q`.
+It is **built at boot**, not typed out — from `isFlapByte()` and `cp1252IsLower()`, which
+already own *which bytes exist* and *which bytes are lowercase*. Add a glyph to the font and
+the reel grows a flap for it; it cannot drift from the font or from the folding rule. The
+whole thing lives in `src/reel.h`, deliberately free of Arduino, so `tools/reel_test.cpp`
+compiles the *same* code rather than a copy of it.
+
+### No lowercase — and that is load-bearing
+
+The reel is printed in capitals, like a real one, so **lowercase folds to uppercase**
+(`cp1252ToUpper`). That is not a stylistic choice. The seven colour flaps are addressed by the
+**lowercase letters** `r o y g b p w` — that is the protocol. Put lowercase letters on the reel
+and a lookup for `r` would find the *letter*, and every colour command ever written would
+quietly start printing letters instead of colours.
+
+Folding has traps, and `charset.cpp` owns all of them in one place: `ÿ` uppercases to `Ÿ`
+(`0x9F`), **not** to `ß` — a naive `-0x20` turns a y-diaeresis into an eszett. `÷` is the
+division sign, not a letter, so it keeps its own flap rather than folding onto `×`. `ß` has no
+uppercase in CP1252 at all, so it keeps a flap too. `œ`, `š` and `ž` uppercase nowhere near a
+`0x20` offset. `µ`, `ª` and `º` look lowercase but are symbols.
+
+`tools/reel_test.cpp` pins every one of those down against the real code.
 
 ### Why `m5-r` shows red and not the letter r
 
-The protocol addresses the colour flaps by the lowercase letters `r o y g b p w`. The reel
-also carries the *uppercase* letters, so something has to disambiguate.
+`vmFlapIndexOf()` resolves a character in a fixed order, and the order *is* the contract:
 
-Two things do. First, the module firmware's `flapIndexOf()` is a **first-match scan**, and the
-only lowercase bytes on the reel are `q` and the seven colour codes — so `r` can only be the
-red flap at index 57 (uppercase `R` is a different byte, at index 18). Second, `sfSendChar()`
-**uppercases** every ASCII letter before sending — *except* the seven colour codes:
+1. **the colour codes first.** `r o y g b p w` are lowercase by protocol, not letters by
+   meaning. Checking them before anything else is what guarantees `r` can only ever be red.
+2. **`q`** — splitflap-os's legacy alias for the double-quote flap. The classic reel had no
+   lowercase, so its char map borrowed that byte. This reel carries a real `"`, so the alias
+   is honoured rather than the frame being dropped.
+3. **fold to uppercase** (`cp1252ToUpper`) — the reel is printed in capitals.
+4. **scan the 156 glyph flaps** — never the colours, which step 1 already owns.
 
 ```
-m5-r      → flap 57   the red colour flap  (colour codes are never folded)
-m5-R      → flap 18   the letter R
-m5-a      → flap 1    folded to 'A'        (the reel has no lowercase letters)
-m5-A      → flap 1    the letter A
+m5-r      → flap 156  the RED colour flap   (colour codes are never folded)
+m5-R      → flap 50   the letter R
+m5-a      → flap 33   folded to 'A'         (the reel has no lowercase letters)
+m5-é      → flap 132  folded to 'É'
+m5-$      → flap 4    used to be a blank — the old 64-flap reel had no '$'
+m5-q      → flap 2    the '"' flap          (the legacy alias)
 m5+0      → flap 0    blank
 ```
 
-So `hello` renders `HELLO`, and `m5-r` still means red — every existing colour command works
-unchanged. Accented lowercase folds too (`ä` → `Ä`), so text with real umlauts displays.
+So `hello` still renders `HELLO`, `m5-r` still means red, and **every existing colour command
+works unchanged** — while 99 characters that used to come out blank now display.
 
 ---
 

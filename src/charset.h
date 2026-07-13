@@ -46,6 +46,25 @@ size_t utf8ToFlap(const char* in, char* out, size_t outSize, bool* allMapped = n
 // lives in one place. Exactly 216 bytes qualify.
 bool isFlapByte(uint8_t b);
 
+// A split-flap reel carries no lowercase -- the leaves are printed in capitals -- so a
+// lowercase letter has no flap of its own and must fold to its uppercase one. These two
+// answer "is this byte a lowercase LETTER" and "what is its uppercase", for the whole
+// CP1252 repertoire, and they are the single definition of that rule: the gateway folds
+// with them before transmitting, the virtual module folds with them when resolving a
+// frame, and the reel is BUILT by excluding exactly what cp1252IsLower() accepts. Three
+// places that must agree, one function that decides.
+//
+// The traps, all of which have bitten:
+//   * 0xF7 is the division sign, not a letter -- its "uppercase" 0xD7 is multiplication;
+//   * 0xFF (y-diaeresis) uppercases to 0x9F, NOT 0xDF -- folding it by 0x20 would
+//     silently turn it into an eszett;
+//   * 0xDF (eszett) has no uppercase in CP1252 at all, so it keeps its own flap;
+//   * 0x9A/0x9C/0x9E (s-caron, oe-ligature, z-caron) uppercase to 0x8A/0x8C/0x8E, which
+//     is nowhere near a 0x20 offset;
+//   * 0xB5 (micro) and 0xAA/0xBA (ordinals) look lowercase but are symbols.
+bool    cp1252IsLower(uint8_t b);
+uint8_t cp1252ToUpper(uint8_t b);   // returns `b` unchanged if it is not a lowercase letter
+
 // Append the UTF-8 encoding of one flap byte to `out` (1-3 bytes, NOT
 // NUL-terminated); returns the number of bytes written. `out` must have room for
 // at least 3 bytes.

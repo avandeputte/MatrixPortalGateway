@@ -17,7 +17,6 @@ static void handleApiConfigRS485();
 static void handleApiConfigSettings();
 static void handleApiConfigWifi();
 static void handleApiDisplayState();
-static void handleApiFlapConfig();
 static void handleApiHome();
 static void handleApiIdentify();
 static void handleApiIndex();
@@ -41,7 +40,6 @@ static void handleLogo();
 static void handleOptions();
 static void handleRoot();
 static void sendJsonError(int code, const char* msg);
-static const char* sfValidateCharSet(const char* charSet, char* out, size_t outLen);
 
 /* ----------------------------------------------------------
    Web server
@@ -620,7 +618,7 @@ static void handleApiConfigGet() {
   doc["flapMax"]       = cfg.flapMax;
   doc["gridColor"]     = cfg.gridColor;   // 0xRRGGBB seam colour
   doc["gridBright"]    = cfg.gridBright;   // 0 = grid off
-  doc["maxFlaps"]      = SF_MAX_FLAPS;
+  doc["maxFlaps"]      = SF_MAX_FLAPS;   // 163: the reel carries every CP1252 glyph
   char out[1280];   // headroom for identity + panel + JSON-escaped SSID/TZ/hostname
   serializeJson(doc, out, sizeof(out));
   server.send(200, "application/json", out);
@@ -845,68 +843,7 @@ static void handleOptions() {
 
 // ?? New command handlers ??????????????????????????????????????????
 
-// Validate and transcode a flap character set. `charSet` is UTF-8 (as received
-// over JSON); it is converted to the single-byte flap encoding (Windows-1252)
-// the bus protocol and module firmware use -- so euro signs and accented letters
-// each become one flap byte (see charset.h). On success the encoded bytes are
-// written to `out` (NUL-terminated) and NULL is returned; otherwise a
-// human-readable error message is returned.
-static const char* sfValidateCharSet(const char* charSet, char* out, size_t outLen) {
-  char tmp[SF_MAX_FLAPS * 4 + 4];          // hold the transcode before length-check
-  bool allMapped = true;
-  size_t n = utf8ToFlap(charSet, tmp, sizeof(tmp), &allMapped);
-  if (!allMapped)        return "charSet has characters not in Windows-1252";
-  if (n == 0)            return "charSet has no displayable characters";
-  if (n > SF_MAX_FLAPS)  return "charSet too long";
-  if (n + 1 > outLen)    return "charSet too long";
-  memcpy(out, tmp, n + 1);
-  return nullptr;
-}
 
-// POST /api/flap/flapconfig  -- configure a module's flap set ('N', firmware v31+)
-//   {"id":5,"flapCount":40,"charSet":" ABC..."}      direct (id=-1 broadcasts m*N)
-//   {"sn":"AABB...","flapCount":40,"charSet":"..."}  by serial number
-// flapCount (1..SF_MAX_FLAPS) and charSet are INDEPENDENT and optional; at least one is
-// required. An omitted/empty side is left unchanged on the module. No reply -- the
-// module applies 'N' silently; read it back with /api/flap/all (firmware v31+).
-static void handleApiFlapConfig() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
-  JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return;
-  }
-  const char* sn        = doc["sn"]        | "";
-  int         id        = doc["id"]        | -99;
-  int         flapCount = doc["flapCount"] | 0;     // 0 = leave unchanged
-  const char* charSet   = doc["charSet"]   | "";
-  bool hasCount = (flapCount != 0);
-  bool hasChars = (charSet[0] != 0);
-  if (!hasCount && !hasChars) { sendJsonError(400, "flapCount or charSet required"); return; }
-  if (hasCount && (flapCount < 1 || flapCount > SF_MAX_FLAPS)) {
-    sendJsonError(400, "flapCount out of range"); return;
-  }
-  char chars[SF_MAX_FLAPS + 1] = "";
-  if (hasChars) {
-    const char* err = sfValidateCharSet(charSet, chars, sizeof(chars));
-    if (err) { sendJsonError(400, err); return; }
-  }
-  int   reqCount = hasCount ? flapCount : 0;
-  const char* reqChars = hasChars ? chars : nullptr;
-  if (sn[0]) {
-    { char cd[LOG_TEXT_MAX];
-      snprintf(cd, sizeof(cd), "flap config SN %s (count=%d, chars='%.40s')", sn, flapCount, chars);
-      logCommand('R', cd); }
-    sfSetFlapConfigBySN(sn, reqCount, reqChars);
-  } else {
-    if (id < -1 || id > 254) { sendJsonError(400, "id required (-1 broadcast, 0-254)"); return; }
-    { char cd[LOG_TEXT_MAX];
-      snprintf(cd, sizeof(cd), "flap config module %d (count=%d, chars='%.40s')", id, flapCount, chars);
-      logCommand('R', cd); }
-    sfSetFlapConfig(id, reqCount, reqChars);
-  }
-  server.send(200, "application/json", "{\"ok\":true}");
-}
 
 
 // POST /api/flap/all  {"id":N}
@@ -1409,8 +1346,6 @@ void webInit() {
   server.on("/api/flap/version",     HTTP_OPTIONS, handleOptions);
   server.on("/api/flap/all",               HTTP_POST,    handleApiAll);
   server.on("/api/flap/all",               HTTP_OPTIONS, handleOptions);
-  server.on("/api/flap/flapconfig",      HTTP_POST,    handleApiFlapConfig);
-  server.on("/api/flap/flapconfig",      HTTP_OPTIONS, handleOptions);
   server.on("/api/status",           HTTP_GET,     handleApiStatus);
   server.on("/api/mqtt/test",        HTTP_POST,    handleApiMqttTest);
   server.on("/api/mqtt/test",        HTTP_OPTIONS, handleOptions);

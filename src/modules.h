@@ -90,12 +90,6 @@ void sfModulesClear();
 void sfTrackChar(int addr, char c);
 void sfSendChar(int addr, char c);
 void sfSendIndex(int addr, int idx);
-// Configure a module's flap set ('N' command, firmware v31+). count and chars
-// are INDEPENDENT and optional: pass count<1 to leave the count unchanged, and
-// chars=NULL/"" to leave the character set unchanged. addr<0 broadcasts (m*N).
-void sfSetFlapConfig(int addr, int count, const char* chars);
-// Same, addressed by serial number (mXN<sn>:<count>:<chars>).
-void sfSetFlapConfigBySN(const char* sn, int count, const char* chars);
 void sfHome(int addr);
 void sfQueryVersion(int addr);
 bool sfSendAndCaptureDump(int id, const char* frame, unsigned long timeoutMs, char* out, size_t outLen);

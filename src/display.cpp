@@ -199,14 +199,10 @@ static void drawFace(int cx, int cy, const FaceSnap& f, Ink ink, int rowFrom, in
     if (a < b) panelFillRect(cx + padX, cy + a, fn.width, b - a, ink.r, ink.g, ink.b);
     return;
   }
-  // Reel index 49 is the DOUBLE-QUOTE flap, but the protocol addresses it as 'q':
-  // the real reel has no lowercase, so the firmware's char map borrowed that byte,
-  // and splitflap-os rewrites '"' -> 'q' before sending. Draw what the physical flap
-  // actually shows. Nothing else can legitimately reach here as a lowercase 'q' --
-  // sfSendChar folds lowercase to uppercase, and 'q' is not a colour code.
-  uint8_t fch = (uint8_t)f.ch;
-  if (fch == 'q') fch = '"';
-  uint8_t gi = FONT1252_INDEX[fch];
+  // The reel now carries a real '"' flap, so the old q->" substitution that used to
+  // live here is gone: 'q' is resolved to the quote flap by vmFlapIndexOf, one layer
+  // down, and what arrives here is already the character the flap shows.
+  uint8_t gi = FONT1252_INDEX[(uint8_t)f.ch];
   if (gi == 0xFF) return;                       // no glyph (blank flap)
   int gx = cx + padX, gy = cy + padY;
   int wide = (fn.width < gPanel.cellW) ? fn.width : gPanel.cellW;
@@ -312,14 +308,15 @@ bool dispRender() {
   if (n > VM_MAX_MODULES) n = VM_MAX_MODULES;
   for (int i = 0; i < n; i++) {
     const VModule& m = vmods[i];
-    int cur  = (m.curIndex >= 0 && m.curIndex < m.flapCount) ? m.curIndex : 0;
-    int next = (m.flapCount > 0) ? (cur + 1) % m.flapCount : 0;
+    int cur  = (m.curIndex >= 0 && m.curIndex < SF_MAX_FLAPS) ? m.curIndex : 0;
+    int next = (cur + 1) % SF_MAX_FLAPS;
     snap[i].phase       = m.flipPhase;
-    snap[i].cur.ch      = vmFlapCharAt(m, cur);
-    snap[i].cur.colour  = vmFlapIsColour(m, cur)  ? (int8_t)(cur  - m.colourBase) : -1;
-    snap[i].next.ch     = vmFlapCharAt(m, next);
-    snap[i].next.colour = vmFlapIsColour(m, next) ? (int8_t)(next - m.colourBase) : -1;
-    // A reel reconfigured by 'N' can put a colour index past the palette.
+    snap[i].cur.ch      = vmFlapCharAt(cur);
+    snap[i].cur.colour  = vmFlapIsColour(cur)  ? (int8_t)(cur  - VM_COLOUR_BASE) : -1;
+    snap[i].next.ch     = vmFlapCharAt(next);
+    snap[i].next.colour = vmFlapIsColour(next) ? (int8_t)(next - VM_COLOUR_BASE) : -1;
+    // The reel is fixed now, so a colour index can no longer be pushed past the palette
+    // by a reconfigured reel -- but the clamp costs nothing and the palette is only 7.
     if (snap[i].cur.colour  >= SF_COLOUR_FLAPS) snap[i].cur.colour  = -1;
     if (snap[i].next.colour >= SF_COLOUR_FLAPS) snap[i].next.colour = -1;
   }

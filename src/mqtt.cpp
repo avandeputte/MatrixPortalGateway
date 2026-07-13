@@ -243,9 +243,6 @@ void haPublishDiscovery(bool enable) {
 //   <prefix>/flap/set      {"id":5,"char":"A"}  or  {"id":5,"index":3}
 //                          {"id":-1,"text":"HELLO","start":0}  multi-module text
 //   <prefix>/flap/home     {"id":5}  or  {"id":-1}  (broadcast)
-//   <prefix>/flap/flapconfig {"id":5,"flapCount":40,"charSet":" ABC..."}  (firmware
-//                          v31+; id=-1 broadcasts; or target "sn"; flapCount and
-//                          charSet are independent and optional)
 static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   // Control topics are handled FIRST, before the maintenance-mode gate, so the
   // maintenance and quiet switches remain reachable over MQTT/HA even while
@@ -299,11 +296,10 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   buf[length] = 0;
 
   // Compare topic using char* to avoid heap String allocation on every message
-  char sendTopic[80], setTopic[80], homeTopic[80], flapCfgTopic[80];
+  char sendTopic[80], setTopic[80], homeTopic[80];
   snprintf(sendTopic, sizeof(sendTopic), "%s/send",           cfg.mqttPrefix);
   snprintf(setTopic,  sizeof(setTopic),  "%s/flap/set",       cfg.mqttPrefix);
   snprintf(homeTopic, sizeof(homeTopic), "%s/flap/home",      cfg.mqttPrefix);
-  snprintf(flapCfgTopic, sizeof(flapCfgTopic), "%s/flap/flapconfig", cfg.mqttPrefix);
   char dispTopic[80];
   snprintf(dispTopic, sizeof(dispTopic), "%s/display/set", cfg.mqttPrefix);
 
@@ -393,36 +389,6 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
       logCommand('M', cd); }
     sfHome(id < 0 ? -1 : id);
   }
-  // Configure flap set ('N', firmware v31+). flapCount (1-64) and charSet are
-  // independent and optional; at least one is required. Target by id (id=-1
-  // broadcasts m*N) or by serial number (sn). The UTF-8 charSet is transcoded to
-  // Windows-1252 (euro/accented glyphs become one flap byte each); an unmappable
-  // char or an over-long / out-of-range request is dropped.
-  //   {"id":5,"flapCount":40,"charSet":" ABC..."}   or  {"sn":"AABB...","charSet":"..."}
-  else if (strcmp(topic, flapCfgTopic) == 0) {
-    const char* sn      = doc["sn"]        | "";
-    int   id            = doc["id"]        | -99;
-    int   flapCount     = doc["flapCount"] | 0;
-    const char* charSet = doc["charSet"]   | "";
-    bool hasCount = (flapCount != 0);
-    bool hasChars = (charSet[0] != 0);
-    if ((!hasCount && !hasChars) ||
-        (hasCount && (flapCount < 1 || flapCount > SF_MAX_FLAPS))) return;
-    char enc[SF_MAX_FLAPS * 4 + 4];
-    if (hasChars) {
-      bool allMapped = true;
-      size_t n = utf8ToFlap(charSet, enc, sizeof(enc), &allMapped);
-      if (!allMapped || n == 0 || n > SF_MAX_FLAPS) return;   // unmappable / empty / too long
-    }
-    int   reqCount = hasCount ? flapCount : 0;
-    const char* reqChars = hasChars ? enc : nullptr;
-    { char cd[LOG_TEXT_MAX];
-      if (sn[0]) snprintf(cd, sizeof(cd), "flap config SN %s (count=%d, chars='%.40s')", sn, flapCount, charSet);
-      else       snprintf(cd, sizeof(cd), "flap config module %d (count=%d, chars='%.40s')", id, flapCount, charSet);
-      logCommand('M', cd); }
-    if (sn[0])               sfSetFlapConfigBySN(sn, reqCount, reqChars);
-    else if (id >= -1 && id <= 254) sfSetFlapConfig(id, reqCount, reqChars);
-  }
 }
 
 // Called once from setup(). Initialises MQTT settings that allocate heap
@@ -462,7 +428,6 @@ void mqttConnect() {
     snprintf(t,sizeof(t),"%s/send",           cfg.mqttPrefix); mqtt.subscribe(t);
     snprintf(t,sizeof(t),"%s/flap/set",       cfg.mqttPrefix); mqtt.subscribe(t);
     snprintf(t,sizeof(t),"%s/flap/home",      cfg.mqttPrefix); mqtt.subscribe(t);
-    snprintf(t,sizeof(t),"%s/flap/flapconfig",cfg.mqttPrefix); mqtt.subscribe(t);
     snprintf(t,sizeof(t),"%s/display/set",    cfg.mqttPrefix); mqtt.subscribe(t);
     snprintf(t,sizeof(t),"%s/maintenance/set",cfg.mqttPrefix); mqtt.subscribe(t);
     snprintf(t,sizeof(t),"%s/quiet/set",      cfg.mqttPrefix); mqtt.subscribe(t);

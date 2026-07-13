@@ -79,6 +79,7 @@ void setup() {
   // 5. Filesystem, then the two things that restore from it: the virtual
   //    modules' own state and the gateway's sticky registry.
   sfFsInit();
+  vmBuildReel();      // the shared reel: every CP1252 glyph, then the colours
   vmInit((int)gPanel.cols * (int)gPanel.rows);
   sfModulesLoad();
 
