@@ -59,6 +59,34 @@
 #include <Update.h>
 #include <FFat.h>
 #include <ESPmDNS.h>
+#include <esp_mac.h>
+
+/* ---- This board's unique id -------------------------------------------------------
+   Derived from the NIC-specific half of the MAC (bytes 3..5) -- the only part that
+   actually differs between two boards.
+
+   NOT ESP.getEfuseMac() masked, which is the trap this exists to close.
+   esp_efuse_mac_get_default() writes the six MAC bytes in NETWORK order, and Arduino's
+   EspClass reads that same buffer straight back as a LITTLE-endian uint64 -- so the LOW
+   bytes of the value it returns are the OUI (48:27:e2), which is identical on every
+   Espressif chip ever made. Masking the low 24 or 32 bits therefore hands EVERY board
+   the same "unique" id.
+
+   That is not theoretical. Two of these gateways on one LAN both derived the hostname
+   splitflap-gw-e22748 and both connected to MQTT as splitflap-20E22748 -- and a broker
+   evicts the client already holding a duplicate id, so the pair knocked each other
+   offline in a loop, forever.                                                          */
+static inline uint32_t boardId24() {          // 6 hex digits -- hostname suffix
+  uint8_t m[6] = {0};
+  esp_efuse_mac_get_default(m);
+  return ((uint32_t)m[3] << 16) | ((uint32_t)m[4] << 8) | (uint32_t)m[5];
+}
+static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id, HA node id
+  uint8_t m[6] = {0};
+  esp_efuse_mac_get_default(m);
+  return ((uint32_t)m[2] << 24) | ((uint32_t)m[3] << 16)
+       | ((uint32_t)m[4] << 8)  | (uint32_t)m[5];
+}
 
 /* ============================================================================
  *  BOARD / BUILD CONFIGURATION
@@ -112,7 +140,7 @@
 #define RTC_YEAR_OFFSET   2000
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "1.2.0"   // this product's version (UI + boot log)
+#define FW_VERSION           "1.2.1"   // this product's version (UI + boot log)
 // The gateway REST/MQTT surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it

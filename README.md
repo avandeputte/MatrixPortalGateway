@@ -31,6 +31,20 @@ tell the difference.
 
 ---
 
+## New in 1.2.1
+
+- **Every board now has its own identity.** The auto hostname, the MQTT client id and the
+  Home Assistant device id were all derived from `ESP.getEfuseMac()`'s *low* bytes — which are
+  the Espressif OUI, identical on every ESP32 ever made. Two gateways on one LAN both called
+  themselves `splitflap-gw-e22748` and both connected to MQTT as `splitflap-20E22748`, and a
+  broker evicts the client already holding a duplicate id, so the pair knocked each other
+  offline in a loop. They now derive from the MAC bytes that actually differ.
+
+  > **If you use the Home Assistant integration, the device id changes** (`sfgw_20E22748` →
+  > `sfgw_E2205AC8`). Home Assistant will discover a new device. Delete the old one.
+
+---
+
 ## New in 1.2
 
 - **Quiet Time now blanks the wall.** Turning it on homes every reel to its blank flap — the

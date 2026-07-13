@@ -163,8 +163,7 @@ const char* cfgHostname() {
   if (cfg.hostname[0] && cfgValidHostname(cfg.hostname)) {
     strlcpy(host, cfg.hostname, sizeof(host));
   } else {
-    snprintf(host, sizeof(host), HOSTNAME_PREFIX "-%06lx",
-             (unsigned long)((uint32_t)ESP.getEfuseMac() & 0xFFFFFFul));
+    snprintf(host, sizeof(host), HOSTNAME_PREFIX "-%06lx", (unsigned long)boardId24());
   }
   return host;
 }
