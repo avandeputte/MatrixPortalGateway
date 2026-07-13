@@ -31,6 +31,19 @@ tell the difference.
 
 ---
 
+## New in 1.7
+
+- **The Modules tab is gone.** It made sense on the RS-485 gateway, where modules are real
+  things that show up, go missing, carry a serial and hold an EEPROM. Here every cell of the
+  wall *is* a module, all of them are always present, none has a serial worth reading and none
+  has an EEPROM at all — so the page could only ever say the same thing seventy-five times.
+  **Display** is the landing tab now.
+
+  The **`/api/flap/modules` endpoint stays** — the companion reads it to learn the wall, and
+  the Status tab still counts them. It is the *page* that had nothing to say, not the data.
+
+---
+
 ## New in 1.6
 
 - **Lowercase, and emoji.** The reel grows to **237 flaps**: the 156 Windows-1252 glyphs and

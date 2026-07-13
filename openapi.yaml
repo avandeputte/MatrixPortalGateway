@@ -291,7 +291,7 @@ paths:
       description: |
         Wipes both the in-memory registry and the persisted module file, then
         broadcasts `m*v` so every module re-announces its version and serial
-        number. This is the "Identify All" action in the web UI. Allow a few
+        number. Allow a few
         seconds for all modules to respond before reading `/api/flap/modules`.
       responses:
         "200":

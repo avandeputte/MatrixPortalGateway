@@ -1220,13 +1220,16 @@ static void handleApiQuietSchedule() {
    deep-link exactly the screens that exist here, rather than a list hard-coded over there
    that goes stale whenever this one changes.
 
-   Deliberately SHORTER than the split-flap gateway's list: this product has no Provision
-   and no Calibration tab, because its modules are drawn rather than driven and there is
-   nothing to calibrate. Advertising them would send the companion linking to panes that do
-   not exist. The id is the public one used in the URL hash ("status", not the pane id
+   Deliberately SHORTER than the split-flap gateway's list. This product has no Provision
+   and no Calibration tab -- its modules are drawn rather than driven, so there is nothing to
+   calibrate -- and as of v1.7 no MODULES tab either: every cell of the wall is a module, all
+   of them are always present, and none has a serial to inspect or an EEPROM to read. The
+   page could only ever say the same thing 75 times. (The /api/flap/modules ENDPOINT stays:
+   the companion reads it to learn the wall.) Advertising a tab that does not exist would
+   send the companion linking into thin air. The id is the public one used in the URL hash ("status", not the pane id
    "statusp"); keep it in step with the <nav> in ui/index.html and the M map beside it. */
-static const char* const GW_TAB_ID[]  = {"modules", "display", "monitor", "settings", "status"};
-static const char* const GW_TAB_LBL[] = {"Modules", "Display", "Monitor", "Settings", "Status"};
+static const char* const GW_TAB_ID[]  = {"display", "monitor", "settings", "status"};
+static const char* const GW_TAB_LBL[] = {"Display", "Monitor", "Settings", "Status"};
 static const size_t GW_TAB_N = sizeof(GW_TAB_ID) / sizeof(GW_TAB_ID[0]);
 
 // Store the tab list a companion advertised, re-serialised into gCompanionTabs.
