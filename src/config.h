@@ -52,6 +52,7 @@ struct GwConfig {
   uint16_t      panelW;        // total chain width in px (64 / 128)
   uint16_t      panelH;        // panel height in px (16 / 32 / 64)
   uint8_t       panelBitDepth; // bitplanes, 1..8 (RAM and refresh rate scale with it)
+  bool          panelBGR;      // panel wired BGR, not RGB: swap red and blue on output
   uint8_t       panelBright;   // 1..255, multiplied into every colour before it reaches the panel
   uint16_t      flapMs;        // ms per flap step -- the reel's speed
   uint8_t       flapMax;       // flips drawn for one change, 1..FLAP_ANIM_MAX

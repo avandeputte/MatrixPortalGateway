@@ -42,6 +42,15 @@ tell the difference.
   explicitly. See [Two ways in](#two-ways-in-and-they-are-not-the-same).
 - **The legacy protocol is untouched.** `m5-r` is still red, `hello` still renders `HELLO`, and
   the legacy flap indices never moved.
+- **A colour-order setting for BGR panels.** Some HUB75 panels are wired BGR, and on those
+  *every colour the firmware has ever drawn has been wrong* — red draws blue, blue draws
+  orange, yellow draws cyan — while green and white look fine, which is why it hides. See
+  [If every colour is wrong](#if-every-colour-is-wrong).
+- **Fixed: the pictographs drew nothing at all.** `font1252Row()` bounds-checked the glyph
+  index against `FONT1252_GLYPHS` (216), and the pictographs live at 216–229. The reel
+  resolved, the frame went out, the module flipped to the right flap, and the renderer
+  silently returned a blank row for every one of them. A bounds check that is one constant
+  out of date does not crash — it erases.
 
 ---
 
@@ -359,6 +368,33 @@ The ceiling on the emulated wall is **`VM_MAX_MODULES` = 128** (`src/vmodule.h`)
 reply queue is sized to match, so a 15 × 5 = 75-module wall has room to spare. A grid that
 exceeds the ceiling is quietly reduced, and the boot log says so.
 
+### If every colour is wrong
+
+Some HUB75 panels are wired **BGR**, not RGB. That is the panel's own hardware colour order,
+and nothing in the firmware can detect it. On a BGR panel every colour comes out wrong in a
+very specific pattern:
+
+| you ask for | a BGR panel draws |
+|---|---|
+| red | **blue** |
+| blue | **orange** |
+| yellow | **cyan** |
+| purple | **pink** |
+| **green** | green — correct |
+| **white** | white — correct |
+
+Green and white look perfectly normal, because green is its own channel and white is all
+three. That is exactly why this hides for so long: **text is white**, so nothing looks wrong
+until the first time you draw a colour.
+
+Tick **Settings → LED Panel → "Panel is wired BGR"**. It takes effect on the next frame — no
+reboot — so you can tick it and see the answer immediately. It is stored per board, because
+the next panel may well be RGB.
+
+The swap happens in `panelPixel()`, the single choke point every pixel passes through
+(`panelHLine`, `panelVLine` and `panelFillRect` all funnel into it), rather than by
+re-mapping the pins: the pin map is correct and matches Adafruit's reference.
+
 A 64-row panel needs the E address line, which is GPIO 21 on this board. A solder jumper on the
 MatrixPortal selects which HUB75 connector pin that reaches (pin 8 by default, or pin 16); match
 it to your panel.
@@ -388,7 +424,8 @@ Everything is on the Settings page and in `POST /api/config/settings`.
 |---|---|---|
 | `gridRows` × `gridCols` | 3 × 15 | **on reboot** — this creates and destroys modules (up to `VM_MAX_MODULES` = 128) |
 | `panelW` × `panelH` | 128 × 32 | **on reboot** — the panel driver takes geometry at init |
-| `panelBitDepth` | 4 | **on reboot** — 1…6; RAM and EMI scale with it |
+| `panelBitDepth` | 4 | **on reboot** — 1…6 RAM and EMI scale with it |
+| `panelBGR` | false | next frame — see [If every colour is wrong](#if-every-colour-is-wrong) |
 | `panelBright` | 160 | next frame |
 | `flapMs` | 60 | next flap |
 | `flapMax` | 64 | next change |

@@ -22,6 +22,7 @@ void cfgSetDefaults() {
   cfg.panelW        = DEFAULT_PANEL_W;
   cfg.panelH        = DEFAULT_PANEL_H;
   cfg.panelBitDepth = DEFAULT_BIT_DEPTH;
+  cfg.panelBGR      = DEFAULT_PANEL_BGR;
   cfg.panelBright   = DEFAULT_BRIGHTNESS;
   cfg.flapMs        = DEFAULT_FLAP_MS;
   cfg.flapMax       = DEFAULT_FLAP_MAX;
@@ -69,6 +70,7 @@ void loadConfig() {
   cfg.panelW        = (uint16_t)prefs.getInt  ("pW",     DEFAULT_PANEL_W);
   cfg.panelH        = (uint16_t)prefs.getInt  ("pH",     DEFAULT_PANEL_H);
   cfg.panelBitDepth =           prefs.getUChar("pDepth", DEFAULT_BIT_DEPTH);
+  cfg.panelBGR      =           prefs.getBool ("pBGR",   DEFAULT_PANEL_BGR);
   cfg.panelBright   =           prefs.getUChar("pBright",DEFAULT_BRIGHTNESS);
   cfg.flapMs        = (uint16_t)prefs.getInt  ("flapMs", DEFAULT_FLAP_MS);
   cfg.flapMax       =           prefs.getUChar("flapMax",DEFAULT_FLAP_MAX);
@@ -129,6 +131,7 @@ void saveConfig() {
   prefs.putInt   ("pW",       cfg.panelW);
   prefs.putInt   ("pH",       cfg.panelH);
   prefs.putUChar ("pDepth",   cfg.panelBitDepth);
+  prefs.putBool  ("pBGR",     cfg.panelBGR);
   prefs.putUChar ("pBright",  cfg.panelBright);
   prefs.putInt   ("flapMs",   cfg.flapMs);
   prefs.putUChar ("flapMax",  cfg.flapMax);

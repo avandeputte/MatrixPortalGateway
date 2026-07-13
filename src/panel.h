@@ -31,6 +31,10 @@ const PanelInfo& panelInfo();
 // 0..255, applied as the OE duty cycle. Call it whenever cfg.panelBright moves.
 void panelSetBrightness(uint8_t b);
 
+// Some HUB75 panels are wired BGR, not RGB. Set true to swap red and blue on the way out.
+// Takes effect on the next frame; nothing is cached.
+void panelSetColourOrder(bool bgr);
+
 // ---- drawing: back buffer, 8-bit RGB, no brightness applied by the caller ----
 void panelClear();
 void panelPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b);

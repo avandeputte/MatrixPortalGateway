@@ -23,11 +23,13 @@
 // Build:  c++ -std=c++17 -Isrc tools/reel_test.cpp src/charset.cpp src/font1252.cpp \
 //             -o /tmp/reel_test && /tmp/reel_test
 #include "reel.h"
+#include "font1252.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
 
 #define TX_MAX_BYTES 512
+extern const Font1252* const FONT1252_ALL[FONT1252_COUNT];
 
 static int fails = 0;
 
@@ -162,11 +164,41 @@ int main() {
   ck(reelIsEmoji(heart), "...and reelIsEmoji() agrees");
   ck(cp1252FromUnicode(0x2665) < 0, "...while CP1252 has no byte for it, as expected");
   ck(reelGlyph(reel, heart) >= FONT_EXTRA_BASE, "the heart draws a real font glyph");
-  uint8_t ink[3] = {0, 0, 0};
-  ck(reelInk(heart, ink) && ink[0] > 0x80 && ink[1] < 0x80,
-     "the heart brings its own RED ink");
+  // The heart must be drawn in the RED FLAP's red -- not a bespoke RGB that only looks red
+  // on a monitor. It first shipped as (0xE0,0x30,0x40) and came out PURPLE on the panel,
+  // because a HUB75's blue LEDs are far brighter per unit duty than its red ones.
+  cki(reelTint(heart), reelColourIndex("red") - VM_COLOUR_BASE,
+      "the heart is drawn in the RED FLAP's red");
+  cki(reelTint(reelIndexOfCodepoint(reel, 0x263A)),
+      reelColourIndex("yellow") - VM_COLOUR_BASE, "the smiley is the YELLOW flap's yellow");
+  cki(reelTint(reelIndexOfCodepoint(reel, 0x2660)), -1, "the spade takes the normal text ink");
+  int badtint = 0;
+  for (int k = 0; k < SF_EMOJI_FLAPS; k++) {
+    int t = reelTint(SF_EMOJI_BASE + k);
+    if (t < -1 || t >= SF_COLOUR_FLAPS) badtint++;
+  }
+  cki(badtint, 0, "every pictograph tint is a real colour flap (or none)");
   ck(reelIndexOfCodepoint(reel, 0x1F600) < 0,
      "an emoji we do NOT carry is rejected, not silently blanked");
+
+  printf("\nthe pictographs must actually DRAW -- in every bundled face:\n");
+  // This is the check that was missing. reelGlyph() can return a perfectly good glyph
+  // index and the reel can resolve, and the panel still draws nothing, because
+  // font1252Row() bounds-checks the index against the table size. Ask for the ink.
+  for (int f = 0; f < FONT1252_COUNT; f++) {
+    const Font1252& fn = *FONT1252_ALL[f];
+    int blank = 0;
+    for (int k = 0; k < SF_EMOJI_FLAPS; k++) {
+      int gi = reelGlyph(reel, SF_EMOJI_BASE + k);
+      int lit = 0;
+      for (int r = 0; r < fn.height; r++) lit += (font1252Row(fn, (uint8_t)gi, (uint8_t)r) != 0);
+      if (!lit) { blank++; printf("        %dx%d: %s draws NOTHING\n",
+                                  fn.width, fn.height, FONT_EXTRA_NAME[k]); }
+    }
+    char what[64];
+    snprintf(what, sizeof(what), "%dx%d: pictographs with no ink at all", fn.width, fn.height);
+    cki(blank, 0, what);
+  }
 
   printf("\ncolours by NAME (the legacy letters are letters here):\n");
   cki(reelColourIndex("red"),   VM_COLOUR_BASE + 0, "\"red\"");

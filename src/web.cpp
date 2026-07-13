@@ -1,4 +1,5 @@
 #include "gateway.h"
+#include "panel.h"   // panelSetColourOrder: a BGR panel is a runtime fact, not a build one
 #include "web_ui.h"
 
 
@@ -734,6 +735,7 @@ static void handleApiConfigGet() {
   doc["panelW"]        = cfg.panelW;
   doc["panelH"]        = cfg.panelH;
   doc["panelBitDepth"] = cfg.panelBitDepth;
+  doc["panelBGR"]      = cfg.panelBGR;
   doc["panelBright"]   = cfg.panelBright;
   doc["flapMs"]        = cfg.flapMs;
   doc["flapMax"]       = cfg.flapMax;
@@ -902,6 +904,13 @@ static void handleApiConfigSettings() {
     if (v == 16 || v == 32 || v == 64) cfg.panelH = (uint16_t)v; }
   if (doc["panelBitDepth"].is<int>()) { int v = doc["panelBitDepth"];
     if (v >= 1 && v <= 6) cfg.panelBitDepth = (uint8_t)v; }
+  // Applies to the NEXT FRAME, not on reboot: it is only a decision about which bit a
+  // colour lands on, so there is nothing to re-allocate and no reason to make anyone
+  // power-cycle to find out whether their panel is BGR.
+  if (doc["panelBGR"].is<bool>()) {
+    cfg.panelBGR = doc["panelBGR"].as<bool>();
+    panelSetColourOrder(cfg.panelBGR);
+  }
   if (doc["panelBright"].is<int>())   { int v = doc["panelBright"];
     if (v >= 1 && v <= 255) cfg.panelBright = (uint8_t)v; }
   if (doc["flapMs"].is<int>())        { int v = doc["flapMs"];

@@ -43,7 +43,7 @@ const char* vmReel()          { return sReel; }
 char vmFlapCharAt(int i)      { return reelCharAt(sReel, i); }
 int  vmFlapIndexOf(char c)    { return reelIndexOf(sReel, c); }
 int  vmFlapGlyph(int i)       { return reelGlyph(sReel, i); }
-bool vmFlapInk(int i, uint8_t rgb[3]) { return reelInk(i, rgb); }
+int  vmFlapTint(int i)        { return reelTint(i); }
 // The index-addressed path, for POST /api/display/cells: no folding, no colour-stealing,
 // and it reaches the lowercase and pictograph flaps the legacy protocol cannot name.
 int  vmFlapIndexOfCodepoint(uint32_t cp) { return reelIndexOfCodepoint(sReel, cp); }

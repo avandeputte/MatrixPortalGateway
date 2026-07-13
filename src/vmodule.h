@@ -152,8 +152,8 @@ int  vmFlapIndexOf(char c);
 int  vmFlapIndexOfCodepoint(uint32_t cp);
 // The font glyph a flap draws, or -1 (a colour flap has no glyph).
 int  vmFlapGlyph(int i);
-// The flap's own ink, if it has one (the pictographs do). False => normal text ink.
-bool vmFlapInk(int i, uint8_t rgb[3]);
+// The colour flap a pictograph is drawn in (0..6), or -1 for the normal text ink.
+int  vmFlapTint(int i);
 // True when flap `i` is a colour swatch rather than a glyph.
 static inline bool vmFlapIsColour(int i) {
   return i >= VM_COLOUR_BASE && i < VM_COLOUR_BASE + SF_COLOUR_FLAPS;

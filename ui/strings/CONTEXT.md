@@ -149,6 +149,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Open Firmware Updater →` | Settings tab | TAB / LINK LABEL (a noun) |
 | `Panel` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()) |
 | `Panel height (px)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
+| `Panel is wired BGR (swap red and blue)` | — | (built at runtime) |
 | `Panel saved — reboot to apply width/height/depth` | — | (built at runtime) |
 | `Panel width (px)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Paris/Berlin (UTC+1/+2)` | Settings tab | DROPDOWN OPTION |
@@ -216,6 +217,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `The SplitFlap Gateway Companion registers itself here automatically. When a URL is set, a` | — | (built at runtime) |
 | `The mDNS name, the OTA name, the DHCP name and the fallback AP SSID. Leave blank to derive a unique one from this board's MAC.` | — | (built at runtime) |
 | `The wall of virtual split-flap modules drawn on the LED panel. One module per cell, IDs assigned left-to-right, top-to-bottom (module 0 = top-left). This also lays out the Live Display on the Display tab.` | — | (built at runtime) |
+| `Tick this if red comes out blue. HUB75 panels vary: a BGR panel draws red as blue, blue as orange and yellow as cyan, while green and white look perfectly normal — which is why it is easy to miss. Takes effect immediately.` | Settings tab | HELP TEXT (a full sentence) |
 | `Time settings saved` | — | RUNTIME MESSAGE (shown after an action, in saveTz()) |
 | `Timezone` | Settings tab | FORM LABEL (names the input below it -- a noun phrase); HEADING (card title -- a noun phrase) |
 | `To` | — | (built at runtime) |

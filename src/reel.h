@@ -175,14 +175,12 @@ static inline int reelGlyph(const char* reel, int i) {
   return (gi == 0xFF) ? -1 : (int)gi;
 }
 
-// A pictograph's own ink, if it has one. A heart that comes out white is not a heart.
-// Returns false for everything else, which then draws in the normal text ink.
-static inline bool reelInk(int i, uint8_t rgb[3]) {
-  if (!reelIsEmoji(i)) return false;
-  const uint8_t* k = FONT_EXTRA_INK[i - SF_EMOJI_BASE];
-  if (!k[0] && !k[1] && !k[2]) return false;      // {0,0,0} = "use the normal text ink"
-  rgb[0] = k[0]; rgb[1] = k[1]; rgb[2] = k[2];
-  return true;
+// The COLOUR FLAP a pictograph is drawn in (0..6), or -1 for the normal text ink. The
+// caller turns that into pixels through the same palette the colour flaps use, so a heart
+// is the red flap's red -- there is exactly one red on this wall.
+static inline int reelTint(int i) {
+  if (!reelIsEmoji(i)) return -1;
+  return (int)FONT_EXTRA_COLOUR[i - SF_EMOJI_BASE];
 }
 
 static inline char reelCharAt(const char* reel, int i) {

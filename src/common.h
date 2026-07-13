@@ -195,6 +195,7 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define DEFAULT_GRID_COLS    15     // virtual modules across
 #define DEFAULT_GRID_ROWS    3      // virtual modules down
 #define DEFAULT_BIT_DEPTH    4      // bitplanes, 1..8 (RAM and refresh rate scale with it)
+#define DEFAULT_PANEL_BGR    false  // true if the panel is wired BGR (see panelSetColourOrder)
 #define DEFAULT_BRIGHTNESS   160    // 1..255, scales every colour before output
 // The faint seam drawn around each module -- the split-flap gap. This is NOT the module
 // layout (that is GRID_COLS/ROWS above); it is the decoration between cells. Its dimness

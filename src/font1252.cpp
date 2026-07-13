@@ -993,23 +993,24 @@ const uint32_t FONT_EXTRA_CP[FONT_EXTRA_COUNT] = {
 const char* const FONT_EXTRA_NAME[FONT_EXTRA_COUNT] = {
   "heart", "diamond", "club", "spade", "smiley", "note", "circle", "square", "house", "left", "up", "right", "down", "sun"
 };
-// Default ink. A heart that comes out white is not a heart.
-// {0,0,0} means "use the normal text ink".
-const uint8_t FONT_EXTRA_INK[FONT_EXTRA_COUNT][3] = {
-  { 0xE0, 0x30, 0x40 },   // heart
-  { 0xE0, 0x30, 0x40 },   // diamond
-  { 0x00, 0x00, 0x00 },   // club
-  { 0x00, 0x00, 0x00 },   // spade
-  { 0xF0, 0xC0, 0x20 },   // smiley
-  { 0x00, 0x00, 0x00 },   // note
-  { 0x00, 0x00, 0x00 },   // circle
-  { 0x00, 0x00, 0x00 },   // square
-  { 0x00, 0x00, 0x00 },   // house
-  { 0x00, 0x00, 0x00 },   // left
-  { 0x00, 0x00, 0x00 },   // up
-  { 0x00, 0x00, 0x00 },   // right
-  { 0x00, 0x00, 0x00 },   // down
-  { 0xF0, 0xC0, 0x20 },   // sun
+// Which COLOUR FLAP each pictograph is drawn in -- an index into the
+// r/o/y/g/b/p/w palette, or -1 for the normal warm split-flap white.
+// NOT an RGB: a heart is the red flap's red, so red means one thing here.
+const int8_t FONT_EXTRA_COLOUR[FONT_EXTRA_COUNT] = {
+   0,   // heart    -> red
+   0,   // diamond  -> red
+  -1,   // club    
+  -1,   // spade   
+   2,   // smiley   -> yellow
+  -1,   // note    
+  -1,   // circle  
+  -1,   // square  
+  -1,   // house   
+  -1,   // left    
+  -1,   // up      
+  -1,   // right   
+  -1,   // down    
+   2,   // sun      -> yellow
 };
 
 // Largest-first, so font1252Best() returns the roomiest face that fits.

@@ -38,7 +38,12 @@
 
 extern const uint32_t    FONT_EXTRA_CP[FONT_EXTRA_COUNT];      // U+2665, ...
 extern const char* const FONT_EXTRA_NAME[FONT_EXTRA_COUNT];    // "heart", ...
-extern const uint8_t     FONT_EXTRA_INK[FONT_EXTRA_COUNT][3];  // {0,0,0} = normal ink
+// Which of the reel's seven colour flaps each pictograph is drawn in (0..6 = r o y g b p w),
+// or -1 for the normal warm split-flap white. NOT an RGB, deliberately: a heart is drawn in
+// exactly the red the RED FLAP uses, so "red" means one thing on this wall. Hand-picking an
+// RGB is how the heart first came out purple -- blue LEDs are far more efficient per unit of
+// duty on a HUB75 panel, so a mere 64 counts of blue dragged a near-red to magenta.
+extern const int8_t      FONT_EXTRA_COLOUR[FONT_EXTRA_COUNT];
 
 // One bitmap face. `rows` is FONT1252_GLYPHS * height bytes, glyph-major; within
 // a glyph, one byte per row top-to-bottom, bit 7 = leftmost column. `ascent` is
@@ -66,9 +71,20 @@ extern const Font1252* const FONT1252_ALL[FONT1252_COUNT];
 // CP1252 byte -> glyph index, or 0xFF when the byte carries no printable glyph.
 extern const uint8_t FONT1252_INDEX[256];
 
+// Glyphs in each face's row table: the CP1252 set, then the extra pictographs. Bound
+// font1252Row() with THIS, not with FONT1252_GLYPHS.
+//
+// That distinction has already cost a bug. The guard below used to read
+// `gi >= FONT1252_GLYPHS`, which was exactly right while 216 was the whole table -- and the
+// moment the pictographs were appended at indices 216..229 it began silently returning a
+// zero row for every one of them. The reel resolved, the frame went out, the module moved
+// to the right flap, and the panel drew nothing at all. A bounds check that is one constant
+// out of date fails completely silently: it does not crash, it just erases.
+#define FONT1252_TOTAL (FONT1252_GLYPHS + FONT_EXTRA_COUNT)
+
 // Bitmap row `r` of glyph `gi` (bit 7 = leftmost pixel). Returns 0 out of range.
 static inline uint8_t font1252Row(const Font1252& f, uint8_t gi, uint8_t r) {
-  if (gi >= FONT1252_GLYPHS || r >= f.height) return 0;
+  if (gi >= FONT1252_TOTAL || r >= f.height) return 0;
   return f.rows[(uint16_t)gi * f.height + r];
 }
 

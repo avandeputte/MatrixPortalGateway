@@ -950,6 +950,22 @@ paths:
                 gridRows:    { type: integer, minimum: 1, maximum: 64, example: 3,  description: "Display wall rows" }
                 gridCols:    { type: integer, minimum: 1, maximum: 64, example: 15, description: "Display wall columns" }
                 serialDebug: { type: boolean, example: true }
+                panelW:        { type: integer, example: 128, description: "Panel chain width in px. **Reboot to apply.**" }
+                panelH:        { type: integer, enum: [16, 32, 64], example: 64, description: "Panel height in px. **Reboot to apply.**" }
+                panelBitDepth: { type: integer, minimum: 1, maximum: 6, example: 4, description: "Bitplanes. RAM and refresh rate scale with it. **Reboot to apply.**" }
+                panelBright:   { type: integer, minimum: 1, maximum: 255, example: 160, description: "Applies on the next frame." }
+                panelBGR:
+                  type: boolean
+                  example: true
+                  description: >
+                    The panel is wired **BGR** rather than RGB — its own hardware colour order,
+                    which the firmware cannot detect. On a BGR panel every colour is wrong in a
+                    specific pattern: **red draws blue, blue draws orange, yellow draws cyan,
+                    purple draws pink** — while **green and white look correct** (green is its own
+                    channel, white is all three). That is why it hides: text is white.
+                    Applies on the **next frame**, no reboot, so you can tick it and see the answer.
+                flapMs:        { type: integer, example: 60, description: "ms per flap. Next flap." }
+                flapMax:       { type: integer, minimum: 1, maximum: 64, example: 64, description: "Max flips per change. Next change." }
                 haEnabled:   { type: boolean, example: true, description: "Enable Home Assistant MQTT auto-discovery and entity state topics" }
                 otaPassword: { type: string, example: "mysecret" }
             examples:

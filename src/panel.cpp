@@ -384,8 +384,21 @@ void panelClear() {
     }
 }
 
+// Some HUB75 panels are wired BGR rather than RGB -- the panel's own colour order, not
+// something the firmware can detect. On a BGR panel every colour comes out wrong in a very
+// specific way: red draws blue, blue draws orange, yellow draws cyan, purple draws pink,
+// while green and white look perfectly fine (green is its own channel, white is all three).
+// That is exactly why it can go unnoticed for a long time -- text is white.
+//
+// Swap here, at the one choke point every pixel passes through (panelHLine, panelVLine and
+// panelFillRect all funnel into this), rather than by re-mapping the pins: the pin map is
+// correct and matches Adafruit's reference, and the next panel may well be RGB.
+static bool bgrOrder = false;
+void panelSetColourOrder(bool bgr) { bgrOrder = bgr; }
+
 void panelPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b) {
   if (!info.ok || x < 0 || y < 0 || x >= W || y >= H) return;
+  if (bgrOrder) { uint8_t t = r; r = b; b = t; }
   const bool lower = (y >= ROWS);
   const int  row   = lower ? (y - ROWS) : y;
   const uint8_t qr = quant(r), qg = quant(g), qb = quant(b);

@@ -68,15 +68,25 @@ CP1252_HIGH = [
 # same source as every letter. The one exception is the sun at 5x8, which that
 # face genuinely lacks -- see FALLBACK below.
 #
-# (codepoint, name, default ink)
-#   The ink is what the flap is drawn in when nothing overrides it. A heart that
-#   comes out white is not a heart. `null` means "use the normal text ink".
+# (codepoint, name, colour)
+#
+#   `colour` names one of the reel's SEVEN COLOUR FLAPS -- it is not a bespoke RGB. A heart
+#   is drawn in exactly the red the red flap uses, so "red" means one thing on this wall.
+#
+#   Hand-picking an RGB is how the heart came out PURPLE the first time: (0xE0,0x30,0x40)
+#   reads as red on a monitor, but on a HUB75 panel the blue LEDs are far more efficient per
+#   unit of duty cycle than the red ones, so those 64 counts of blue dragged it to magenta.
+#   The palette already solved that problem; do not solve it again, differently.
+#
+#   None = drawn in the normal warm split-flap white, like a letter.
+#   The order below MUST match REEL_COLOUR_NAMES in src/reel.h (r o y g b p w).
+EXTRA_COLOURS = ["red", "orange", "yellow", "green", "blue", "purple", "white"]
 EXTRA_GLYPHS = [
-    (0x2665, "heart",   (0xE0, 0x30, 0x40)),   # red
-    (0x2666, "diamond", (0xE0, 0x30, 0x40)),   # red -- it is a card suit
+    (0x2665, "heart",   "red"),
+    (0x2666, "diamond", "red"),      # a card suit: red, like the heart
     (0x2663, "club",    None),
     (0x2660, "spade",   None),
-    (0x263A, "smiley",  (0xF0, 0xC0, 0x20)),   # yellow
+    (0x263A, "smiley",  "yellow"),
     (0x266A, "note",    None),
     (0x25CF, "circle",  None),
     (0x25A0, "square",  None),
@@ -85,7 +95,7 @@ EXTRA_GLYPHS = [
     (0x2191, "up",      None),
     (0x2192, "right",   None),
     (0x2193, "down",    None),
-    (0x2600, "sun",     (0xF0, 0xC0, 0x20)),   # yellow
+    (0x2600, "sun",     "yellow"),
 ]
 
 # The only glyph any bundled face is missing. 5x8 has no U+2600, so it is drawn
@@ -220,7 +230,7 @@ def main():
         validate(name, printable, index, bbw, bbh, data)
         # ...then the extra pictographs, at glyph indices count..count+len(EXTRA)-1.
         n_fb = 0
-        for cp, gname, _ink in EXTRA_GLYPHS:
+        for cp, gname, _col in EXTRA_GLYPHS:
             if cp in glyphs:
                 data.extend(render(font_bb, glyphs[cp], bbw, bbh))
             elif (name, cp) in FALLBACK:
@@ -272,7 +282,7 @@ const uint8_t FONT1252_INDEX[256] = {{
                           + f"  // 0x{byte:02X}\n")
             out.write(f"  // --- the {len(EXTRA_GLYPHS)} extra pictographs "
                       f"(glyph index {count}..{total - 1}) ---\n")
-            for k, (cp, gname, _ink) in enumerate(EXTRA_GLYPHS):
+            for k, (cp, gname, _col) in enumerate(EXTRA_GLYPHS):
                 gi = count + k
                 rows = data[gi * h:(gi + 1) * h]
                 out.write("  " + " ".join(f"0x{v:02X}," for v in rows)
@@ -284,17 +294,18 @@ const uint8_t FONT1252_INDEX[256] = {{
         # a second copy of this list. THIS is the single source of truth.
         out.write(f"\n// The extra pictographs, in glyph-index order from FONT_EXTRA_BASE.\n")
         out.write(f"const uint32_t FONT_EXTRA_CP[FONT_EXTRA_COUNT] = {{\n")
-        for cp, gname, _ink in EXTRA_GLYPHS:
+        for cp, gname, _col in EXTRA_GLYPHS:
             out.write(f"  0x{cp:04X},   // {gname}\n")
         out.write("};\n")
         out.write(f"const char* const FONT_EXTRA_NAME[FONT_EXTRA_COUNT] = {{\n")
-        out.write("  " + ", ".join(f'"{g}"' for _cp, g, _i in EXTRA_GLYPHS) + "\n};\n")
-        out.write("// Default ink. A heart that comes out white is not a heart.\n"
-                  "// {0,0,0} means \"use the normal text ink\".\n")
-        out.write(f"const uint8_t FONT_EXTRA_INK[FONT_EXTRA_COUNT][3] = {{\n")
-        for cp, gname, ink in EXTRA_GLYPHS:
-            r, g, b = ink if ink else (0, 0, 0)
-            out.write(f"  {{ 0x{r:02X}, 0x{g:02X}, 0x{b:02X} }},   // {gname}\n")
+        out.write("  " + ", ".join(f'"{g}"' for _cp, g, _c in EXTRA_GLYPHS) + "\n};\n")
+        out.write("// Which COLOUR FLAP each pictograph is drawn in -- an index into the\n"
+                  "// r/o/y/g/b/p/w palette, or -1 for the normal warm split-flap white.\n"
+                  "// NOT an RGB: a heart is the red flap's red, so red means one thing here.\n")
+        out.write(f"const int8_t FONT_EXTRA_COLOUR[FONT_EXTRA_COUNT] = {{\n")
+        for cp, gname, col in EXTRA_GLYPHS:
+            idx = EXTRA_COLOURS.index(col) if col else -1
+            out.write(f"  {idx:>2},   // {gname:<8}{' -> ' + col if col else ''}\n")
         out.write("};\n")
 
         out.write(f"""

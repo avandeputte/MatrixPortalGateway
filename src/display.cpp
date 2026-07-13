@@ -38,7 +38,10 @@ static inline Ink fade(const uint8_t rgb[3], uint8_t pct) {
 // One flap face. `glyph` is an index into the font's row table -- NOT a character byte:
 // the pictographs have no byte at all, which is the whole reason they exist here. `ink`
 // is the flap's own colour (a heart is red); {0,0,0} means "use the normal text ink".
-struct FaceSnap { int16_t glyph; int8_t colour; uint8_t ink[3]; };  // colour >= 0 => swatch
+// `colour` >= 0: the flap IS a colour swatch. `tint` >= 0: it is a glyph drawn in that
+// colour -- the pictographs. Both index the SAME palette, which is the point: a heart is
+// the red flap's red.
+struct FaceSnap { int16_t glyph; int8_t colour; int8_t tint; };
 struct CellSnap { FaceSnap cur, next; uint8_t phase; };
 static CellSnap snap[VM_MAX_MODULES];
 
@@ -47,8 +50,7 @@ static CellSnap snap[VM_MAX_MODULES];
 static inline void snapFace(FaceSnap& f, int flap) {
   f.colour = vmFlapIsColour(flap) ? (int8_t)(flap - VM_COLOUR_BASE) : -1;
   f.glyph  = (int16_t)vmFlapGlyph(flap);
-  f.ink[0] = f.ink[1] = f.ink[2] = 0;
-  vmFlapInk(flap, f.ink);
+  f.tint   = (int8_t)vmFlapTint(flap);
 }
 
 // ---- file-private forward declarations ----
@@ -119,6 +121,7 @@ void dispInit() {
   if (depth < 1 || depth > 6) depth = DEFAULT_BIT_DEPTH;
 
   gPanel.ready = panelBegin(gPanel.panelW, gPanel.panelH, depth);
+  panelSetColourOrder(cfg.panelBGR);   // the panel's own wiring, not something we can detect
   if (!gPanel.ready) {
     // Headless is a legitimate state: the web UI, MQTT and the whole emulated bus still
     // work, so report the fault and carry on rather than refusing to boot.
@@ -273,9 +276,9 @@ static void drawGrid() {
 // A colour flap is its swatch; a pictograph is its own ink; everything else is the warm
 // split-flap white the letters are printed in.
 static inline Ink faceInk(const FaceSnap& f) {
-  if (f.colour >= 0)                      return fade(COLOUR_RGB[f.colour], 255);
-  if (f.ink[0] || f.ink[1] || f.ink[2])   return fade(f.ink, 255);
-  return fade(GLYPH_RGB, 255);
+  if (f.colour >= 0) return fade(COLOUR_RGB[f.colour], 255);   // the flap IS a swatch
+  if (f.tint   >= 0) return fade(COLOUR_RGB[f.tint],   255);   // a tinted glyph: the heart
+  return fade(GLYPH_RGB, 255);                                 // a letter: warm white
 }
 
 static void drawCell(int col, int row, const CellSnap& c) {
