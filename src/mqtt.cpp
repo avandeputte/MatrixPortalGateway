@@ -60,12 +60,6 @@ void mqttPublishMsg(const RS485Msg& m) {
   mqttEnqueue(_t, buf, n);
 }
 
-void mqttPublishSFEvent(const char* event, const char* payload) {
-  char _t[80];
-  snprintf(_t,sizeof(_t),"%s/flap/%s",cfg.mqttPrefix,event);
-  mqttEnqueue(_t, payload, strlen(payload));
-}
-
 void mqttPublishStatus() {
   if (!mqtt.connected()) return;
   char timeBuf[24];
@@ -111,8 +105,10 @@ void mqttPublishStatus() {
 // cross-referenced against the module registry. Two shadow copies of one truth. It reads the
 // truth now: vmods[i].curIndex is the flap actually on show. A pictograph flap has no byte,
 // so it publishes '?' -- text cannot name it, and the panel draws it correctly regardless.
-void mqttPublishDisplayState() {
-  if (!mqtt.connected()) return;
+// Returns true if it actually published. The caller that clears gDisplayDirty must only clear
+// it on true, so a snapshot skipped because the lock was busy is retried, not lost.
+bool mqttPublishDisplayState() {
+  if (!mqtt.connected()) return false;
   int cells = vmCount;
   if (cells < 1) cells = 1;
   if (cells > VM_MAX_MODULES) cells = VM_MAX_MODULES;
@@ -120,10 +116,14 @@ void mqttPublishDisplayState() {
   // bytes, so size the buffer for the worst case.
   static char str[VM_MAX_MODULES * 3 + 1];   // static: single-caller (taskNetwork)
   static int16_t flap[VM_MAX_MODULES];
-  if (vmMutex && xSemaphoreTake(vmMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-    for (int i = 0; i < cells; i++) flap[i] = vmods[i].curIndex;
-    xSemaphoreGive(vmMutex);
-  }
+  // If the lock can't be taken, DON'T publish: flap[] would still hold the previous snapshot
+  // (or, on the first-ever call, all zeros -- flap index 0, i.e. a blank wall). Publishing that
+  // reports a stale or blank display to Home Assistant as if it were current. vmMutex is
+  // contended by taskDisplay (dispRender snapshots every frame) and vmSave, so a bounded take
+  // genuinely can time out. Returning false leaves gDisplayDirty set so the next tick retries.
+  if (!vmMutex || xSemaphoreTake(vmMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+  for (int i = 0; i < cells; i++) flap[i] = vmods[i].curIndex;
+  xSemaphoreGive(vmMutex);
   int outLen = 0;
   for (int i = 0; i < cells; i++) {
     uint8_t uc = (uint8_t)vmFlapCharAt(flap[i]);
@@ -134,6 +134,7 @@ void mqttPublishDisplayState() {
   char _t[80];
   snprintf(_t, sizeof(_t), "%s/display/state", cfg.mqttPrefix);
   mqttEnqueue(_t, str, outLen);
+  return true;
 }
 
 // Publish the HA-facing entity state topics (maintenance + quiet switches, and

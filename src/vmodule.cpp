@@ -162,7 +162,6 @@ void vmSave() {
     strlcpy(rec.sn, m.sn, sizeof(rec.sn));
     rec.autoHome = m.autoHome;
     rec.bootCount = m.bootCount; rec.curIndex = m.curIndex;
-    vmods[i].dirty = false;
     if (vmMutex) xSemaphoreGive(vmMutex);
     f.write((const uint8_t*)&rec, sizeof(rec));
   }
@@ -247,7 +246,6 @@ void vmInit(int count) {
     if (!m.provisioned || m.id == 255) {
       m.id = (uint8_t)i;
       m.provisioned = true;
-      m.dirty = true;
     }
     m.bootCount  = (uint8_t)(m.bootCount + 1);   // wraps at 255, like the real one
     m.target     = -1;

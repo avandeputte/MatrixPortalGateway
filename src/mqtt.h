@@ -15,7 +15,6 @@ extern volatile int mqttQHead;
 extern volatile int mqttQTail;
 extern SemaphoreHandle_t mqttQMutex;
 extern StaticSemaphore_t mqttQMutexBuf;
-extern WiFiClient wifiClient;
 extern WiFiClient mqttWifiClient;
 extern PubSubClient mqtt;
 extern unsigned long lastStatusMs;
@@ -26,7 +25,7 @@ extern unsigned long mqttRetryDelayMs;   // current backoff, 30s..300s
 void mqttPublishMsg(const RS485Msg& m);
 void mqttPublishSFEvent(const char* event, const char* payload);
 void mqttPublishStatus();
-void mqttPublishDisplayState();
+bool mqttPublishDisplayState();   // false if it did not publish (not connected / lock busy)
 void mqttPublishStateTopics();
 void haPublishDiscovery(bool enable);
 void mqttInit();

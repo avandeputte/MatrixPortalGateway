@@ -117,7 +117,6 @@ struct VModule {
   int16_t  target;                // where the reel is flipping to; -1 = at rest
   uint8_t  flipPhase;             // 0 = settled, 1 = mid-flip (see display.cpp)
   uint32_t nextStepMs;            // millis() of the next flap advance
-  bool     dirty;                 // needs persisting to /vmods.dat
 };
 
 // ---- owned globals (defined in globals.cpp) ----

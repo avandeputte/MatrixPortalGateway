@@ -140,7 +140,7 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define RTC_YEAR_OFFSET   2000
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "1.10.0"   // this product's version (UI + boot log)
+#define FW_VERSION           "1.10.1"   // this product's version (UI + boot log)
 // The gateway REST/MQTT surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it
@@ -240,8 +240,7 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define PANEL_RAM_BUDGET     (120u * 1024u)   // most the panel may ever claim
 #define PANEL_RAM_RESERVE    (100u * 1024u)   // must remain free for WiFi + lwIP
 
-#define PANEL_MAX_W          256
-#define PANEL_MAX_H          64
+#define PANEL_MAX_W          256   // panel height is validated by the enumerated 16/32/64 set
 
 /* ---- Flip animation ----
    Changing the displayed flap cascades forward through the reel, which is what

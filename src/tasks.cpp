@@ -306,9 +306,11 @@ void taskNetwork(void* pv) {
     // spamming HA's recorder. No-op unless HA integration is enabled. Skipped
     // during an OTA upload to keep heap/CPU free for the transfer.
     if (!gOtaInProgress && gDisplayDirty && cfg.haEnabled && millis() - lastDispPubMs > 1500) {
-      gDisplayDirty = false;
       lastDispPubMs = millis();
-      mqttPublishDisplayState();
+      // Clear the dirty flag only if it actually published. A snapshot skipped because the reel
+      // lock was momentarily busy must be retried on the next tick, not dropped -- otherwise HA
+      // keeps the prior state until the wall next changes.
+      if (mqttPublishDisplayState()) gDisplayDirty = false;
     }
 
     // Persist the companion URL only once it has stopped moving. See the note on

@@ -151,7 +151,6 @@ SemaphoreHandle_t     vmMutex   = NULL;
 StaticSemaphore_t     vmMutexBuf;
 volatile bool          vmDirty   = false;   // pending /vmods.dat save
 volatile unsigned long vmDirtyMs = 0;       // millis() when first dirtied
-WiFiClient   wifiClient;
 WiFiClient   mqttWifiClient;        // persistent client for PubSubClient
 PubSubClient mqtt(mqttWifiClient);  // mqttInit() configures timeouts on this
 
