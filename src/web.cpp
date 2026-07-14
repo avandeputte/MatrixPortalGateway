@@ -570,12 +570,49 @@ static void handleApiHome() {
 
    Streamed, like /api/flap/modules: the union string alone is ~300 bytes and nothing here needs
    to exist in RAM all at once.                                                                */
-// Write `cp` into a JSON string being streamed, escaping what JSON requires.
-static void capSendCp(uint32_t cp) {
+// A BUFFERED writer for the response below.
+//
+// server.sendContent() is one HTTP chunk and one TCP write. Streaming this response a CHARACTER
+// at a time -- which is the obvious way to write it, and what this did at first -- sent a
+// 230-character repertoire as ~700 chunks of one to three bytes, each waiting on its own
+// round-trip: FIVE SECONDS to deliver 1.6 KB, while /api/status delivered 465 bytes in twenty
+// milliseconds. Time-to-first-byte was 11 ms throughout, so none of it was the computing. It was
+// the writing.
+//
+// So: accumulate, and flush a kilobyte at a time.
+static char   capBuf[1024];
+static size_t capLen = 0;
+
+static void capFlush() {
+  if (!capLen) return;
+  capBuf[capLen] = 0;
+  server.sendContent(capBuf);
+  capLen = 0;
+  wdgWebMs = millis();
+}
+static void capPut(const char* str) {
+  size_t n = strlen(str);
+  if (capLen + n >= sizeof(capBuf) - 1) capFlush();
+  if (n >= sizeof(capBuf) - 1) { server.sendContent(str); return; }   // never truncate a caller
+  memcpy(capBuf + capLen, str, n);
+  capLen += n;
+}
+// One code point into the buffer, escaped as JSON requires.
+static void capPutCp(uint32_t cp) {
   char out[8];
   if (cp == '"' || cp == '\\') { out[0] = '\\'; out[1] = (char)cp; out[2] = 0; }
   else { size_t n = utf8Encode(cp, out); out[n] = 0; }
-  server.sendContent(out);
+  capPut(out);
+}
+// The reel as a JSON string body: every flap that shows a CHARACTER. The colour flaps are
+// skipped -- they are named, not spelled -- and the lowercase and pictograph flaps are in,
+// because they are reachable (by index, via /api/display/cells) and a client that could not see
+// them here would never know to ask.
+static void capPutReel() {
+  for (int i = 0; i < SF_MAX_FLAPS; i++) {
+    const uint32_t cp = vmFlapCodepointAt(i);
+    if (cp) capPutCp(cp);
+  }
 }
 
 static void handleApiCapabilities() {
@@ -586,64 +623,50 @@ static void handleApiCapabilities() {
 
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.send(200, "application/json", "");
+  capLen = 0;
 
   char head[320];
   snprintf(head, sizeof(head),
            "{\"product\":\"%s\",\"fw\":\"%s\",\"api\":\"%s\","
            "\"grid\":{\"rows\":%d,\"cols\":%d},\"modules\":%d,\"maxFlaps\":%d,",
            PRODUCT_NAME, FW_VERSION, API_VERSION, rows, cols, vmCount, SF_MAX_FLAPS);
-  server.sendContent(head);
+  capPut(head);
 
   // The colour flaps are NOT characters. They are named, because on the index-addressed path
   // 'r' is the letter r -- which is exactly why /api/display/cells names them too.
-  server.sendContent("\"colors\":[");
+  capPut("\"colors\":[");
   for (int i = 0; i < SF_COLOUR_FLAPS; i++) {
     char one[16];
     snprintf(one, sizeof(one), "%s\"%s\"", i ? "," : "", REEL_COLOUR_NAMES[i]);
-    server.sendContent(one);
+    capPut(one);
   }
-  server.sendContent("],");
+  capPut("],");
 
-  // The character repertoire. Every flap that shows a CHARACTER -- so the colour flaps are
-  // skipped, and the lowercase and pictograph flaps are in, because they are reachable (by
-  // index, through /api/display/cells) and a client that cannot see them here would never
-  // know to ask for them.
-  //
-  // union == common == the reel, and uniform is true: one reel, drawn 75 times. The three
-  // fields are still all present, because a client must not have to care which gateway it is
-  // talking to.
-  server.sendContent("\"charset\":{\"uniform\":true,\"assumed\":[],\"unknown\":[],\"union\":\"");
-  for (int i = 0; i < SF_MAX_FLAPS; i++) {
-    const uint32_t cp = vmFlapCodepointAt(i);
-    if (cp) capSendCp(cp);
-    if ((i & 31) == 0) wdgWebMs = millis();
-  }
-  server.sendContent("\",\"common\":\"");
-  for (int i = 0; i < SF_MAX_FLAPS; i++) {
-    const uint32_t cp = vmFlapCodepointAt(i);
-    if (cp) capSendCp(cp);
-    if ((i & 31) == 0) wdgWebMs = millis();
-  }
-  server.sendContent("\"},");
+  // union == common == the reel, and uniform is true: one reel, drawn once per cell. All three
+  // fields are still present, because a client must not have to care which gateway it is
+  // talking to -- the RS-485 gateway answers this same URL, where they genuinely differ.
+  capPut("\"charset\":{\"uniform\":true,\"assumed\":[],\"unknown\":[],\"union\":\"");
+  capPutReel();
+  capPut("\",\"common\":\"");
+  capPutReel();
+  capPut("\"},");
 
-  // One reel, every module. `source` says where the set came from: read off the module
-  // ("reported"), the firmware's compiled-in default ("assumed"), or -- here -- the gateway's
+  // One reel, every module. `source` says where a set came from: read off the module
+  // ("reported"), its firmware's compiled-in default ("assumed"), or -- here -- the gateway's
   // own reel, which it drew itself and therefore knows exactly.
   char sets[96];
-  snprintf(sets, sizeof(sets), "\"sets\":[{\"flaps\":%d,\"source\":\"builtin\",\"modules\":\"0-%d\",\"chars\":\"",
+  snprintf(sets, sizeof(sets),
+           "\"sets\":[{\"flaps\":%d,\"source\":\"builtin\",\"modules\":\"0-%d\",\"chars\":\"",
            SF_MAX_FLAPS, vmCount - 1);
-  server.sendContent(sets);
-  for (int i = 0; i < SF_MAX_FLAPS; i++) {
-    const uint32_t cp = vmFlapCodepointAt(i);
-    if (cp) capSendCp(cp);
-    if ((i & 31) == 0) wdgWebMs = millis();
-  }
-  server.sendContent("\"}],");
+  capPut(sets);
+  capPutReel();
+  capPut("\"}],");
 
-  // What the wall can DO, not just show. A client reads this instead of sniffing the firmware
-  // version and guessing.
-  server.sendContent("\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
-                     "\"quiet\",\"maintenance\",\"ha\",\"ota\"]}");
+  // What the wall can DO, not just show, so a client reads this instead of sniffing the
+  // firmware version and guessing.
+  capPut("\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
+         "\"quiet\",\"maintenance\",\"ha\",\"ota\"]}");
+  capFlush();
   server.sendContent("");
 }
 
