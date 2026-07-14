@@ -53,8 +53,8 @@ void setup() {
       default: break;
     }
     printf("[Boot] reset=%s heap=%u psram=%u flash=%uKB sdk=%s\n",
-           rs, ESP.getFreeHeap(), ESP.getPsramSize(),
-           ESP.getFlashChipSize()/1024, ESP.getSdkVersion());
+           rs, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getPsramSize(),
+           (unsigned)ESP.getFlashChipSize()/1024, ESP.getSdkVersion());
   }
 
   // 2. Config, then the gateway's module registry
@@ -81,6 +81,13 @@ void setup() {
   sfFsInit();
   vmBuildReel();      // the shared reel: every CP1252 glyph, then the colours
   vmInit((int)gPanel.cols * (int)gPanel.rows);
+  // The reels just came up HOMED (autoHome), so seed the wall mirror to match. Without this
+  // the mirror reads "?" -- "present, character unknown" -- for every cell, which is a lie we
+  // would be telling ourselves: we homed them, so we know exactly what they show. The mirror
+  // is what /api/display/state and the Live Preview read.
+  for (int i = 0; i < vmCount; i++)
+    if (vmods[i].id < (int)sizeof(gWallChars))
+      gWallChars[vmods[i].id] = vmFlapCharAt(vmods[i].curIndex);
   sfModulesLoad();
 
   // 6. Panel. Before WiFi: the DMA framebuffer must come out of internal SRAM
@@ -152,7 +159,7 @@ void loop() {
     // min (lowest free heap ever) and minblk (smallest largest-block ever).
     //
     // heap/min/maxblk are INTERNAL RAM only -- that is what
-    // ESP.getFreeHeap() reports -- and the panel's DMA framebuffer is the big claimant
+    // (unsigned)ESP.getFreeHeap() reports -- and the panel's DMA framebuffer is the big claimant
     // on that pool, so a modest maxblk is expected. psram is counted separately; the
     // registry, monitor ring, MQTT queue and virtual modules all live there.
     // Heap + min-ever heap + largest free block
@@ -160,8 +167,8 @@ void loop() {
     // pre-crash signature). Per-task stack high-water marks catch the
     // canary-overflow class before it fires. rx/tx/reject/drop counters surface
     // bus health.
-    unsigned freeHeap = ESP.getFreeHeap();
-    unsigned minHeap  = ESP.getMinFreeHeap();
+    unsigned freeHeap = (unsigned)ESP.getFreeHeap();
+    unsigned minHeap  = (unsigned)ESP.getMinFreeHeap();
     unsigned maxBlk   = ESP.getMaxAllocHeap();
     unsigned sBus = hTaskRS485 ? uxTaskGetStackHighWaterMark(hTaskRS485) : 0;
     unsigned sWeb = hTaskWeb   ? uxTaskGetStackHighWaterMark(hTaskWeb)   : 0;
@@ -197,14 +204,14 @@ void loop() {
       bool okDisp = (wdgDispMs  == 0 || wdgDispMs  > now || now - wdgDispMs < 30000UL);
       if (!okBus || !okWeb || !okNet || !okDisp) {
         printf("[WDG] STALL: Bus=%d Web=%d Net=%d Disp=%d (heap=%u) -- rebooting\n",
-               okBus, okWeb, okNet, okDisp, ESP.getFreeHeap());
+               okBus, okWeb, okNet, okDisp, (unsigned)ESP.getFreeHeap());
         delay(200);
         ESP.restart();
       }
     }
     // Emergency reboot if heap falls critically low.
-    if (ESP.getFreeHeap() < 20000) {
-      printf("[WDG] CRITICAL: heap=%u -- rebooting\n", ESP.getFreeHeap());
+    if ((unsigned)ESP.getFreeHeap() < 20000) {
+      printf("[WDG] CRITICAL: heap=%u -- rebooting\n", (unsigned)ESP.getFreeHeap());
       delay(200);
       ESP.restart();
     }

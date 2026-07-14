@@ -53,31 +53,12 @@ struct ModulesFileHeader {
   int           count;   // number of PersistedModule records following
 };
 
-// ---- Transient module request/response capture (single-slot mailboxes) ----
-// The web task arms a wait-id, sends a bus frame, then polls a ready timestamp
-// the RS485 parser sets when the matching reply lands. One slot each: the
-// synchronous web server serves a single request at a time.
-struct DumpCapture {                 // EEPROM 'd' dump / combined 'A' reply
-  volatile int           waitId   = -1;            // module id being waited on
-  char                   data[TX_MAX_BYTES] = "";  // raw dump after 'd:'
-  volatile unsigned long ts       = 0;             // millis() when captured (0=none)
-  // Fields ONLY an 'A' (combined) reply carries; -99 = not provided.
-  volatile int           autoHome   = -99;         // 0/1, or -99 n/a
-  volatile int           curIndex   = -99;         // flap index; -1 unknown, -2 released, -99 n/a
-  volatile int           reportedId = -99;         // module's self-reported id, -99 n/a
-  // Configurable flap set, appended to the 'A' reply by firmware v31+ ('N'
-  // command). flapCount = -99 when the reply carried no flap-config tail (older
-  // firmware); flapChars is the ordered character set, empty when not provided.
-  volatile int           flapCount  = -99;         // active flap count (1..64), -99 n/a
-  char                   flapChars[SF_MAX_FLAPS + 1] = "";  // ordered char set ('' n/a)
-};
 
 // ---- owned globals (defined in globals.cpp) ----
 extern SFModule* sfModules;
 extern SemaphoreHandle_t sfMutex;
 extern StaticSemaphore_t sfMutexBuf;
 extern int sfModuleCount;
-extern DumpCapture gDump;
 extern volatile bool sfModulesDirty;
 extern volatile unsigned long sfModulesDirtyMs;
 extern bool sfFsReady;
@@ -92,8 +73,6 @@ void sfSendChar(int addr, char c);
 void sfSendIndex(int addr, int idx);
 void sfHome(int addr);
 void sfQueryVersion(int addr);
-bool sfSendAndCaptureDump(int id, const char* frame, unsigned long timeoutMs, char* out, size_t outLen);
-bool sfSendVersionAndWait(int id, unsigned long timeoutMs, char* fwOut, size_t fwLen, char* snOut, size_t snLen, unsigned long* lastSeenOut);
 void sfSendText(int startAddr, const char* text, bool blankUnused);
 void sfSetQuietTime(bool on);
 void sfParseResponse(const uint8_t* data, size_t len);

@@ -119,10 +119,6 @@ StaticSemaphore_t sfMutexBuf;
 SemaphoreHandle_t txMutex = NULL;
 StaticSemaphore_t txMutexBuf;
 int      sfModuleCount = 0;
-// Shared single-slot capture for the most recent combined 'A' reply -- the only
-// multi-field response left. handleApiAll records the id it is waiting for, then
-// polls for a match. One slot is enough: the web server is synchronous.
-DumpCapture gDump;     // 'A' combined-reply capture
 volatile bool          sfModulesDirty   = false;  // pending NVS save
 volatile unsigned long sfModulesDirtyMs = 0;      // millis() when first dirtied
 bool          ntpSynced   = false; // true once NTP sync succeeds (in taskNetwork)

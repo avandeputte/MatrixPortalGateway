@@ -47,14 +47,12 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Changing it creates or destroys modules — reboot to apply.` | Settings tab | EMPHASIS |
 | `Character` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Choose a layout…` | Settings tab | DROPDOWN OPTION |
-| `Clear` | Monitor tab (live REST/MQTT command log); Settings tab | BUTTON (an action -- use the imperative) |
+| `Clear` | Monitor tab (live REST/MQTT command log) | BUTTON (an action -- use the imperative) |
 | `Clock` | Status tab (diagnostics) | HEADING |
 | `Color depth (bitplanes, 1-6)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Columns` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Common panel & wall combinations. Choosing one fills the Panel and Module Wall cards below and saves them.` | — | (built at runtime) |
-| `Companion` | Settings tab | EMPHASIS |
-| `Companion App` | Settings tab; Status tab (diagnostics) | HEADING; HEADING (card title -- a noun phrase) |
-| `Companion URL` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
+| `Companion App` | Status tab (diagnostics) | HEADING |
 | `Compose` | — | TAB / LINK LABEL (a noun) |
 | `Connected` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
 | `Could not load display state` | — | RUNTIME MESSAGE (shown after an action, in refreshWall()) |
@@ -123,6 +121,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `NTP Sync` | Status tab (diagnostics) | TEXT |
 | `Network` | Status tab (diagnostics) | HEADING |
 | `Network name` | Settings tab | INPUT PLACEHOLDER (example text) |
+| `Not registered` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
 | `Nothing to send.` | — | RUNTIME MESSAGE (shown after an action, in doSend()) |
 | `OTA Firmware Update` | Settings tab | HEADING (card title -- a noun phrase) |
 | `OTA Password` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
@@ -189,7 +188,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Test Connection` | Settings tab | BUTTON (an action -- use the imperative) |
 | `Testing...` | — | RUNTIME MESSAGE (shown after an action, in testMqtt()) |
 | `Text` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
-| `The SplitFlap Gateway Companion registers itself here automatically. When a URL is set, a` | — | (built at runtime) |
+| `The companion registers this itself. There is nothing to set here.` | Status tab (diagnostics) | HELP TEXT (a full sentence) |
 | `The mDNS name, the OTA name, the DHCP name and the fallback AP SSID. Leave blank to derive a unique one from this board's MAC.` | — | (built at runtime) |
 | `The wall of virtual split-flap modules drawn on the LED panel. One module per cell, IDs assigned left-to-right, top-to-bottom (module 0 = top-left). This also lays out the Live Display on the Display tab.` | — | (built at runtime) |
 | `Tick this if red comes out blue. HUB75 panels vary: a BGR panel draws red as blue, blue as orange and yellow as cyan, while green and white look perfectly normal — which is why it is easy to miss. Takes effect immediately.` | Settings tab | HELP TEXT (a full sentence) |
@@ -220,7 +219,6 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `cell(s) shown` | — | RUNTIME MESSAGE (shown after an action, in buildWall()) |
 | `follows your browser, the same way the light/dark theme does. This is stored in your browser, not on the gateway, so it is per-device.` | — | (built at runtime) |
 | `healthy  ·` | — | (built at runtime) |
-| `link appears in the header.` | — | (built at runtime) |
 | `needs attention  ·` | — | (built at runtime) |
 | `not connected` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
 | `pool.ntp.org` | Settings tab | INPUT PLACEHOLDER (example text) |

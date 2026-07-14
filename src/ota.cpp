@@ -199,7 +199,7 @@ void handleOTAUpload() {
     if (WiFi.status() == WL_CONNECTED) {
       wifiSetApActive(false);   // drop fallback AP if it happens to be up
       WiFi.setSleep(false);
-      printf("[OTA] AP down + modem sleep off for upload (heap=%u)\n", ESP.getFreeHeap());
+      printf("[OTA] AP down + modem sleep off for upload (heap=%u)\n", (unsigned)ESP.getFreeHeap());
     }
     // UPDATE_SIZE_UNKNOWN lets the Update library size the partition itself.
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {

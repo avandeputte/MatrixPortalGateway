@@ -36,7 +36,7 @@ void vbusQueue(uint8_t mod, VmReplyKind kind, int32_t arg, uint32_t dueMs) {
   // being produced faster than taskBus drains them. Count it rather than lose a
   // reply silently: a rising counter here is a real bug signal, and the [WDG]
   // line reports it.
-  vbusDropped++;
+  vbusDropped = vbusDropped + 1;
 }
 
 void vbusDeliver(const uint8_t* data, size_t len) {

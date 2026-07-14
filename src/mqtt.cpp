@@ -158,7 +158,7 @@ void mqttPublishStateTopics() {
 void haPublishDiscovery(bool enable) {
   if (!mqtt.connected()) return;
   char node[24];
-  snprintf(node, sizeof(node), "sfgw_%08X", boardId32());
+  snprintf(node, sizeof(node), "sfgw_%08X", (unsigned)boardId32());
   const char* pfx = cfg.mqttPrefix;
   char topic[160];
   char pl[MQTT_BUF_SIZE];
@@ -309,7 +309,9 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     // strip a single trailing newline if present
     size_t L = strlen(buf);
     if (L && (buf[L-1]=='\n'||buf[L-1]=='\r')) buf[L-1]=0;
-    { char cd[LOG_TEXT_MAX]; snprintf(cd, sizeof(cd), "display %s", buf); logCommand('M', cd); }
+    // The log line is bounded ON PURPOSE -- it is a monitor row, not the payload. Say so
+    // with a precision rather than leaving the compiler to warn about a truncation we want.
+    { char cd[LOG_TEXT_MAX]; snprintf(cd, sizeof(cd), "display %.*s", (int)sizeof(cd) - 12, buf); logCommand('M', cd); }
     sfSendText(0, buf, false);
     mqttPublishDisplayState();
     return;
@@ -339,7 +341,8 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
       static uint8_t outBuf[TX_MAX_BYTES];  // static: see note on buf above
       size_t  outLen = min(strlen(d), (size_t)TX_MAX_BYTES);
       memcpy(outBuf, d, outLen);
-      { char cd[LOG_TEXT_MAX]; snprintf(cd, sizeof(cd), "send %s", d); logCommand('M', cd); }
+      // Bounded on purpose: a monitor row, not the payload.
+      { char cd[LOG_TEXT_MAX]; snprintf(cd, sizeof(cd), "send %.*s", (int)sizeof(cd) - 8, d); logCommand('M', cd); }
       rs485Send(outBuf, outLen, raw);
     }
     return;
@@ -409,7 +412,7 @@ void mqttInit() {
 void mqttConnect() {
   if (!strlen(cfg.mqttHost)) return;
   char clientId[32];
-  snprintf(clientId, sizeof(clientId), "splitflap-%08X", boardId32());
+  snprintf(clientId, sizeof(clientId), "splitflap-%08X", (unsigned)boardId32());
   printf("[MQTT] Connecting to %s:%d...\n", cfg.mqttHost, cfg.mqttPort);
   // Last Will & Testament: the broker publishes "offline" to <prefix>/availability
   // (retained) if we drop without a clean disconnect. HA uses this to mark every

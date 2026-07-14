@@ -284,19 +284,6 @@ paths:
                 items:
                   $ref: "#/components/schemas/Module"
 
-  /api/flap/identify:
-    post:
-      tags: [Modules]
-      summary: Clear the module list and re-discover all modules
-      description: |
-        Wipes both the in-memory registry and the persisted module file, then
-        broadcasts `m*v` so every module re-announces its version and serial
-        number. Allow a few
-        seconds for all modules to respond before reading `/api/flap/modules`.
-      responses:
-        "200":
-          $ref: "#/components/responses/Ok"
-
   /api/flap/char:
     post:
       tags: [Modules]
@@ -406,123 +393,6 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/Ok"
-
-  /api/flap/version:
-    post:
-      tags: [Modules]
-      summary: Query firmware version (synchronous — waits up to 500ms)
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [id]
-              properties:
-                id: { type: integer, minimum: 0, maximum: 254 }
-            example: { id: 5 }
-      responses:
-        "200":
-          description: Version response or timeout
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SyncReply"
-              examples:
-                success:
-                  value: { ok: true, id: 5, ver: "12", sn: "AABBCCDD", stale: false, lastSeen: 45231 }
-                stale:
-                  value: { ok: true, id: 5, ver: "12", sn: "AABBCCDD", stale: true, lastSeen: 38000 }
-                timeout:
-                  value: { ok: false, error: "no response from module" }
-
-  /api/flap/all:
-    post:
-      tags: [Modules]
-      summary: Refresh version and EEPROM together (uses the v25+ combined 'A' command when possible)
-      description: |
-        Returns a module's firmware version, serial number, and full EEPROM dump
-        in one response. For a module known to be firmware v25+, the gateway issues
-        a single combined `A` command (one bus transaction) instead of a version
-        query followed by a dump. Older firmware (or a module whose version isn't
-        known yet) falls back to the classic version-then-dump sequence. The `mode`
-        field reports which path ran (`"A"` or `"vd"`). Data is fetched fresh each
-        call; `stale:true` (with cached/empty fields) indicates no reply arrived.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [id]
-              properties:
-                id: { type: integer, minimum: 0, maximum: 254 }
-            example: { id: 5 }
-      responses:
-        "200":
-          description: Combined version + EEPROM state, or stale on timeout
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/SyncReply"
-                  - type: object
-                    properties:
-                      ver:  { type: string, description: Firmware version, example: "25" }
-                      dump:
-                        type: string
-                        description: Raw EEPROM string — `homeOffset:totalSteps:0=pos,1=pos,...`
-                        example: "42:4096:0=210,1=320"
-                      mode:
-                        type: string
-                        enum: ["A", "vd"]
-                        description: Which path ran — single `A` transaction, or version+dump fallback
-                      autoHome:
-                        type: integer
-                        description: >-
-                          Auto-home setting — `1` = home on boot, `0` = restore saved position.
-                          Only the `A` path carries this; `-99` when not provided (the `vd`
-                          fallback or a stale read).
-                        example: 1
-                      curIndex:
-                        type: integer
-                        description: >-
-                          Module's current flap index (live state) — `0..63`, `-1` unknown,
-                          `-2` motor released. `A` path only; `-99` when not provided.
-                        example: 5
-                      reportedId:
-                        type: integer
-                        description: >-
-                          Module's self-reported ID from the `A` reply, for diagnosing an
-                          address/identity mismatch against `id`. `-99` when not provided.
-                        example: 5
-                      flapCount:
-                        type: integer
-                        description: >-
-                          Flaps on the reel. Always **163** here: 156 Windows-1252 glyphs +
-                          7 colour flaps. The modules are drawn rather than driven, so the
-                          reel carries one flap for every glyph the font can render and
-                          there is nothing to ration. It is **read-only** — the flap set is
-                          shared, complete and not configurable (there is no `N` command and
-                          no flap-set editor).
-                        example: 163
-                      flapChars:
-                        type: string
-                        description: >-
-                          The reel, in flap-index order, as UTF-8 (the gateway transcodes
-                          the module's Windows-1252 bytes, so € and accents round-trip).
-                          Every printable CP1252 character except the lowercase letters —
-                          those fold to their uppercase flap, exactly as on a real reel,
-                          which is also what keeps the seven lowercase colour codes
-                          (`r o y g b p w`) unambiguous. The colours are the last seven.
-                        example: " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ…roygbpw"
-              examples:
-                combined_A:
-                  value: { ok: true, id: 5, ver: "31", sn: "AABBCCDD", dump: "42:4096:0=210,1=320", autoHome: 1, curIndex: 5, reportedId: 5, flapCount: 40, flapChars: " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", stale: false, mode: "A" }
-                fallback_vd:
-                  value: { ok: true, id: 5, ver: "23", sn: "AABBCCDD", dump: "42:4096:0=210,1=320", autoHome: -99, curIndex: -99, reportedId: -99, flapCount: -99, flapChars: "", stale: false, mode: "vd" }
-                stale:
-                  value: { ok: true, id: 5, ver: "31", sn: "AABBCCDD", dump: "", autoHome: -99, curIndex: -99, reportedId: -99, flapCount: -99, flapChars: "", stale: true, mode: "A" }
 
   /api/status:
     get:
@@ -912,27 +782,6 @@ paths:
         "200":
           $ref: "#/components/responses/Ok"
 
-  /api/config/rs485:
-    post:
-      tags: [Config]
-      summary: Save RS-485 bus settings
-      description: Updates the serial bus parameters. Takes effect on the next bus reinitialisation.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                baud:     { type: integer, default: 9600, example: 9600 }
-                dataBits: { type: integer, default: 8, example: 8 }
-                parity:   { type: integer, description: "0=None 1=Even 2=Odd", default: 0, example: 0 }
-                stopBits: { type: integer, default: 1, example: 1 }
-            example: { baud: 9600, dataBits: 8, parity: 0, stopBits: 1 }
-      responses:
-        "200":
-          $ref: "#/components/responses/Ok"
-
   /api/config/settings:
     post:
       tags: [Config]
@@ -1124,7 +973,6 @@ components:
         uptime:    { type: integer, description: "Seconds since boot", example: 3842 }
         rx:        { type: integer, description: "Frames received since boot", example: 124 }
         tx:        { type: integer, description: "Frames transmitted since boot", example: 37 }
-        baud:      { type: integer, example: 9600 }
         wifi:      { type: boolean, example: true }
         ip:        { type: string,  example: "192.168.1.105" }
         apip:      { type: string,  example: "192.168.4.1" }
@@ -1155,10 +1003,6 @@ components:
         mqPort:       { type: integer, example: 1883 }
         mqUser:       { type: string,  example: "" }
         mqPfx:        { type: string,  example: "splitflap" }
-        baud:         { type: integer, example: 9600 }
-        dataBits:     { type: integer, example: 8 }
-        parity:       { type: integer, description: "0=None 1=Even 2=Odd", example: 0 }
-        stopBits:     { type: integer, example: 1 }
         posixTZ:      { type: string,  example: "EST5EDT,M3.2.0,M11.1.0" }
         ntpServer:    { type: string,  example: "pool.ntp.org" }
         gridRows:     { type: integer, example: 3,  description: "Display wall rows" }

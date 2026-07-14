@@ -10,10 +10,6 @@ void cfgSetDefaults() {
   strlcpy(cfg.wifiSSID, DEFAULT_WIFI_SSID, sizeof(cfg.wifiSSID));
   strlcpy(cfg.wifiPass, DEFAULT_WIFI_PASS, sizeof(cfg.wifiPass));
   cfg.mqttPort      = DEFAULT_MQTT_PORT;
-  cfg.rs485Baud     = DEFAULT_BAUD;
-  cfg.rs485DataBits = 8;
-  cfg.rs485Parity   = 0;
-  cfg.rs485StopBits = 1;
   strlcpy(cfg.mqttPrefix, DEFAULT_MQTT_PREFIX, sizeof(cfg.mqttPrefix));
   strlcpy(cfg.posixTZ, "UTC0", sizeof(cfg.posixTZ));
   strlcpy(cfg.ntpServer, DEFAULT_NTP_SERVER, sizeof(cfg.ntpServer));
@@ -57,10 +53,6 @@ void loadConfig() {
   strlcpy(cfg.mqttUser,   prefs.getString("mqUser", "").c_str(), sizeof(cfg.mqttUser));
   strlcpy(cfg.mqttPass,   prefs.getString("mqPass", "").c_str(), sizeof(cfg.mqttPass));
   strlcpy(cfg.mqttPrefix, prefs.getString("mqPfx",  DEFAULT_MQTT_PREFIX).c_str(), sizeof(cfg.mqttPrefix));
-  cfg.rs485Baud       = prefs.getULong("baud",    DEFAULT_BAUD);
-  cfg.rs485DataBits   = prefs.getUChar("dbits",   8);
-  cfg.rs485Parity     = prefs.getUChar("parity",  0);
-  cfg.rs485StopBits   = prefs.getUChar("sbits",   1);
   strlcpy(cfg.posixTZ, prefs.getString("tz", "UTC0").c_str(), sizeof(cfg.posixTZ));
   strlcpy(cfg.ntpServer, prefs.getString("ntp", DEFAULT_NTP_SERVER).c_str(), sizeof(cfg.ntpServer));
   cfg.gridRows = (uint8_t)prefs.getInt("gRows", DEFAULT_GRID_ROWS);
@@ -112,10 +104,6 @@ void saveConfig() {
   prefs.putString("mqUser", cfg.mqttUser);
   prefs.putString("mqPass", cfg.mqttPass);
   prefs.putString("mqPfx",  cfg.mqttPrefix);
-  prefs.putULong ("baud",   cfg.rs485Baud);
-  prefs.putUChar ("dbits",  cfg.rs485DataBits);
-  prefs.putUChar ("parity", cfg.rs485Parity);
-  prefs.putUChar ("sbits",  cfg.rs485StopBits);
   prefs.putString("tz",     cfg.posixTZ);
   prefs.putBool  ("dbgSerial", cfg.serialDebug);
   prefs.putBool  ("haEnabled", cfg.haEnabled);

@@ -21,10 +21,6 @@ struct GwConfig {
   // They are kept because the Settings page, the REST surface and the companion
   // app all still carry them, and so a config from a real Split-Flap Gateway
   // round-trips unchanged. Nothing reads them.
-  unsigned long rs485Baud;
-  uint8_t       rs485DataBits;
-  uint8_t       rs485Parity;
-  uint8_t       rs485StopBits;
   char          posixTZ[64];   // POSIX TZ string e.g. "EST5EDT,M3.2.0,M11.1.0"
   char          ntpServer[64]; // NTP server hostname (default pool.ntp.org)
   bool          serialDebug;   // enable verbose serial output

@@ -252,9 +252,20 @@ void vmInit(int count) {
     m.target     = -1;
     m.flipPhase  = 0;
     m.nextStepMs = millis();
-    // autoHome decides only what a *mechanical* module does at boot. These have no
-    // position to lose, so the flag is stored and reported but never acted on: the
-    // reel comes up showing whatever it showed before.
+    // HOME AT BOOT, if the module says to -- which by default it does.
+    //
+    // 'a' sets autoHome and 'A' reports it, and a REAL module with the flag set drives its
+    // reel to the blank flap on power-up. This emulation used to store the flag, report it,
+    // and then quietly ignore it, on the reasoning that a drawn reel has no position to
+    // lose. True -- but it does have a position to REMEMBER, and /vmods.dat faithfully
+    // restored it, so a reboot brought the wall up still showing whatever half-finished
+    // sentence was on it when the power went. That is not "no position to lose", it is
+    // stale content presented as current.
+    //
+    // Honouring the flag is both what a mechanical module does and what anyone actually
+    // wants: come up blank, and let whatever drives the wall draw the first real frame.
+    // A module whose autoHome has been cleared over the bus keeps the old behaviour.
+    if (m.autoHome) m.curIndex = 0;
     if (m.curIndex < 0 || m.curIndex >= SF_MAX_FLAPS) m.curIndex = 0;
   }
   vmDirty = true;   // persist the bumped boot counters
@@ -279,7 +290,6 @@ static void vmDispatchBySerial(const char* p, size_t len, uint32_t now) {
   for (int i = 0; i < vmCount; i++) {
     VModule& m = vmods[i];
     if (strncmp(sn, m.sn, VM_SN_CHARS) != 0) continue;
-    const char* rest = sn + VM_SN_CHARS;             // ':' + payload, or ""
     switch (cmd) {
       case 'A': vbusQueue((uint8_t)i, VR_ALL, 0, now + VBUS_REPLY_MS); return;
       // 'N' (set the flap set) is gone: the reel is shared, complete and fixed.

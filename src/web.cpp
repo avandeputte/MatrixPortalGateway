@@ -10,16 +10,13 @@
 // route (the HTTP method + path is noted above each, and registered in
 // webInit). Handlers are static -- only webInit is exported.
 // ---- file-private forward declarations ----
-static void handleApiAll();
 static void handleApiChar();
 static void handleApiConfigGet();
 static void handleApiConfigMqtt();
-static void handleApiConfigRS485();
 static void handleApiConfigSettings();
 static void handleApiConfigWifi();
 static void handleApiDisplayState();
 static void handleApiHome();
-static void handleApiIdentify();
 static void handleApiIndex();
 static void handleApiMaintenance();
 static void handleApiMessages();
@@ -36,7 +33,6 @@ static void handleApiSendBatch();
 static void handleApiDisplayCells();
 static void handleApiStatus();
 static void handleApiText();
-static void handleApiVersion();
 static void handleFavicon();
 static void handleLogo();
 static void handleOptions();
@@ -585,74 +581,6 @@ static void handleApiHome() {
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
-// POST /api/flap/version  {"id":5}
-static void handleApiVersion() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
-  JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return;
-  }
-  int id = doc["id"] | -1;
-  DBG("[API] version query module %d\n", id);
-  if (id < 0 || id > 254) { sendJsonError(400, "id required (0-254)"); return; }
-
-  // Send a direct version query and wait for a fresh reply. The window scales
-  // mildly with id (broadcast-stagger headroom); a direct query usually answers
-  // in ~35-70ms now that the newline collision is fixed (see sfQueryVersion).
-  char          fwVer[8]     = "";
-  char          sn[21]       = "";
-  unsigned long repLastSeen  = 0;
-  unsigned long waitMs   = 500UL + (unsigned long)(id > 25 ? 25 : id) * 100UL;
-  bool gotReply = sfSendVersionAndWait(id, waitMs, fwVer, sizeof(fwVer),
-                                       sn, sizeof(sn), &repLastSeen);
-
-  if (gotReply) {
-    char out[128];
-    snprintf(out, sizeof(out),
-             "{\"ok\":true,\"id\":%d,\"ver\":\"%s\",\"sn\":\"%s\",\"stale\":false,\"lastSeen\":%lu}",
-             id, fwVer, sn, repLastSeen);
-    DBG("[API] version response: id=%d ver=%s sn=%s\n", id, fwVer, sn);
-    server.send(200, "application/json", out);
-  } else {
-    // Timed out -- check if we already have a cached version from before
-    char cachedVer[8] = "";
-    char cachedSn[21] = "";
-    int           cachedId      = -1;
-    unsigned long cachedLastSeen = 0;
-    xSemaphoreTake(sfMutex, portMAX_DELAY);
-    SFModule* mc = sfFindById((uint8_t)id);
-    if (mc && mc->fwVersion[0]) {
-      strlcpy(cachedVer, mc->fwVersion, sizeof(cachedVer));
-      strlcpy(cachedSn,  mc->serialNum, sizeof(cachedSn));
-      cachedId      = mc->id;
-      cachedLastSeen = mc->lastSeen;
-    } else if (mc) {
-      // Known module, no cached version yet, and this query timed out. Do NOT
-      // stamp any sentinel: a direct version query is reliable now that the
-      // newline-collision is fixed, so a timeout here is a transient miss (bus
-      // busy, momentary contention), not evidence the module lacks the command.
-      // Return what we have (id/sn) and let the next poll re-query.
-      strlcpy(cachedSn,  mc->serialNum, sizeof(cachedSn));
-      cachedId      = mc->id;
-      cachedLastSeen = mc->lastSeen;
-    }
-    xSemaphoreGive(sfMutex);
-    if (cachedId >= 0) {
-      // Return stale cached data
-      char out[160];
-      snprintf(out, sizeof(out),
-               "{\"ok\":true,\"id\":%d,\"ver\":\"%s\",\"sn\":\"%s\",\"stale\":true,\"lastSeen\":%lu}",
-               cachedId, cachedVer, cachedSn, cachedLastSeen);
-      DBG("[API] version timeout for module %d -- returning stale data: ver=%s\n", id, cachedVer);
-      server.send(200, "application/json", out);
-    } else {
-      DBG("[API] version query timeout for module %d (no cached data)\n", id);
-      server.send(200, "application/json",
-                  "{\"ok\":false,\"error\":\"no response from module\"}");
-    }
-  }
-}
 
 // GET /api/status
 static void handleApiStatus() {
@@ -672,19 +600,19 @@ static void handleApiStatus() {
   unsigned stkDsp = hTaskDisp ? uxTaskGetStackHighWaterMark(hTaskDisp) : 0;
   char out[900];
   snprintf(out, sizeof(out),
-    "{\"uptime\":%lu,\"rx\":%lu,\"tx\":%lu,\"baud\":%lu,"
+    "{\"uptime\":%lu,\"rx\":%lu,\"tx\":%lu,"
     "\"wifi\":%s,\"ip\":\"%d.%d.%d.%d\",\"apip\":\"%d.%d.%d.%d\","
     "\"heap\":%u,\"minheap\":%u,\"mqtt\":%s,\"modules\":%d,"
     "\"stk\":{\"rs485\":%u,\"web\":%u,\"net\":%u,\"ota\":%u,\"rtc\":%u,\"disp\":%u},"
     "\"panel\":{\"ok\":%s,\"w\":%u,\"h\":%u,\"cols\":%u,\"rows\":%u,"
     "\"cellW\":%u,\"cellH\":%u,\"font\":\"%s\",\"vmods\":%d,\"drop\":%lu},"
     "\"time\":\"%s\",\"ntpSynced\":%s,\"maint\":%s,\"quiet\":%s,"
-    "\"companion\":{\"status\":\"%s\",\"age\":%ld}}",
-    millis()/1000, rxCount, txCount, cfg.rs485Baud,
+    "\"companion\":{\"url\":\"%s\",\"status\":\"%s\",\"age\":%ld}}",
+    millis()/1000, rxCount, txCount,
     (WiFi.status()==WL_CONNECTED)?"true":"false",
     lip[0],lip[1],lip[2],lip[3],
     aip[0],aip[1],aip[2],aip[3],
-    ESP.getFreeHeap(), ESP.getMinFreeHeap(),
+    (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
     mqtt.connected()?"true":"false",
     sfModuleCount,
     stk485, stkWeb, stkNet, stkOta, stkRtc, stkDsp,
@@ -695,7 +623,7 @@ static void handleApiStatus() {
     ntpSynced?"true":"false",
     gMaintenanceMode?"true":"false",
     gQuietTime?"true":"false",
-    gCompanionStatus, compAge);
+    cfg.companionUrl, gCompanionStatus, compAge);
   server.send(200, "application/json", out);
 }
 
@@ -715,10 +643,6 @@ static void handleApiConfigGet() {
   doc["mqPort"]   = cfg.mqttPort;
   doc["mqUser"]   = cfg.mqttUser;
   doc["mqPfx"]    = cfg.mqttPrefix;
-  doc["baud"]     = cfg.rs485Baud;
-  doc["dataBits"] = cfg.rs485DataBits;
-  doc["parity"]   = cfg.rs485Parity;
-  doc["stopBits"] = cfg.rs485StopBits;
   doc["posixTZ"]    = cfg.posixTZ;
   doc["ntpServer"]  = cfg.ntpServer;
   doc["gridRows"]   = cfg.gridRows;
@@ -790,24 +714,6 @@ static void handleApiConfigMqtt() {
   mqttFailCount = 0;   // a fresh broker gets a fresh 5-strike budget
 }
 
-// POST /api/config/rs485
-static void handleApiConfigRS485() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
-  JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return;
-  }
-  unsigned long newBaud = doc["baud"]     | cfg.rs485Baud;
-  cfg.rs485DataBits     = doc["dataBits"] | cfg.rs485DataBits;
-  cfg.rs485Parity       = doc["parity"]   | cfg.rs485Parity;
-  cfg.rs485StopBits     = doc["stopBits"] | cfg.rs485StopBits;
-  bool baudChanged      = (newBaud != cfg.rs485Baud);
-  cfg.rs485Baud         = newBaud;
-  saveConfig();
-  if (baudChanged) rs485Begin();   // no-op on the emulated bus (rs485.cpp)
-  server.send(200, "application/json", "{\"ok\":true}");
-}
 
 // POST /api/config/settings  -- save all settings in one call
 static void handleApiConfigSettings() {
@@ -826,11 +732,6 @@ static void handleApiConfigSettings() {
   if (doc["mqUser"].is<const char*>())   strlcpy(cfg.mqttUser,   doc["mqUser"]   | "", sizeof(cfg.mqttUser));
   if (doc["mqPass"].is<const char*>())   strlcpy(cfg.mqttPass,   doc["mqPass"]   | "", sizeof(cfg.mqttPass));
   if (doc["mqPfx"].is<const char*>())    strlcpy(cfg.mqttPrefix, doc["mqPfx"]    | DEFAULT_MQTT_PREFIX, sizeof(cfg.mqttPrefix));
-  // RS485
-  unsigned long newBaud = doc["baud"] | cfg.rs485Baud;
-  cfg.rs485DataBits  = doc["dataBits"] | cfg.rs485DataBits;
-  cfg.rs485Parity    = doc["parity"]   | cfg.rs485Parity;
-  cfg.rs485StopBits  = doc["stopBits"] | cfg.rs485StopBits;
   // Timezone
   // OTA password update
   if (doc["otaPassword"].is<const char*>()) {
@@ -936,10 +837,7 @@ static void handleApiConfigSettings() {
     else { sendJsonError(400, "hostname must be 1-31 chars of a-z 0-9 -"); return; }
   }
   dispMarkDirty();
-  bool baudChanged = (newBaud != cfg.rs485Baud);
-  cfg.rs485Baud = newBaud;
   saveConfig();
-  if (baudChanged) rs485Begin();   // no-op on the emulated bus (rs485.cpp)
 
   // dispPlan() silently shrinks a wall that does not fit its panel. That is the right
   // behaviour at boot, but from a settings form it is a trap: a 15x3 wall on a 16px-high
@@ -976,92 +874,7 @@ static void handleOptions() {
 
 
 
-// POST /api/flap/all  {"id":N}
-// Refresh a module's COMPLETE state -- firmware version, serial, and EEPROM dump.
-// For a module known to be v25+ this is a SINGLE bus transaction using the
-// combined 'A' command, instead of a version query followed by a dump. For older
-// firmware (or if 'A' times out) it falls back to the classic version-then-dump
-// sequence. Returns the same dump string the /api/flap/dump endpoint does, plus
-// the refreshed ver/sn, so the Info dialog can render from one response.
-static void handleApiAll() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
-  JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return;
-  }
-  int id = doc["id"] | -99;
-  if (id < 0 || id > 254) { sendJsonError(400, "id required (0-254)"); return; }
-  DBG("[API] all (version+EEPROM) module %d\n", id);
 
-  char sn[21] = "", fwVer[8] = "";
-  xSemaphoreTake(sfMutex, portMAX_DELAY);
-  SFModule* m = sfFindById((uint8_t)id);
-  if (m) { strlcpy(sn, m->serialNum, sizeof(sn)); strlcpy(fwVer, m->fwVersion, sizeof(fwVer)); }
-  xSemaphoreGive(sfMutex);
-
-  static char rawDump[TX_MAX_BYTES];   // static: keeps taskWeb's stack clear of a 768B frame
-  rawDump[0] = 0;
-
-  // One combined 'A' transaction, always. The real firmware needed a v+d fallback
-  // for pre-v25 modules; every module here IS the emulator, and it reports
-  // VM_FW_VERSION (31) unconditionally -- so the fallback could only ever fire on a
-  // cold registry, send a 'd' nothing answers, and time out. Addressing by serial
-  // when we have one keeps the mXA path exercised.
-  char f[64];
-  if (sn[0]) { DBG("[API] all via mXA %s\n", sn); snprintf(f, sizeof(f), "mXA%s\n", sn); }
-  else       { DBG("[API] all via m%dA\n", id);   snprintf(f, sizeof(f), "m%dA\n", id); }
-  bool gotReply = sfSendAndCaptureDump(id, f, 1300, rawDump, sizeof(rawDump));
-  gDump.waitId = -1;  // disarm capture
-  // Snapshot the 'A'-only extras the parse left behind (n/a == -99 for the v+d
-  // path or a stale read). Safe to read now: the slot is disarmed, so no later
-  // reply can overwrite them before we format.
-  int aAutoHome   = gDump.autoHome;
-  int aCurIndex   = gDump.curIndex;
-  int aReportedId = gDump.reportedId;
-  // Configurable flap set from the v31+ 'A' tail (-99 / "" when not provided).
-  // gDump.flapChars holds raw Windows-1252 bytes; convert to JSON-safe UTF-8 so
-  // euro/accented glyphs survive in the JSON response (up to 3 bytes each).
-  int aFlapCount  = gDump.flapCount;
-  static char aFlapChars[SF_MAX_FLAPS * 3 + 4];   // static: off taskWeb stack
-  flapToJsonUtf8((const char*)gDump.flapChars, strlen((const char*)gDump.flapChars),
-                   aFlapChars, sizeof(aFlapChars));
-
-  // Read the freshest version/serial the reply left in the registry.
-  xSemaphoreTake(sfMutex, portMAX_DELAY);
-  SFModule* mf = sfFindById((uint8_t)id);
-  if (mf) { strlcpy(sn, mf->serialNum, sizeof(sn)); strlcpy(fwVer, mf->fwVersion, sizeof(fwVer)); }
-  xSemaphoreGive(sfMutex);
-
-  // JSON-escape the dump, then format the reply (static buffers: off taskWeb's
-  // stack; the synchronous server serves one request at a time). sn is validated
-  // alphanumeric and fwVer is a version token, so neither needs escaping.
-  static char escDump[TX_MAX_BYTES * 2];
-  size_t ei = 0;
-  for (const char* p2 = rawDump; *p2 && ei < sizeof(escDump) - 2; p2++) {
-    if (*p2 == '"' || *p2 == '\\') escDump[ei++] = '\\';
-    escDump[ei++] = *p2;
-  }
-  escDump[ei] = 0;
-  static char out[TX_MAX_BYTES * 2 + 256];
-  snprintf(out, sizeof(out),
-           "{\"ok\":true,\"id\":%d,\"ver\":\"%s\",\"sn\":\"%s\",\"dump\":\"%s\","
-           "\"autoHome\":%d,\"curIndex\":%d,\"reportedId\":%d,"
-           "\"flapCount\":%d,\"flapChars\":\"%s\",\"stale\":%s,\"mode\":\"A\"}",
-           id, fwVer, sn, escDump, aAutoHome, aCurIndex, aReportedId,
-           aFlapCount, aFlapChars, gotReply ? "false" : "true");
-  server.send(200, "application/json", out);
-}
-
-// POST /api/flap/identify
-static void handleApiIdentify() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  logCommand('R', "identify all modules -- registry cleared, broadcasting m*v");
-  // Wipe both the in-memory list and the persisted copy, then re-discover.
-  sfModulesClear();
-  rs485SendStr("m*v\n");
-  server.send(200, "application/json", "{\"ok\":true}");
-}
 
 // POST /api/mqtt/test {host?,port?,user?,pass?} -- tries the given (or saved)
 // broker settings WITHOUT touching the live connection, so settings can be
@@ -1467,8 +1280,6 @@ void webInit() {
   server.on("/api/display/state",    HTTP_GET,     handleApiDisplayState);
   server.on("/api/display/cells",    HTTP_POST,    handleApiDisplayCells);
   server.on("/api/display/cells",    HTTP_OPTIONS, handleOptions);
-  server.on("/api/flap/identify",    HTTP_POST,    handleApiIdentify);
-  server.on("/api/flap/identify",    HTTP_OPTIONS, handleOptions);
   server.on("/api/flap/char",        HTTP_POST,    handleApiChar);
   server.on("/api/flap/char",        HTTP_OPTIONS, handleOptions);
   server.on("/api/flap/index",       HTTP_POST,    handleApiIndex);
@@ -1477,10 +1288,6 @@ void webInit() {
   server.on("/api/flap/text",        HTTP_OPTIONS, handleOptions);
   server.on("/api/flap/home",        HTTP_POST,    handleApiHome);
   server.on("/api/flap/home",        HTTP_OPTIONS, handleOptions);
-  server.on("/api/flap/version",     HTTP_POST,    handleApiVersion);
-  server.on("/api/flap/version",     HTTP_OPTIONS, handleOptions);
-  server.on("/api/flap/all",               HTTP_POST,    handleApiAll);
-  server.on("/api/flap/all",               HTTP_OPTIONS, handleOptions);
   server.on("/api/status",           HTTP_GET,     handleApiStatus);
   server.on("/api/mqtt/test",        HTTP_POST,    handleApiMqttTest);
   server.on("/api/mqtt/test",        HTTP_OPTIONS, handleOptions);
@@ -1507,8 +1314,6 @@ void webInit() {
   server.on("/api/config/wifi",      HTTP_OPTIONS, handleOptions);
   server.on("/api/config/mqtt",      HTTP_POST,    handleApiConfigMqtt);
   server.on("/api/config/mqtt",      HTTP_OPTIONS, handleOptions);
-  server.on("/api/config/rs485",     HTTP_POST,    handleApiConfigRS485);
-  server.on("/api/config/rs485",     HTTP_OPTIONS, handleOptions);
   server.on("/api/config/settings",  HTTP_POST,    handleApiConfigSettings);
   server.on("/api/config/settings",  HTTP_OPTIONS, handleOptions);
   server.begin();

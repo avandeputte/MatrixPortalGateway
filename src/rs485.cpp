@@ -149,7 +149,7 @@ void logDrainTo(void (*sink)(const char* frag)) {
 // sequence and the /api/config/rs485 handler already make, so the baud/parity
 // settings continue to round-trip through the UI even though nothing reads them.
 void rs485Begin() {
-  DBG("[BUS] emulated bus (cfg baud=%lu is cosmetic)\n", cfg.rs485Baud);
+  DBG("[BUS] emulated bus -- there is no UART, and no serial parameters to set\n");
 }
 
 // Inspect an outbound frame and update per-module display tracking. This runs
@@ -175,12 +175,12 @@ static void sfTrackFromFrame(const uint8_t* data, size_t len) {
   int addr;
   if (data[i] == '*') {            // broadcast
     addr = -1;
-    i++;
+    i = i + 1;
   } else if (data[i] >= '0' && data[i] <= '9') {
     long v = 0;
     while (i < len && data[i] >= '0' && data[i] <= '9') {
       v = v * 10 + (data[i] - '0');
-      i++;
+      i = i + 1;
       if (v > 254) return;         // out of valid id range -> not a display cmd
     }
     addr = (int)v;
@@ -205,7 +205,7 @@ static void sfTrackFromFrame(const uint8_t* data, size_t len) {
     if (j >= len || data[j] < '0' || data[j] > '9') return;  // need a number
     while (j < len && data[j] >= '0' && data[j] <= '9') {
       idx = idx * 10 + (data[j] - '0');
-      j++;
+      j = j + 1;
       if (idx >= SF_MAX_FLAPS) { idx = -1; break; }   // out of flap range -> unknown
     }
     // The index-addressed API (POST /api/display/cells) drives the wall entirely through
@@ -355,7 +355,7 @@ static size_t sfKnownCommandLen(const uint8_t* data, size_t len) {
   bool wildcard = false;
   if (data[i] == '*') {                             // wildcard address
     wildcard = true;
-    i++;
+    i = i + 1;
   } else if (data[i] >= '0' && data[i] <= '9') {    // numeric id (0..254)
     long v = 0;
     while (i < len && data[i] >= '0' && data[i] <= '9') { v = v*10 + (data[i]-'0'); i++; }
@@ -471,7 +471,7 @@ void rs485Send(const uint8_t* data, size_t len, bool raw) {
   // terminator themselves, so `bare` is handed over as-is and `appendNL` only
   // affects what the monitor ring records as the on-wire bytes.
   vbusDeliver(data, bare);
-  txCount++;
+  txCount = txCount + 1;
   // Update per-module display tracking from this frame. Doing it here -- the
   // single point every outbound frame passes through -- means raw sends are
   // tracked exactly like the high-level helpers, with no per-path duplication.

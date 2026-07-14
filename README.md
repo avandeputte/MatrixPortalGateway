@@ -31,6 +31,31 @@ tell the difference.
 
 ---
 
+## New in 1.9
+
+- **The wall comes up blank after a reboot.** `autoHome` defaults to true, `'A'` reports it,
+  and a *real* module with the flag set homes on power-up — but the emulation stored the flag,
+  reported it, and then quietly ignored it, so `/vmods.dat` faithfully restored whatever
+  half-finished sentence was on the wall when the power went. Stale content presented as
+  current. The flag is honoured now.
+
+- **The Companion URL is no longer editable.** The companion registers it itself. It is shown,
+  read-only, on the **Status** tab.
+
+- **A dead-code audit, after everything that has been removed.** Gone: the RS-485 serial
+  parameters (baud, data bits, parity, stop bits — there is *no UART*, and the only reader was
+  a debug line that literally called them "cosmetic"), `POST /api/config/rs485`,
+  `/api/flap/version`, `/api/flap/all`, `/api/flap/identify`, the `gDump` capture mailbox and
+  the two query-and-wait helpers behind it. Every one of them existed to ask the emulated bus
+  for a **compile-time constant**.
+
+- **`-Wall` is on now, and the build is warning-clean.** Turning it on found a **real latent
+  null dereference**: `sfUpsert(id, NULL)` forwards that `NULL` into `strcmp()` whenever
+  `id == 255`. Nothing on this firmware produces id 255 — so the only thing standing between
+  that call and a crash was an invariant nobody had written down.
+
+---
+
 ## New in 1.8
 
 - **256 × 64 panels.** Verified on hardware: a 32 × 5 wall = **160 modules** at ~85 Hz.

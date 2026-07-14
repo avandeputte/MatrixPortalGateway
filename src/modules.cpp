@@ -27,8 +27,15 @@ SFModule* sfFindById(uint8_t id) {
   return NULL;
 }
 
-// Find module by serial number
+// Find module by serial number.
+//
+// The NULL guard is not defensive padding: sfUpsert() is called as sfUpsert(id, NULL) from
+// the version-reply path, and it forwards that NULL here whenever id == 255. Nothing on this
+// firmware ever produces id 255 -- the virtual modules take their cell index -- so the only
+// thing standing between this and strcmp(x, NULL) was an invariant nobody had written down.
+// -Wall found it. Write the guard, not the invariant.
 static SFModule* sfFindBySN(const char* sn) {
+  if (!sn) return NULL;
   for (int i = 0; i < sfModuleCount; i++)
     if (strcmp(sfModules[i].serialNum, sn) == 0) return &sfModules[i];
   return NULL;
@@ -315,60 +322,7 @@ void sfQueryVersion(int addr) {
   rs485SendStr(buf);
 }
 
-// Arm the shared capture slot for `id`, send `frame`, then wait up to `timeoutMs`
-// for the module's 'A' reply, which sfParseResponse stores in gDump.data.
-// Returns true and copies the captured payload into `out`
-// if a reply arrived. Runs on taskWeb; touches wdgWebMs so a long wait is
-// watchdog-safe. The capture slot is single-use, which is safe because the
-// synchronous web server serves one request at a time.
-bool sfSendAndCaptureDump(int id, const char* frame, unsigned long timeoutMs,
-                                 char* out, size_t outLen) {
-  gDump.data[0] = 0;
-  gDump.ts  = 0;
-  gDump.autoHome = gDump.curIndex = gDump.reportedId = -99;  // A-only; cleared per attempt
-  gDump.flapCount = -99; gDump.flapChars[0] = 0;             // v31+ 'A' tail; cleared per attempt
-  gDump.waitId     = id;
-  rs485SendStr(frame);
-  unsigned long deadline = millis() + timeoutMs;
-  while (millis() < deadline) {
-    wdgWebMs = millis();
-    vTaskDelay(pdMS_TO_TICKS(10));
-    if (gDump.ts != 0) { strlcpy(out, gDump.data, outLen); return true; }
-  }
-  return false;
-}
 
-// Send a direct version query to `id` and wait up to `timeoutMs` for the reply
-// to land in the registry (lastSeen advances AND fwVersion populated). On a
-// reply, fills any non-NULL out params and returns true. Runs on taskWeb.
-bool sfSendVersionAndWait(int id, unsigned long timeoutMs,
-                                 char* fwOut, size_t fwLen,
-                                 char* snOut, size_t snLen,
-                                 unsigned long* lastSeenOut) {
-  unsigned long seenBefore = 0;
-  xSemaphoreTake(sfMutex, portMAX_DELAY);
-  SFModule* mb = sfFindById((uint8_t)id);
-  if (mb) seenBefore = mb->lastSeen;
-  xSemaphoreGive(sfMutex);
-  sfQueryVersion(id);   // bare 'v' -- collision-safe
-  unsigned long deadline = millis() + timeoutMs;
-  while (millis() < deadline) {
-    wdgWebMs = millis();
-    vTaskDelay(pdMS_TO_TICKS(10));
-    bool got = false;
-    xSemaphoreTake(sfMutex, portMAX_DELAY);
-    SFModule* mx = sfFindById((uint8_t)id);
-    if (mx && mx->lastSeen != seenBefore && mx->fwVersion[0]) {
-      if (fwOut) strlcpy(fwOut, mx->fwVersion, fwLen);
-      if (snOut) strlcpy(snOut, mx->serialNum, snLen);
-      if (lastSeenOut) *lastSeenOut = mx->lastSeen;
-      got = true;
-    }
-    xSemaphoreGive(sfMutex);
-    if (got) return true;
-  }
-  return false;
-}
 
 // Send a text string across a sequence of module IDs starting at startAddr.
 // Each character is sent to startAddr, startAddr+1, ... up to strlen(text).
@@ -608,23 +562,10 @@ void sfParseResponse(const uint8_t* data, size_t len) {
     static char aBuf[TX_MAX_BYTES];     // static: taskRS485's 6KB stack can't hold this
     strlcpy(aBuf, p + 1, sizeof(aBuf));
     for (int k = (int)strlen(aBuf)-1; k >= 0 && (aBuf[k]=='\n'||aBuf[k]=='\r'||aBuf[k]==' '); k--) aBuf[k] = 0;
-    // Extract the optional v31+ flap-config tail BEFORE the destructive ':' split
-    // below clobbers its separators. The map field is colon-free, so the 8th colon
-    // (if present) begins <flapCount> and the 9th begins <flapChars> (which may
-    // itself contain ':', so take it verbatim to end-of-string). A pre-v31 'A'
-    // reply has only 7 colons and no tail, leaving these at -99/"".
-    int  aFlapCount = -99;
-    char aFlapChars[SF_MAX_FLAPS + 1] = "";   // the whole 163-flap reel
-    {
-      int colons = 0; const char* c8 = nullptr; const char* c9 = nullptr;
-      for (const char* cp = aBuf; *cp; cp++) {
-        if (*cp == ':') { if (++colons == 8) c8 = cp; else if (colons == 9) { c9 = cp; break; } }
-      }
-      if (c8) {
-        aFlapCount = atoi(c8 + 1);
-        if (c9) strlcpy(aFlapChars, c9 + 1, sizeof(aFlapChars));
-      }
-    }
+    // The v31+ flap-config tail used to be parsed out of the 'A' reply here and parked in
+    // gDump for the module dialog. Both are gone, and so is the reason: the flap set is a
+    // single shared reel, identical on every module and known at compile time. Parsing a
+    // constant out of a frame to hand it to nobody is work with no reader.
     // Split into the 7 scalar fields plus the trailing map (which has no ':').
     // f: 0 ver, 1 modId, 2 sn, 3 homeOffset, 4 totalSteps, 5 autoHome, 6 curIndex, 7 map
     // The cap is well above the 8 fields we use: because the map is colon-free it
@@ -646,16 +587,13 @@ void sfParseResponse(const uint8_t* data, size_t len) {
     // 'A'-only extras (autoHome, curIndex, self-reported id) ride along in
     // dedicated globals -- they can't go in the dump string without breaking
     // parseDump, which expects exactly ho:ts:map. All set BEFORE the ready flag.
-    if (gDump.waitId == (int)id) {
-      snprintf(gDump.data, sizeof(gDump.data), "%s:%s:%s",
-               f[3] ? f[3] : "", f[4] ? f[4] : "", f[7] ? f[7] : "");
-      gDump.autoHome   = (f[5] && f[5][0]) ? atoi(f[5]) : -99;
-      gDump.curIndex   = (f[6] && f[6][0]) ? atoi(f[6]) : -99;
-      gDump.reportedId = reportedId;   // module's self-reported id (f[1])
-      gDump.flapCount  = aFlapCount;   // v31+ flap-config tail (-99 if not present)
-      strlcpy((char*)gDump.flapChars, aFlapChars, sizeof(gDump.flapChars));
-      gDump.ts = millis();
-    }
+    // Nothing captures the 'A' reply any more. It used to be parked in gDump for
+    // /api/flap/all, which fed the module dialog -- and every field it carried is a
+    // COMPILE-TIME CONSTANT here: the version is VM_FW_VERSION, the calibration is nominal,
+    // the flap set is the one shared reel. The gateway was querying the emulated bus to be
+    // told things it already knew. The reply is still FORMED, because the protocol says it
+    // is, and a controller that asks still gets a correct answer -- it is just no longer
+    // captured on this side.
     DBG("[SF] Module %d ALL fw:%s reportedId:%d sn:%s ho:%s ts:%s\n",
         id, fwCopy, reportedId, f[2] ? f[2] : "", f[3] ? f[3] : "", f[4] ? f[4] : "");
     // Publish both a version and a dump event, since 'A' carries both.

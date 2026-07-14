@@ -55,7 +55,7 @@ static void busIngestByte(uint8_t c) {
   if (c != '\n') return;
 
   // Newline = end of message. Commit to the ring buffer.
-  rxCount++;
+  rxCount = rxCount + 1;
   RS485Msg m;
   m.timestamp = millis();
   m.dir       = 'R';
