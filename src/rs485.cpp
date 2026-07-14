@@ -21,7 +21,6 @@ static bool sfIsDirectVersionQuery(const uint8_t* data, size_t len);
 static char sfFrameCmd(const uint8_t* data, size_t len, int* outAddr);
 static size_t sfKnownCommandLen(const uint8_t* data, size_t len);
 static void sfQuietCapturePending(const uint8_t* data, size_t len);
-static void sfTrackFromFrame(const uint8_t* data, size_t len);
 
 // Allocate a large buffer in PSRAM (preferred) or internal RAM (fallback),
 // zeroed. Logs where it landed. Returns NULL only if both allocations fail.
@@ -44,11 +43,10 @@ void* gwPsramAlloc(const char* name, size_t bytes) {
 
 // Allocate the large runtime buffers in PSRAM to free internal RAM (which the panel's
 // DMA framebuffer and the WiFi/TCP stack both need). Call once from setup() before any
-// task or registry init touches these buffers.
+// task touches these buffers.
 void psramAllocInit() {
   logRing   = (GwLogEntry*)gwPsramAlloc("command log",    sizeof(GwLogEntry) * MSG_RING_SIZE);
   mqttQueue = (MqttQItem*)gwPsramAlloc("MQTT queue",      sizeof(MqttQItem) * MQTT_Q_SIZE);
-  sfModules = (SFModule*) gwPsramAlloc("module registry", sizeof(SFModule)  * MAX_MODULES);
   txQueue   = (TxQItem*)  gwPsramAlloc("scheduled TX",    sizeof(TxQItem)   * TXQ_SIZE);
 }
 
@@ -152,103 +150,11 @@ void rs485Begin() {
   DBG("[BUS] emulated bus -- there is no UART, and no serial parameters to set\n");
 }
 
-// Inspect an outbound frame and update per-module display tracking. This runs
-// for EVERY transmitted frame (called from rs485Send), so a well-formed display
-// command sent through a raw path -- the Bus Monitor "Send Frame" box, the
-// /api/rs485/send endpoint, or the MQTT splitflap/send topic -- updates tracking
-// exactly like the high-level helpers do. Recognized forms:
-//   m<id>-<char>  / m*-<char>   show character (broadcast with '*')
-//   m<id>+<idx>   / m*+<idx>    show flap index (char becomes unknown)
-//   m<id>h        / m*h         home (char becomes unknown)
-// Anything else (by-serial mX..., version/dump/tuning commands, responses)
-// is ignored. addr -1 means broadcast. Takes sfMutex internally; never call
-// while already holding it.
-static void sfTrackFromFrame(const uint8_t* data, size_t len) {
-  // Minimum "m" + addr + cmd = 3 chars (e.g. "m*h"). Must start with 'm'.
-  if (len < 3 || data[0] != 'm') return;
-  // The by-serial frames all use a literal 'X' as the address token (mXH, mXD,
-  // mXA, mXW, mXN). Those never change a known module's displayed character, so
-  // skip them outright.
-  if (data[1] == 'X') return;
-
-  size_t i = 1;
-  int addr;
-  if (data[i] == '*') {            // broadcast
-    addr = -1;
-    i = i + 1;
-  } else if (data[i] >= '0' && data[i] <= '9') {
-    long v = 0;
-    while (i < len && data[i] >= '0' && data[i] <= '9') {
-      v = v * 10 + (data[i] - '0');
-      i = i + 1;
-      if (v > 254) return;         // out of valid id range -> not a display cmd
-    }
-    addr = (int)v;
-  } else {
-    return;                        // not an address we recognize
-  }
-  if (i >= len) return;
-  char cmd = (char)data[i];
-
-  if (cmd == '-') {                // show character: next byte is the char
-    if (i + 1 >= len) return;
-    char c = (char)data[i + 1];    // ASCII or a Windows-1252 high byte (euro/accents)
-    if (!isFlapByte((uint8_t)c)) return;
-    // Record for the display wall so it shows every written cell -- provisioned
-    // or not, straight from the frame (independent of the module registry).
-    if (addr < 0) memset(gWallChars, c, sizeof(gWallChars));       // broadcast
-    else if (addr < (int)sizeof(gWallChars)) gWallChars[addr] = c;
-    sfTrackChar(addr, c);
-  } else if (cmd == '+') {         // show index: record index, char unknown
-    long idx = 0;
-    size_t j = i + 1;
-    if (j >= len || data[j] < '0' || data[j] > '9') return;  // need a number
-    while (j < len && data[j] >= '0' && data[j] <= '9') {
-      idx = idx * 10 + (data[j] - '0');
-      j = j + 1;
-      if (idx >= SF_MAX_FLAPS) { idx = -1; break; }   // out of flap range -> unknown
-    }
-    // The index-addressed API (POST /api/display/cells) drives the wall entirely through
-    // '+', so the display wall has to be tracked here too -- otherwise everything that API
-    // writes is invisible to the Live Preview and to /api/display/state, and only the panel
-    // itself would know what it is showing. Resolve the index back to its flap byte.
-    //
-    // A pictograph flap has NO byte (that is why it is index-addressed in the first place),
-    // so it tracks as 0 -- "present, character unknown" -- which the preview renders as '?'.
-    // The panel draws the heart correctly regardless; it is only the text mirror that has
-    // no way to say "heart" in a byte.
-    char fc = (idx >= 0) ? vmFlapCharAt((int)idx) : 0;
-    if (xSemaphoreTake(sfMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      if (addr < 0) {
-        for (int k = 0; k < sfModuleCount; k++) {
-          if (sfModules[k].provisioned) {
-            sfModules[k].flapIndex = (int)idx;
-            sfModules[k].flapChar  = fc;
-          }
-        }
-        memset(gWallChars, fc, sizeof(gWallChars));
-      } else {
-        SFModule* m = sfFindById((uint8_t)addr);
-        if (m) { m->flapIndex = (int)idx; m->flapChar = fc; }
-        if (addr < (int)sizeof(gWallChars)) gWallChars[addr] = fc;
-      }
-      xSemaphoreGive(sfMutex);
-    }
-  } else if (cmd == 'h' &&         // home: char becomes unknown.
-             (i + 1 >= len || data[i + 1] == '\n' || data[i + 1] == '\r')) {
-    // Guard against false matches: 'h' must be the whole command, not a prefix
-    // of something else. (There is no other 'h...' display command, but this
-    // keeps the matcher strict.)
-    if (addr < 0) memset(gWallChars, 0, sizeof(gWallChars));        // broadcast home
-    else if (addr < (int)sizeof(gWallChars)) gWallChars[addr] = 0;  // -> blank cell
-    sfTrackChar(addr, 0);
-  }
-}
 
 // Parse the address + command of an outbound frame for Quiet Time. Returns the
 // command char (or 0 if not a normal addressed display frame) and sets *outAddr
-// to the module id, or -1 for broadcast ('*'). Mirrors sfTrackFromFrame's
-// address parsing. Used only to classify display-motion frames.
+// to the module id, or -1 for broadcast ('*'). Used only to classify display-motion
+// frames, so Quiet Time can suppress them.
 static char sfFrameCmd(const uint8_t* data, size_t len, int* outAddr) {
   *outAddr = -2;
   if (len < 3 || data[0] != 'm') return 0;
@@ -294,40 +200,49 @@ static bool sfFrameIsDisplayMotion(const uint8_t* data, size_t len) {
 // intent worth replaying; home is suppressed but not queued.
 static void sfQuietCapturePending(const uint8_t* data, size_t len) {
   int addr;
-  char cmd = sfFrameCmd(data, len, &addr);
-  size_t i = 1; if (data[i]=='*') i++; else { while (i<len && data[i]>='0' && data[i]<='9') i++; }
-  if (xSemaphoreTake(sfMutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
+  const char cmd = sfFrameCmd(data, len, &addr);
+  size_t i = 1;
+  if (data[i] == '*') i++;
+  else { while (i < len && data[i] >= '0' && data[i] <= '9') i++; }
+
+  // Resolve the frame to the FLAP the host wants, not to a character.
+  //
+  // This is the fix. The old capture stored a BYTE, and the restore re-sent it through
+  // sfSendChar() -- back through the uppercase fold. "Hello world" came out of a quiet-time
+  // cycle as "HELLo worLD", and a pictograph, which has no byte at all, came back as
+  // whatever the fallback happened to pick. A byte cannot name a flap on a 237-flap reel.
+  // An index can, so resolve once, here, and restore by index.
+  int flap = -1;
   if (cmd == '-') {
-    if (i + 1 < len) {
-      char c = (char)data[i + 1];
-      if (addr < 0) {
-        for (int k = 0; k < sfModuleCount; k++)
-          if (sfModules[k].provisioned) { sfModules[k].pendChar=c; sfModules[k].pendIndex=-1; sfModules[k].hasPend=true; }
-      } else {
-        SFModule* m = sfFindById((uint8_t)addr);
-        if (m) { m->pendChar=c; m->pendIndex=-1; m->hasPend=true; }
-      }
-    }
+    if (i + 1 < len) flap = vmFlapIndexOf((char)data[i + 1]);
   } else if (cmd == '+') {
-    long idx = 0; size_t j = i + 1; bool got=false;
-    while (j < len && data[j] >= '0' && data[j] <= '9') { idx = idx*10 + (data[j]-'0'); j++; got=true; if (idx>=SF_MAX_FLAPS){idx=-1;break;} }
-    if (got) {
-      if (addr < 0) {
-        for (int k = 0; k < sfModuleCount; k++)
-          if (sfModules[k].provisioned) { sfModules[k].pendChar=0; sfModules[k].pendIndex=(int)idx; sfModules[k].hasPend=true; }
-      } else {
-        SFModule* m = sfFindById((uint8_t)addr);
-        if (m) { m->pendChar=0; m->pendIndex=(int)idx; m->hasPend=true; }
-      }
+    long idx = 0; size_t j = i + 1; bool got = false;
+    while (j < len && data[j] >= '0' && data[j] <= '9') {
+      idx = idx * 10 + (data[j] - '0'); j++; got = true;
+      if (idx >= SF_MAX_FLAPS) { got = false; break; }
     }
+    if (got) flap = (int)idx;
   }
-  xSemaphoreGive(sfMutex);
+  if (flap < 0) return;          // nothing the reel can show: nothing worth replaying
+
+  if (!vmods || !vmMutex) return;
+  if (xSemaphoreTake(vmMutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
+  if (addr < 0) {
+    for (int k = 0; k < vmCount; k++) vmods[k].pendFlap = (int16_t)flap;
+  } else {
+    for (int k = 0; k < vmCount; k++)
+      if (vmods[k].id == (uint8_t)addr) { vmods[k].pendFlap = (int16_t)flap; break; }
+  }
+  xSemaphoreGive(vmMutex);
 }
 
 // True iff `data[0..len)` (caller strips trailing CR/LF first) is a DIRECT,
 // numeric-id firmware-version query "m<id>v" with no payload after the 'v'.
-// This is the one frame the gateway must transmit WITHOUT a newline terminator
-// (see sfQueryVersion() for the half-duplex turnaround reason). Broadcast "m*v",
+// This is the one frame the gateway transmits WITHOUT a newline terminator: a real
+// module answers a direct version query the instant it parses the 'v', and on a real
+// half-duplex bus the gateway is still driving the line (and deaf) for one more byte-time
+// if a '\n' follows -- so the reply's first bytes are lost. The bus here is emulated and
+// has no such race, but the frame normaliser keeps the wire format faithful. Broadcast "m*v",
 // by-serial "mX.." frames, and anything with bytes after the 'v' are NOT matched
 // and so keep their terminator.
 static bool sfIsDirectVersionQuery(const uint8_t* data, size_t len) {
@@ -412,7 +327,7 @@ void rs485Send(const uint8_t* data, size_t len, bool raw) {
   //      the junk (see sfKnownCommandLen), then
   //   3) re-add exactly one '\n' terminator -- EXCEPT a direct numeric-id version
   //      query "m<id>v", which must ship bare to dodge the half-duplex turnaround
-  //      collision (see sfQueryVersion). So "m1v", "m1v\n", "m1v\r\n", and even
+  //      collision (see sfIsDirectVersionQuery). So "m1v", "m1v\n", "m1v\r\n", and even
   //      "m1vJUNK" all leave as bare "m1v", while "m5-A" and "m9o2832" leave
   //      correctly newline-terminated (which also spares payload commands the
   //      module's 50 ms idle-timeout wait).
@@ -457,8 +372,9 @@ void rs485Send(const uint8_t* data, size_t len, bool raw) {
   // buffer, txCount, vbusDeliver's writes to the module array, and the ring push.
   // txMutex serializes it across taskWeb / taskNetwork / taskRS485 so two senders
   // cannot interleave. There are no early returns inside, so the mutex is always
-  // released. Lock order is txMutex -> {sfMutex, msgMutex, vmMutex}, never
-  // inverted: nothing takes txMutex while holding any of those.
+  // released. Lock order is txMutex -> {msgMutex, vmMutex}, never inverted: nothing takes
+  // txMutex while holding either of those. vbusDeliver takes vmMutex from in here, which is
+  // exactly why no caller may hold vmMutex across rs485Send.
   if (txMutex) xSemaphoreTake(txMutex, portMAX_DELAY);
   {
     unsigned long waitStart = millis();
@@ -475,7 +391,6 @@ void rs485Send(const uint8_t* data, size_t len, bool raw) {
   // Update per-module display tracking from this frame. Doing it here -- the
   // single point every outbound frame passes through -- means raw sends are
   // tracked exactly like the high-level helpers, with no per-path duplication.
-  sfTrackFromFrame(data, bare);
   gDisplayDirty = true;   // HA display sensor refresh (network task, rate-limited)
   // Log the transmitted frame (the command without a trailing terminator, for
   // readability -- the raw path may carry one). The monitor ring below keeps the

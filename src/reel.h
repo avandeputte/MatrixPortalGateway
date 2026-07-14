@@ -183,6 +183,17 @@ static inline int reelTint(int i) {
   return (int)FONT_EXTRA_COLOUR[i - SF_EMOJI_BASE];
 }
 
+// The UNICODE CODE POINT a flap shows, or 0 if it has none (a colour flap: a swatch, not a
+// character). This is the only way to name a pictograph flap outside the panel: it has no
+// CP1252 byte, so reelCharAt() returns 0 for it and every byte-shaped API is simply blind to
+// it. /api/display/state reports through here, which is why the wall can read back a heart.
+static inline uint32_t reelCodepointAt(const char* reel, int i) {
+  if (i < 0 || i >= SF_MAX_FLAPS) return 0;
+  if (reelIsColour(i)) return 0;
+  if (reelIsEmoji(i))  return FONT_EXTRA_CP[i - SF_EMOJI_BASE];
+  return cp1252ToUnicode((uint8_t)reel[i]);
+}
+
 static inline char reelCharAt(const char* reel, int i) {
   if (i < 0 || i >= SF_MAX_FLAPS) return 0;
   return reel[i];

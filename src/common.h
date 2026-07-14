@@ -6,7 +6,7 @@
  * Firmware for the Adafruit MatrixPortal ESP32-S3 driving a HUB75 RGB LED matrix.
  *
  * A port of the Split-Flap Gateway (v3.1) that keeps the entire gateway -- web UI,
- * REST API, MQTT/Home Assistant, OTA, module registry, bus monitor -- and replaces
+ * REST API, MQTT/Home Assistant, OTA, bus monitor -- and replaces
  * the RS-485 transceiver with a software bus and a panel full of *virtual*
  * split-flap modules. Nothing is wired to a real reel: every module the gateway
  * discovers, calibrates and drives is emulated in firmware and drawn as a flap
@@ -136,11 +136,11 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
    kept in the ESP32's internal RTC, seeded from NTP, and is therefore INVALID
    from power-on until the first successful sync. Everything downstream already
    copes: rtcEpochNow() returns 0 while the clock is unset, which is exactly the
-   "RTC not valid yet" path the registry pruner and frame timestamps handle. */
+   "RTC not valid yet" path the frame timestamps handle. */
 #define RTC_YEAR_OFFSET   2000
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "1.9.0"   // this product's version (UI + boot log)
+#define FW_VERSION           "1.10.0"   // this product's version (UI + boot log)
 // The gateway REST/MQTT surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it
@@ -317,34 +317,22 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 
 /* ---- Housekeeping cadences ---- */
 #define STATUS_INTERVAL_MS      60000UL   // MQTT status publish cadence (1/min)
-#define MODULE_STALE_SECS       86400UL   // 24h: prune modules not seen in this long
 // Longer than a companion heartbeat (~30 s) ON PURPOSE. Each change RESTARTS this
 // clock, so two companions flipping the URL between them never hold still long enough
 // to be written -- which is the point. A single, real change persists after two quiet
 // minutes.
 #define COMPANION_SAVE_DEBOUNCE_MS 120000UL   // companion URL: persist once it settles
-#define MODULE_SAVE_DEBOUNCE_MS 5000UL    // coalesce FATFS writes
+#define VMODULE_SAVE_DEBOUNCE_MS   5000UL     // reel state: coalesce FATFS writes
 
-/* ---- Module registry sizing ----
-   Supports module IDs 0-254 (255 modules). id==255 is reserved as the
-   empty-slot / unprovisioned sentinel. The emulated wall uses gridRows*gridCols
-   of them (45 by default), but the registry keeps the full ceiling so a
-   /modules.dat carried over from a real RS-485 bus still loads. */
-#define MAX_MODULES         255   // module IDs 0-254
+/* ---- Persisted files (FFat) ----
+   The virtual modules' own "EEPROM": id, serial, calibration. Written to a temp file and
+   renamed, so a power cut mid-write leaves the previous good file intact.
 
-// Duplicate-ID heuristic: two modules at the same ID both answer a by-ID version
-// or 'A' query and collide on the half-duplex bus. Retained because the emulated
-// bus reproduces the collision -- a module can still be given a duplicate ID
-// with the 'i' command.
-
-/* ---- Persisted files (FFat) ---- */
-#define MODULES_FILE     "/modules.dat"
-// Bumped to SFG3 when `acked` left PersistedModule: an SFG2 file has a different
-// record size, and the count*sizeof() read would silently misparse it. A rejected
-// file costs nothing -- every module re-registers on the next m*v.
-#define MODULES_MAGIC    0x53464733UL   // "SFG3"
-// The virtual modules' own "EEPROM" -- id, serial, calibration, flap set. Written
-// with the same temp-file-then-rename atomicity as the registry.
+   There is no /modules.dat any more. The gateway kept a sticky registry of "modules seen
+   on the bus" -- a concept borrowed wholesale from the RS-485 gateway, where the bus is
+   real and its population genuinely has to be discovered. Here the wall is DRAWN: vmods[]
+   is created whole from rows x cols and every module exists by construction. See
+   modules.cpp. */
 #define VMODULES_FILE    "/vmods.dat"
 #define VMODULES_TMP     "/vmods.tmp"
 // "VMO" + a layout generation. The saved record embeds flapChars[SF_MAX_FLAPS], so
@@ -398,7 +386,6 @@ extern volatile unsigned long gCompanionUrlDirtyMs;
 extern volatile bool gDisplayDirty;
 extern volatile bool gOtaInProgress;
 extern volatile bool gOtaRebootPending;
-extern char gWallChars[256];
 extern bool gApActive;
 extern SemaphoreHandle_t timeMutex;
 extern StaticSemaphore_t timeMutexBuf;

@@ -31,6 +31,7 @@ static void handleApiCompanionSettingsRaw();
 static void handleApiSend();
 static void handleApiSendBatch();
 static void handleApiDisplayCells();
+static void handleApiCapabilities();
 static void handleApiStatus();
 static void handleApiText();
 static void handleFavicon();
@@ -347,160 +348,127 @@ static void handleApiDisplayCells() {
   server.send(200, "application/json", resp);
 }
 
-// GET /api/flap/modules
-// Streamed with chunked transfer + a small per-module stack buffer instead of
-// building one large heap String. This avoids the alloc/free of a multi-KB
-// String on every poll (the UI polls this every few seconds), which was a
-// meaningful contributor to long-run heap fragmentation. The sfMutex is taken
-// only briefly to snapshot each entry -- never held across the (potentially
-// blocking) sendContent network write, which could otherwise stall taskRS485.
+/* GET /api/flap/modules
+ *
+ * The wall IS the modules. There is no registry to consult: every cell of the wall is a
+ * module, its id is its cell index, its serial is a deterministic function of the MAC and
+ * that index, and its firmware version is a compile-time constant. This reads vmods[]
+ * directly -- the one place that actually knows.
+ *
+ * (There used to be a shadow copy: a sticky SFModule registry, persisted to FATFS, with a
+ * stale-probe pruner and a duplicate-ID heuristic. It existed to track modules that appear
+ * and disappear on a real bus. Nothing here appears or disappears.)
+ */
 static void handleApiModules() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
-  // setConnectionTimeout(), NOT setTimeout(): the latter sets Stream's *read* timeout
-  // and leaves SO_SNDTIMEO at NetworkClient's 3 s default. This loop does one socket
-  // write per module, so on a wedged client 45 modules x 3 s = 135 s -- past the 120 s
-  // web watchdog, which reboots the board. Bound each write instead; a browser that
-  // cannot take 1.5 s per chunk has gone away.
+  // setConnectionTimeout(), NOT setTimeout(): the latter sets Stream's *read* timeout and
+  // leaves SO_SNDTIMEO at its 3 s default. This loop does one socket write per module, so on
+  // a wedged client 160 modules x 3 s is far past the 120 s web watchdog, which would reboot
+  // the board. Bound each write instead.
   server.client().setConnectionTimeout(1500);
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.send(200, "application/json", "");
   server.sendContent("[");
 
-  // Emit modules sorted by ID so the grid is always ordered (newly provisioned
-  // modules slot into place instead of appearing at the end). Build a sorted
-  // index order under the lock first; unprovisioned entries (id==255) naturally
-  // sort to the end. Then snapshot+send each entry, re-checking under the lock.
-  static uint8_t order[MAX_MODULES];
-  int count = 0;
-  xSemaphoreTake(sfMutex, portMAX_DELAY);
-  count = sfModuleCount;
-  for (int i = 0; i < count; i++) order[i] = (uint8_t)i;
-  // Insertion sort the index array by the modules' IDs (stable, small N).
-  for (int a = 1; a < count; a++) {
-    uint8_t key = order[a];
-    uint8_t keyId = sfModules[key].id;
-    int b = a - 1;
-    while (b >= 0 && sfModules[order[b]].id > keyId) { order[b + 1] = order[b]; b--; }
-    order[b + 1] = key;
-  }
-  xSemaphoreGive(sfMutex);
-
-  // Coalesce modules into MSS-sized chunks instead of one socket write per module.
-  // The registry already travels to the browser in a single HTTP response; what used
-  // to be per-module was the *write*, and each write is what can block for the send
-  // timeout on a stalled peer. 45 modules was 45 writes (and 45 TCP segments); at
-  // ~150 B per module this is 5 writes of ~1.4 KB. Sized to the 1436-byte lwIP MSS so
-  // a chunk maps to one segment and nothing is left dribbling in a partial packet.
-  char   batch[1400];
-  size_t bl      = 0;
-  int    emitted = 0;
-  for (int k = 0; k < count; k++) {
-    int idx = order[k];
-    // Snapshot this entry under the lock, then release before formatting/sending.
-    SFModule m;
-    bool valid = false;
-    xSemaphoreTake(sfMutex, portMAX_DELAY);
-    if (idx < sfModuleCount) { m = sfModules[idx]; valid = true; }
-    xSemaphoreGive(sfMutex);
-    if (!valid) continue;   // list shrank (prune) mid-iteration
-
-    // Tracked flap char is one Windows-1252 byte; emit it as JSON-safe UTF-8.
-    char flapBuf[6] = {0};
-    if (m.flapChar) flapToJsonUtf8(&m.flapChar, 1, flapBuf, sizeof(flapBuf));
-    char obj[288];
-    int on = snprintf(obj, sizeof(obj),
-      "%s{\"id\":%d,\"sn\":\"%s\",\"provisioned\":%s,\"flapIndex\":%d,"
-      "\"flapChar\":\"%s\",\"fwVersion\":\"%s\",\"lastSeen\":%lu,\"lastSeenEpoch\":%lu}",
-      emitted ? "," : "", (int)m.id, m.serialNum, m.provisioned ? "true" : "false",
-      m.flapIndex, flapBuf, m.fwVersion, m.lastSeen, m.lastSeenEpoch);
-    if (on < 0) on = 0;
-    if (on > (int)sizeof(obj) - 1) on = (int)sizeof(obj) - 1;   // snprintf truncated
-
-    if (bl + (size_t)on >= sizeof(batch)) {   // flush before it overflows
-      batch[bl] = 0;                          // sendContent() strlen()s its argument
-      server.sendContent(batch);
-      bl = 0;
-      wdgWebMs = millis();                    // the SUM of the writes is what trips the watchdog
-      // A client that vanished mid-response cannot be finished; every remaining write
-      // would just burn its full send timeout. Stop rather than hold taskWeb hostage --
-      // the response is abandoned, which is exactly what the peer already did.
-      if (!server.client().connected()) return;
+  const int n = vmCount;
+  for (int i = 0; i < n; i++) {
+    // Snapshot one module under the lock, format outside it: the drawing task walks this
+    // array at 100 Hz and must not wait on a socket write.
+    uint8_t id = 0; char sn[VM_SN_CHARS + 1] = ""; int flap = 0;
+    if (vmMutex && xSemaphoreTake(vmMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      id   = vmods[i].id;
+      flap = vmods[i].curIndex;
+      strlcpy(sn, vmods[i].sn, sizeof(sn));
+      xSemaphoreGive(vmMutex);
     }
-    memcpy(batch + bl, obj, (size_t)on); bl += (size_t)on;
-    emitted++;
+    // flapChar reports the CODE POINT, like /api/display/state: a pictograph flap has no
+    // CP1252 byte, and reporting an empty string for one is how you end up believing the wall
+    // is blank when it is showing a heart. A colour flap has no character at all and reports
+    // as its protocol letter (r o y g b p w).
+    char utf8[8] = "";
+    const uint32_t cp = vmFlapCodepointAt(flap);
+    if (cp) {
+      size_t n8 = utf8Encode(cp, utf8);
+      utf8[n8] = 0;
+      if (cp == '"' || cp == '\\') { utf8[1] = utf8[0]; utf8[0] = '\\'; utf8[2] = 0; }   // JSON
+    } else {
+      const char c = vmFlapCharAt(flap);                 // a colour flap
+      if (c) { utf8[0] = c; utf8[1] = 0; }
+    }
+
+    char row[160];
+    snprintf(row, sizeof(row),
+             "%s{\"id\":%u,\"sn\":\"%s\",\"provisioned\":true,\"fwVersion\":\"%d\","
+             "\"flapIndex\":%d,\"flapChar\":\"%s\"}",
+             i ? "," : "", (unsigned)id, sn, VM_FW_VERSION, flap, utf8);
+    server.sendContent(row);
+    wdgWebMs = millis();
   }
-  if (bl) { batch[bl] = 0; server.sendContent(batch); wdgWebMs = millis(); }
   server.sendContent("]");
-  server.sendContent("");   // terminate the chunked response
+  server.sendContent("");
 }
 
-// GET /api/display/state -- the data behind the visual "display wall". Returns
-// the configured grid dimensions plus the character each cell is showing. Cells
-// are addressed by module ID mapped left-to-right, top-to-bottom (cell index =
-// row*cols + col == module id), matching how text is distributed across modules.
-// A cell shows: the tracked character if known, "?" if the module exists but its
-// char is unknown (e.g. after a home or index-set), or null if no module has
-// that id. Kept small so the UI can poll it cheaply.
+
+/* GET /api/display/state -- what the wall is actually showing.
+ *
+ * Read straight off the reels (vmods[i].curIndex), not off a shadow copy of what the gateway
+ * once transmitted. That distinction is not academic: the old gWallChars mirror stored a
+ * BYTE per cell, so it could not represent a pictograph flap at all (no byte exists) and it
+ * recorded what was *sent* rather than what is *shown*.
+ *
+ * A cell is: the character the flap carries, "?" when the flap has no byte (a pictograph --
+ * text cannot name it, the panel draws it fine), or null when there is no module there.
+ */
 static void handleApiDisplayState() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
-  server.client().setConnectionTimeout(1500);   // see handleApiModules
-  int rows = cfg.gridRows < 1 ? 1 : cfg.gridRows;
-  int cols = cfg.gridCols < 1 ? 1 : cfg.gridCols;
-  int cells = rows * cols;
-  // cellChar: 0 = no module at this id, 1 = module present but char unknown,
-  // otherwise the printable character. Filled under the mutex, JSON built after.
-  static char cellChar[64 * 64];   // matches the 64x64 grid cap enforced in settings
-  if (cells > (int)sizeof(cellChar)) cells = sizeof(cellChar);
-  memset(cellChar, 0, cells);
-  // Primary source: the last flap byte transmitted to each grid cell, so the wall
-  // mirrors EVERYTHING the gateway sent -- provisioned or not, and independent of
-  // the module registry (which only tracks provisioned ids).
-  for (int i = 0; i < cells && i < (int)sizeof(gWallChars); i++) {
-    uint8_t wc = (uint8_t)gWallChars[i];
-    if (wc && isFlapByte(wc)) cellChar[i] = (char)wc;
-  }
-  // A provisioned module that hasn't been sent a character yet still reads as
-  // present ("?") rather than empty.
-  xSemaphoreTake(sfMutex, portMAX_DELAY);
-  for (int i = 0; i < sfModuleCount; i++) {
-    const SFModule& m = sfModules[i];
-    if (m.provisioned && m.id < cells && cellChar[m.id] == 0) cellChar[m.id] = 1;
-  }
-  xSemaphoreGive(sfMutex);
+  server.client().setConnectionTimeout(1500);
+  const int rows = gPanel.rows ? gPanel.rows : 1;
+  const int cols = gPanel.cols ? gPanel.cols : 1;
+  const int cells = rows * cols;
 
-  // Stream the response (chunked) from the static cellChar snapshot rather than
-  // building a multi-KB heap String for a frequently-polled endpoint. The mutex
-  // was already released above, so nothing is held across these network writes.
+  static int16_t flap[VM_MAX_MODULES];
+  int n = vmCount;
+  if (n > VM_MAX_MODULES) n = VM_MAX_MODULES;
+  if (vmMutex && xSemaphoreTake(vmMutex, portMAX_DELAY) == pdTRUE) {
+    for (int i = 0; i < n; i++) flap[i] = vmods[i].curIndex;
+    xSemaphoreGive(vmMutex);
+  }
+
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.send(200, "application/json", "");
   char head[48];
   snprintf(head, sizeof(head), "{\"rows\":%d,\"cols\":%d,\"cells\":[", rows, cols);
   server.sendContent(head);
-  // Emit cells in batches to keep the number of tiny network writes down.
-  char batch[256]; size_t bl = 0;
   for (int i = 0; i < cells; i++) {
-    char cellBuf[12]; int cn;
-    char c = cellChar[i];
-    if (c == 0)       cn = snprintf(cellBuf, sizeof(cellBuf), "%snull", i ? "," : "");
-    else if (c == 1)  cn = snprintf(cellBuf, sizeof(cellBuf), "%s\"?\"", i ? "," : "");
-    else {
-      // Windows-1252 byte -> JSON-safe UTF-8 (handles euro/accented glyphs).
-      char u[6]; flapToJsonUtf8(&c, 1, u, sizeof(u));
-      cn = snprintf(cellBuf, sizeof(cellBuf), "%s\"%s\"", i ? "," : "", u);
+    char one[16];
+    if (i >= n) {
+      snprintf(one, sizeof(one), "%snull", i ? "," : "");
+    } else {
+      // Report the CODE POINT, not the byte. A pictograph flap has no CP1252 byte, so a
+      // byte-shaped read renders a heart as '?' -- which is the same blindness that made the
+      // old registry unable to restore one after Quiet Time. A colour flap has no character
+      // at all; it reports as its protocol letter (r o y g b p w), as it always has.
+      const uint32_t cp = vmFlapCodepointAt(flap[i]);
+      if (!cp) {
+        const char c = vmFlapCharAt(flap[i]);                   // a colour flap
+        snprintf(one, sizeof(one), "%s\"%c\"", i ? "," : "", c ? c : ' ');
+      } else {
+        char utf8[8] = "";
+        size_t n8 = utf8Encode(cp, utf8);
+        utf8[n8] = 0;
+        if (cp == '"' || cp == '\\')                            // JSON-escape the two that need it
+          snprintf(one, sizeof(one), "%s\"\\%s\"", i ? "," : "", utf8);
+        else
+          snprintf(one, sizeof(one), "%s\"%s\"", i ? "," : "", utf8);
+      }
     }
-    if (cn < 0) cn = 0;
-    if (bl + (size_t)cn >= sizeof(batch)) {
-      batch[bl] = 0;             // sendContent() strlen()s its argument: terminate
-      server.sendContent(batch); // before flushing, or it reads past bl into the stack
-      wdgWebMs = millis();       // a stalled client must not trip the web watchdog
-      bl = 0;
-    }
-    memcpy(batch + bl, cellBuf, cn); bl += cn;
+    server.sendContent(one);
+    if ((i & 31) == 0) wdgWebMs = millis();
   }
-  if (bl) { batch[bl] = 0; server.sendContent(batch); }
   server.sendContent("]}");
-  server.sendContent("");   // terminate the chunked response
+  server.sendContent("");
 }
+
 
 // POST /api/flap/char   {"id":5,"char":"A"}   id=-1 for broadcast
 static void handleApiChar() {
@@ -582,6 +550,103 @@ static void handleApiHome() {
 }
 
 
+/* ----------------------------------------------------------
+   GET /api/capabilities -- what this wall can actually show
+   ----------------------------------------------------------
+   One call, made once when a client connects, that answers "what characters can this display
+   show?" without the client having to know what kind of gateway it is talking to. The RS-485
+   gateway answers the same question at the same URL, with the same shape -- which is the whole
+   point of it: a client asks the wall, not the hardware.
+
+   On THIS board the answer is short, because the wall is drawn: every module renders from one
+   shared reel (reel.h), so there is exactly one flap set and `uniform` is true by construction.
+   On the RS-485 gateway every module owns its own reel and they need not agree, so the same
+   response can carry several sets -- and there, `union` and `common` genuinely differ.
+
+   `sets` reports each DISTINCT reel once, with the ids that use it, rather than one entry per
+   module. A 75-module wall with one reel is one entry and one range, a few hundred bytes; a
+   mixed wall costs one entry per genuinely different reel, which is the information itself
+   rather than a repetition of it.
+
+   Streamed, like /api/flap/modules: the union string alone is ~300 bytes and nothing here needs
+   to exist in RAM all at once.                                                                */
+// Write `cp` into a JSON string being streamed, escaping what JSON requires.
+static void capSendCp(uint32_t cp) {
+  char out[8];
+  if (cp == '"' || cp == '\\') { out[0] = '\\'; out[1] = (char)cp; out[2] = 0; }
+  else { size_t n = utf8Encode(cp, out); out[n] = 0; }
+  server.sendContent(out);
+}
+
+static void handleApiCapabilities() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.client().setConnectionTimeout(1500);
+  const int rows = gPanel.rows ? gPanel.rows : 1;
+  const int cols = gPanel.cols ? gPanel.cols : 1;
+
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+
+  char head[320];
+  snprintf(head, sizeof(head),
+           "{\"product\":\"%s\",\"fw\":\"%s\",\"api\":\"%s\","
+           "\"grid\":{\"rows\":%d,\"cols\":%d},\"modules\":%d,\"maxFlaps\":%d,",
+           PRODUCT_NAME, FW_VERSION, API_VERSION, rows, cols, vmCount, SF_MAX_FLAPS);
+  server.sendContent(head);
+
+  // The colour flaps are NOT characters. They are named, because on the index-addressed path
+  // 'r' is the letter r -- which is exactly why /api/display/cells names them too.
+  server.sendContent("\"colors\":[");
+  for (int i = 0; i < SF_COLOUR_FLAPS; i++) {
+    char one[16];
+    snprintf(one, sizeof(one), "%s\"%s\"", i ? "," : "", REEL_COLOUR_NAMES[i]);
+    server.sendContent(one);
+  }
+  server.sendContent("],");
+
+  // The character repertoire. Every flap that shows a CHARACTER -- so the colour flaps are
+  // skipped, and the lowercase and pictograph flaps are in, because they are reachable (by
+  // index, through /api/display/cells) and a client that cannot see them here would never
+  // know to ask for them.
+  //
+  // union == common == the reel, and uniform is true: one reel, drawn 75 times. The three
+  // fields are still all present, because a client must not have to care which gateway it is
+  // talking to.
+  server.sendContent("\"charset\":{\"uniform\":true,\"assumed\":[],\"unknown\":[],\"union\":\"");
+  for (int i = 0; i < SF_MAX_FLAPS; i++) {
+    const uint32_t cp = vmFlapCodepointAt(i);
+    if (cp) capSendCp(cp);
+    if ((i & 31) == 0) wdgWebMs = millis();
+  }
+  server.sendContent("\",\"common\":\"");
+  for (int i = 0; i < SF_MAX_FLAPS; i++) {
+    const uint32_t cp = vmFlapCodepointAt(i);
+    if (cp) capSendCp(cp);
+    if ((i & 31) == 0) wdgWebMs = millis();
+  }
+  server.sendContent("\"},");
+
+  // One reel, every module. `source` says where the set came from: read off the module
+  // ("reported"), the firmware's compiled-in default ("assumed"), or -- here -- the gateway's
+  // own reel, which it drew itself and therefore knows exactly.
+  char sets[96];
+  snprintf(sets, sizeof(sets), "\"sets\":[{\"flaps\":%d,\"source\":\"builtin\",\"modules\":\"0-%d\",\"chars\":\"",
+           SF_MAX_FLAPS, vmCount - 1);
+  server.sendContent(sets);
+  for (int i = 0; i < SF_MAX_FLAPS; i++) {
+    const uint32_t cp = vmFlapCodepointAt(i);
+    if (cp) capSendCp(cp);
+    if ((i & 31) == 0) wdgWebMs = millis();
+  }
+  server.sendContent("\"}],");
+
+  // What the wall can DO, not just show. A client reads this instead of sniffing the firmware
+  // version and guessing.
+  server.sendContent("\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
+                     "\"quiet\",\"maintenance\",\"ha\",\"ota\"]}");
+  server.sendContent("");
+}
+
 // GET /api/status
 static void handleApiStatus() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -614,7 +679,7 @@ static void handleApiStatus() {
     aip[0],aip[1],aip[2],aip[3],
     (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
     mqtt.connected()?"true":"false",
-    sfModuleCount,
+    vmCount,
     stk485, stkWeb, stkNet, stkOta, stkRtc, stkDsp,
     gPanel.ready?"true":"false", gPanel.panelW, gPanel.panelH,
     gPanel.cols, gPanel.rows, gPanel.cellW, gPanel.cellH,
@@ -1288,6 +1353,8 @@ void webInit() {
   server.on("/api/flap/text",        HTTP_OPTIONS, handleOptions);
   server.on("/api/flap/home",        HTTP_POST,    handleApiHome);
   server.on("/api/flap/home",        HTTP_OPTIONS, handleOptions);
+  server.on("/api/capabilities",     HTTP_GET,     handleApiCapabilities);
+  server.on("/api/capabilities",     HTTP_OPTIONS, handleOptions);
   server.on("/api/status",           HTTP_GET,     handleApiStatus);
   server.on("/api/mqtt/test",        HTTP_POST,    handleApiMqttTest);
   server.on("/api/mqtt/test",        HTTP_OPTIONS, handleOptions);

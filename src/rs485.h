@@ -1,7 +1,7 @@
 // rs485.h -- bus framing, the monitor ring, and the single send API.
 //
 // The name is kept from the RS-485 gateway on purpose: everything above this line
-// -- the web UI, the REST API, MQTT, the module registry -- addresses a bus, and
+// -- the web UI, the REST API, MQTT -- addresses a bus, and
 // nothing about that changes when the transceiver is replaced by an emulator.
 // rs485Send() still owns wire correctness (strip terminators, trim junk past a
 // complete command, re-frame, enforce Quiet Time, log to the monitor ring); it

@@ -5,7 +5,7 @@ Gateway, so future maintainers (including future-you) don't have to re-derive th
 
 It assumes the [Split-Flap Gateway 3.1 architecture notes](../../SplitFlapGateway/3.1/ARCHITECTURE.md)
 and only covers what this port changed or added. The task model, the watchdog, the choice of the
-synchronous `WebServer`, the heap-stability work, the sticky module registry and the companion
+synchronous `WebServer`, the heap-stability work and the companion
 settings blob are all inherited verbatim and are still true.
 
 ---
@@ -29,7 +29,7 @@ become dead code, and the first real firmware change upstream would
 have silently diverged. Emulating at the protocol level keeps every one of those paths live.
 
 It also means the two "module" layers of the original survive intact and never touch each other
-directly: `modules.*` is the gateway's *registry* of whatever answers on the bus; `vmodule.*` is
+directly: `modules.*` is the gateway's side of the module protocol; `vmodule.*` is
 what answers. They communicate only in ASCII frames.
 
 ## Why the mechanism is not emulated
@@ -185,7 +185,7 @@ descriptor fetches) starved the WiFi MAC, which shares that SRAM — association
 refresh at the default geometry, well above flicker. Do not raise `LCD_CLK_HZ`; if a long chain
 ghosts, lower it.
 
-Conversely, the monitor ring, the MQTT queue, the module registry, the scheduled-TX ring and the
+Conversely, the monitor ring, the MQTT queue, the scheduled-TX ring and the
 *saved* module state are in PSRAM (`gwPsramAlloc`), precisely to leave that internal SRAM free.
 The virtual-module array is the exception — it is pinned to internal RAM, because `taskDisplay`
 walks it 100×/s on the core the refresh runs on, and a quad-PSRAM cache miss there shimmers the
@@ -254,7 +254,7 @@ NTP with a zero offset (so the system clock is UTC and `mktime` acts as `timegm`
 
 The visible difference is that time is **invalid from power-on until the first sync**:
 `rtcNow.valid` stays false and `rtcEpochNow()` returns 0. Every caller already handles that — it
-is exactly the state an RTC with a flat cell produces. The registry pruner skips work while the
+is exactly the state an RTC with a flat cell produces. Frame timestamps skip work while the
 clock is untrustworthy, and frame timestamps fall back to `HH:MM:SS` uptime.
 
 The `setenv("TZ", …)` heap leak documented upstream is avoided the same way: TZ is set once at

@@ -9,11 +9,10 @@
 //
 // Two consequences, both already handled by every caller:
 //   * Time is invalid from power-on until the first NTP sync. rtcNow.valid stays
-//     false and rtcEpochNow() returns 0, which the module pruner treats as "no
-//     valid clock yet" and the frame timestamps render as HH:MM:SS uptime.
-//   * A reboot without network loses the wall clock. The persisted module
-//     registry copes: entries carry an epoch and are only pruned once the clock
-//     is trustworthy again.
+//     false and rtcEpochNow() returns 0, which the frame timestamps render as
+//     HH:MM:SS uptime instead of a wall-clock time.
+//   * A reboot without network loses the wall clock until the next sync. Nothing
+//     persisted depends on it.
 //
 // Local time is derived at format time from the configured POSIX TZ string. TZ is
 // set ONCE (loadConfig, and again only when the timezone changes) because

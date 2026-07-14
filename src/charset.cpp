@@ -17,7 +17,7 @@ static const uint16_t CP1252_HIGH[32] = {
 
 // Map a CP1252 byte to its Unicode code point (0x00-0x7F and 0xA0-0xFF are
 // identity; 0x80-0x9F use the table, which may be 0 for an undefined slot).
-static uint32_t cp1252ToUnicode(uint8_t b) {
+uint32_t cp1252ToUnicode(uint8_t b) {
   if (b >= 0x80 && b <= 0x9F) return CP1252_HIGH[b - 0x80];
   return b;
 }
@@ -95,9 +95,7 @@ size_t utf8ToFlap(const char* in, char* out, size_t outSize, bool* allMapped) {
   return oi;
 }
 
-size_t flapByteToUtf8(uint8_t b, char* out) {
-  uint32_t cp = cp1252ToUnicode(b);
-  if (cp == 0) cp = b;                 // undefined slot: emit the raw byte's value
+size_t utf8Encode(uint32_t cp, char* out) {
   if (cp < 0x80) {
     out[0] = (char)cp;
     return 1;
@@ -111,6 +109,12 @@ size_t flapByteToUtf8(uint8_t b, char* out) {
   out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
   out[2] = (char)(0x80 | (cp & 0x3F));
   return 3;
+}
+
+size_t flapByteToUtf8(uint8_t b, char* out) {
+  uint32_t cp = cp1252ToUnicode(b);
+  if (cp == 0) cp = b;                 // undefined slot: emit the raw byte's value
+  return utf8Encode(cp, out);
 }
 
 size_t flapToJsonUtf8(const char* in, size_t inLen, char* out, size_t outSize, char junk) {

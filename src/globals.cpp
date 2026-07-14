@@ -4,8 +4,7 @@
 // globals.cpp -- single definition site for every shared global.
 // Each variable here is declared 'extern' in common.h (or a subsystem header)
 // and defined exactly once below, so there is one authoritative home for all
-// cross-file state (config, registry, queues, mutexes, task handles, ...).
-// Single definition site for every shared global declared extern in common.h.
+// cross-file state (config, queues, mutexes, task handles, ...).
 
 // Debug flag read by the DBG() macro. Mirrors cfg.serialDebug, kept in sync in
 // loadConfig() and handleApiConfigSettings().
@@ -17,10 +16,9 @@ volatile bool gSerialDebug = false;
 volatile bool gMaintenanceMode = false;
 // Quiet Time: when true the gateway still accepts and acknowledges every command,
 // but does NOT transmit normal display-motion frames to the bus (show character,
-// show index, and home), so the flaps stay still during quiet hours. Display
-// tracking is left unchanged
-// (it reflects the physically-shown flap). The latest requested display per
-// module is remembered so the reels can resync when Quiet Time turns off.
+// show index, and home), so the flaps stay still during quiet hours. What each
+// module was asked to show meanwhile is remembered -- as a FLAP INDEX, in
+// VModule::pendFlap -- so the wall can resync exactly when Quiet Time turns off.
 //
 // The wall is BLANKED as Quiet Time is entered -- sfSetQuietTime() homes every reel
 // on the rising edge, and it must do so BEFORE raising this flag, because the
@@ -32,11 +30,7 @@ volatile bool gMaintenanceMode = false;
 //
 // Runtime-only -- OFF at boot, never persisted -- like maintenance mode.
 volatile bool gQuietTime = false;
-// Last flap byte transmitted to each module id (= grid cell). Drives the display
-// wall so it mirrors every cell the gateway sent to, provisioned or not. Written
-// in sfTrackFromFrame (the single frame choke point); 0 = nothing sent yet.
-char gWallChars[256] = {0};
-// v3.0: last status the companion app reported, and when (millis). Runtime-only.
+// Last status the companion app reported, and when (millis). Runtime-only.
 char gCompanionStatus[80] = "";
 // The tab list the companion advertised, kept as ready-made JSON so the 4-second
 // dashboard poll can splice it into the response without re-serialising it. Empty
@@ -45,7 +39,7 @@ char gCompanionTabs[COMPANION_TABS_MAX] = "";
 volatile unsigned long gCompanionSeenMs = 0;
 volatile bool          gCompanionUrlDirty   = false;   // URL changed, not yet in flash
 volatile unsigned long gCompanionUrlDirtyMs = 0;       // millis() of the LAST change
-// Set when display tracking changes (in rs485Send); the network task publishes
+// Set when the wall changes (in rs485Send); the network task publishes
 // the HA display-state topic (rate-limited) so HA reflects what's shown without
 // spamming. rs485Send sets it; the network task (tasks.cpp) reads and clears it.
 volatile bool gDisplayDirty = false;
@@ -101,26 +95,17 @@ volatile int          txQHead       = 0;
 volatile int          txQTail       = 0;
 SemaphoreHandle_t     txQMutex      = NULL;
 StaticSemaphore_t     txQMutexBuf;
-// Module registry (~14 KB). Lives in PSRAM -- accessed only under sfMutex from
-// normal tasks (never an ISR, never DMA, and not during flash writes), and the
-// 9600-baud bus is far from a hot loop, so PSRAM latency is negligible while it
-// frees ~14 KB of internal RAM. Allocated in psramAllocInit(); falls back to
-// internal RAM if PSRAM is unavailable.
-SFModule*            sfModules     = NULL;
-SemaphoreHandle_t sfMutex = NULL;
-StaticSemaphore_t sfMutexBuf;
 // Serializes the bus-touching section of rs485Send. There is no UART to garble any
 // more, but the section is still shared mutable RAM: a static scratch buffer, the
 // txCount counter, vbusDeliver's mutation of the module array, and the monitor-ring
 // push. taskWeb (REST, core 0), taskNetwork (MQTT, core 1) and taskRS485 (discovery,
 // core 0) all call rs485Send, so it is genuinely concurrent and genuinely cross-core.
-// Lock order is ALWAYS txMutex -> sfMutex (rs485Send -> sfTrackFromFrame): never call
-// rs485Send while holding sfMutex (sfTrackFromFrame would re-take it and self-deadlock).
+// Lock order is ALWAYS txMutex -> vmMutex (rs485Send -> vbusDeliver -> vmDispatch): never
+// call rs485Send while holding vmMutex, or vbusDeliver re-takes it and self-deadlocks. The
+// rule used to name the module registry's lock. The registry is gone; the rule is not --
+// it now guards the thing that was the truth all along.
 SemaphoreHandle_t txMutex = NULL;
 StaticSemaphore_t txMutexBuf;
-int      sfModuleCount = 0;
-volatile bool          sfModulesDirty   = false;  // pending NVS save
-volatile unsigned long sfModulesDirtyMs = 0;      // millis() when first dirtied
 bool          ntpSynced   = false; // true once NTP sync succeeds (in taskNetwork)
 /* ----------------------------------------------------------
    Persistent configuration stored in NVS
@@ -148,13 +133,17 @@ bool sfFsReady = false;   // set true once FFat is mounted
 /* ----------------------------------------------------------
    The emulated modules
    ----------------------------------------------------------
-   ~270 bytes each, so a 128-module ceiling is ~35 KB. Lives in INTERNAL RAM, not
-   PSRAM: taskDisplay walks the whole array a hundred times a second (vmTick) on the
-   core the panel refresh runs on, and this board's quad-SPI PSRAM stalls that walk
-   long enough to wander the OE window -- an idle wall that shimmers. vmInit() pins
-   it with MALLOC_CAP_INTERNAL for exactly that reason. The monitor ring, the MQTT
-   queue and the module registry ARE in PSRAM (gwPsramAlloc); none of them is walked
-   on a 100 Hz path.
+   THE wall. Not a model of it and not a cache of it: vmInit() creates every module from
+   rows x cols, none can appear or vanish, and vmods[i].curIndex IS the flap on show. Every
+   read path -- /api/display/state, /api/status, the MQTT display sensor, the quiet-time
+   snapshot -- reads it directly. There used to be a second copy of this (the module
+   registry: one byte per cell), and a byte cannot name a flap on a 237-flap reel.
+
+   Lives in INTERNAL RAM, not PSRAM: taskDisplay walks the whole array a hundred times a
+   second (vmTick) on the core the panel refresh runs on, and this board's quad-SPI PSRAM
+   stalls that walk long enough to wander the OE window -- an idle wall that shimmers.
+   vmInit() pins it with MALLOC_CAP_INTERNAL for exactly that reason. The monitor ring and
+   the MQTT queue ARE in PSRAM (gwPsramAlloc); neither is walked on a 100 Hz path.
 ---------------------------------------------------------- */
 VModule*              vmods     = NULL;
 int                   vmCount   = 0;

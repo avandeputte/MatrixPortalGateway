@@ -9,13 +9,14 @@ emulating the real module firmware's wire protocol byte for byte and rendering i
 flapping character cell on the panel.
 
 Everything above the bus is unchanged: the web UI, the REST API, MQTT and Home Assistant
-discovery, OTA, the sticky module registry, the bus monitor. The
+discovery, OTA, the bus monitor. The
 [companion app](../../SplitFlapGatewayCompanion) drives it without modification and cannot
-tell the difference.
+tell the difference. (One thing above the bus is *gone* rather than unchanged — the sticky
+module registry. See **New in 1.10**.)
 
 ```
      ┌──────────────────────────────────────────────┐
-     │  web UI · REST API · MQTT · OTA · registry    │   unchanged from Gateway 3.1
+     │  web UI · REST API · MQTT · OTA · monitor     │   unchanged from Gateway 3.1
      ├──────────────────────────────────────────────┤
      │  rs485Send()  framing · sanitization · Quiet  │   unchanged
      ├──────────────────────────────────────────────┤
@@ -87,6 +88,50 @@ tell the difference.
 
 ---
 
+## New in 1.10
+
+- **The module registry is gone.** It was the last piece of the RS-485 gateway that had no
+  meaning here, and it was actively wrong. A registry answers "what is out there on the bus?" —
+  a real question when the bus is real and modules can be added, removed, renumbered or simply
+  fail to answer. On this board the wall is *drawn*: `vmInit()` creates every module from
+  rows × cols, none can appear or vanish, and `vmods[i].curIndex` **is** the flap on show. The
+  registry was a second copy of that, and a worse one.
+
+  Worse in a way you could see. It stored one **byte** per cell, so entering and leaving Quiet
+  Time — which snapshots the wall and replays it — sent every cell back through the legacy
+  uppercase fold:
+
+  ```
+  before quiet :  Hello world!é♥
+  after quiet  :  HELLo worLD!É?      <- lowercase folded; the heart could not come back at all
+  ```
+
+  A byte *cannot* name a flap on a 237-flap reel: seven of the letters are colour codes, and a
+  pictograph has no byte at all (that is the whole reason `/api/display/cells` addresses flaps
+  by index). The pending flap now lives in the module itself, as an `int16_t` index, and a Quiet
+  Time cycle round-trips the wall exactly.
+
+  Everything that used to read the registry now reads the modules directly: `/api/display/state`,
+  `/api/flap/modules`, `/api/status`, the MQTT display sensor and the Quiet Time snapshot. Gone
+  with it: `/modules.dat` and its FATFS persistence, the stale-entry pruner, the boot `m*v`
+  discovery broadcast and the reconciliation added in 1.4 to paper over the bug it caused,
+  `sfMutex` (the lock order is now `txMutex → vmMutex`), and `sfQueryVersion()`, which nothing
+  had called in some time.
+
+- **`/api/display/state` reports code points, not bytes.** A pictograph flap has no CP1252 byte,
+  so a byte-shaped read rendered a heart as `"?"` — the same blindness as the registry, one layer
+  up. The wall now reads back what it is actually showing. `/api/flap/modules` reports its
+  `flapChar` the same way.
+
+- **`GET /api/capabilities`** — one call that answers *what characters can this display show?*
+  The RS-485 gateway answers the same URL with the same shape, so a client never has to know
+  which kind of wall it is talking to. Here the answer is always `uniform`: every cell renders
+  from one drawn reel, so `union` and `common` are the same 230 characters, and the seven colour
+  flaps are reported by name under `colors` rather than as the letters `roygbpw`. ~1.6 KB for a
+  75-module wall.
+
+---
+
 ## New in 1.6
 
 - **Lowercase, and emoji.** The reel grows to **237 flaps**: the 156 Windows-1252 glyphs and
@@ -138,6 +183,9 @@ tell the difference.
   the panel really did keep showing a 15×3 picture on a 15×5 wall. Pressing **Identify All**
   was the only way out, and you had to know to do it. It now rebuilds whenever the registry
   disagrees with the wall, in either direction.
+
+  *(Superseded in 1.10: the registry is gone, and with it this bug's entire habitat. The wall
+  is the modules; there is nothing left to reconcile.)*
 
 - **Companion tab advertisement — the whole feature was missing.** `/api/companion` accepted
   the companion's `tabs` and *silently discarded them*, and never advertised the gateway's own
@@ -219,9 +267,10 @@ tell the difference.
 ## What it does
 
 On boot the firmware creates one virtual split-flap module per cell of the module wall
-(15 × 3 = **45 modules** by default), with IDs `0`…`44` fixed by wall position. The gateway discovers
-them exactly as it would discover real hardware — it broadcasts `m*v`, they answer with their
-firmware version and serial number, and they populate the registry.
+(15 × 3 = **45 modules** by default), with IDs `0`…`44` fixed by wall position. There is no
+discovery, because there is nothing to discover: every module exists by construction, and the
+array of them *is* the state of the wall. They still answer `m*v` with a firmware version and
+serial number — the protocol is emulated faithfully — but nobody has to ask.
 
 From then on, everything works. Send `m5-A` and module 5's reel flips forward until it lands
 on `A`. Send text from the Display tab and it cascades across the wall. Reconfigure a
@@ -590,8 +639,7 @@ FA5E  <the board's 6 MAC bytes>  <module index>  <crc8>
 "fabricated"
 ```
 
-Stable across reboots (the registry keys modules by serial), unique per board, and never
-mistakable for a real ATtiny SIGROW read.
+Stable across reboots, unique per board, and never mistakable for a real ATtiny SIGROW read.
 
 ---
 
@@ -658,9 +706,10 @@ ARCHITECTURE.md     why the non-obvious decisions were made
 openapi.yaml        REST API reference
 ```
 
-Note the two "module" layers, which the RS-485 gateway also has: `modules.*` is the gateway's
-**registry** of whatever answers on the bus, unchanged from upstream. `vmodule.*` is what
-answers. They talk only through protocol frames — which is exactly why the port works.
+`modules.*` is the gateway's side of the module protocol — how a character, an index or a home
+becomes a frame. `vmodule.*` is what answers those frames. They talk only through protocol
+frames, which is exactly why the port works. (Upstream, `modules.*` also holds a *registry* of
+whatever is out on the bus. That has no meaning on a drawn wall and was removed in 1.10.)
 
 ---
 
@@ -707,9 +756,8 @@ c++ -std=c++17 -Isrc tools/reel_test.cpp src/charset.cpp -o /tmp/reel_test && /t
   from internal DMA-capable RAM (`MALLOC_CAP_DMA`). That bounds panel size and colour depth
   together, and `panelBegin()` refuses a geometry that would starve WiFi of that pool. The
   virtual-module array is pinned to internal RAM too — `taskDisplay` walks it 100×/s on the core
-  the refresh runs on, and quad PSRAM there causes a shimmer. (The monitor ring, MQTT queue,
-  module registry and the scheduled-TX ring *are* in PSRAM; nothing in the refresh path touches
-  them.)
+  the refresh runs on, and quad PSRAM there causes a shimmer. (The monitor ring, the MQTT queue
+  and the scheduled-TX ring *are* in PSRAM; nothing in the refresh path touches them.)
 - **No battery-backed RTC.** Wall-clock time is invalid from power-on until the first NTP sync.
   Every caller already handles that state; frame timestamps show `HH:MM:SS` uptime until then.
 - **No collision emulation**, so the duplicate-ID heuristic never fires.

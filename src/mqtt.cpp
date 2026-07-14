@@ -1,4 +1,5 @@
 #include "gateway.h"
+#include "vmodule.h"
 
 
 
@@ -93,7 +94,7 @@ void mqttPublishStatus() {
     "\"stk485\":%u,\"stkweb\":%u,\"stknet\":%u,\"stkota\":%u,\"stkrtc\":%u,\"stkdisp\":%u,"
     "\"ip\":\"%s\",\"url\":\"http://%s/\",\"version\":\"%s\","
     "\"maintenance\":%s,\"quiet\":%s}",
-    millis()/1000, rxCount, txCount, sfModuleCount,
+    millis()/1000, rxCount, txCount, vmCount,
     timeBuf, ntpSynced?"true":"false", freeHeap, minHeap,
     maxBlk, (unsigned)ESP.getFreePsram(), rssi, (WiFi.status()==WL_CONNECTED)?"true":"false",
     s485, sWeb, sNet, sOta, sRtc, sDsp,
@@ -104,30 +105,30 @@ void mqttPublishStatus() {
   mqttEnqueue(_t, buf, n);
 }
 
-// Assemble the display string in module-id order across the configured grid,
-// from the SAME source as the live-display wall: gWallChars, the last flap byte
-// transmitted to each grid cell. This mirrors exactly what the gateway sent --
-// independent of the module registry, so it is unaffected by provisioning state
-// or stale-probe eviction. A provisioned cell never written reads '?'.
+// Assemble the display string in module-id order, straight off the reels.
+//
+// It used to read gWallChars -- a byte-per-cell mirror of what the gateway last TRANSMITTED,
+// cross-referenced against the module registry. Two shadow copies of one truth. It reads the
+// truth now: vmods[i].curIndex is the flap actually on show. A pictograph flap has no byte,
+// so it publishes '?' -- text cannot name it, and the panel draws it correctly regardless.
 void mqttPublishDisplayState() {
   if (!mqtt.connected()) return;
-  int cells = (int)cfg.gridRows * (int)cfg.gridCols;
+  int cells = vmCount;
   if (cells < 1) cells = 1;
-  if (cells > MAX_MODULES) cells = MAX_MODULES;
-  // Each cell is one glyph; a Windows-1252 high byte (euro/accent) expands to up
-  // to 3 UTF-8 bytes, so size the buffer for the worst case.
-  static char str[MAX_MODULES * 3 + 1];   // static: single-caller (taskNetwork)
+  if (cells > VM_MAX_MODULES) cells = VM_MAX_MODULES;
+  // Each cell is one glyph; a Windows-1252 high byte (euro/accent) expands to up to 3 UTF-8
+  // bytes, so size the buffer for the worst case.
+  static char str[VM_MAX_MODULES * 3 + 1];   // static: single-caller (taskNetwork)
+  static int16_t flap[VM_MAX_MODULES];
+  if (vmMutex && xSemaphoreTake(vmMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    for (int i = 0; i < cells; i++) flap[i] = vmods[i].curIndex;
+    xSemaphoreGive(vmMutex);
+  }
   int outLen = 0;
-  if (xSemaphoreTake(sfMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-    for (int id = 0; id < cells; id++) {
-      uint8_t uc = (id < (int)sizeof(gWallChars)) ? (uint8_t)gWallChars[id] : 0;
-      if (!(uc && isFlapByte(uc))) {          // nothing valid sent to this cell
-        SFModule* m = sfFindById((uint8_t)id);
-        uc = (m && m->provisioned) ? (uint8_t)'?' : (uint8_t)' ';
-      }
-      outLen += flapByteToUtf8(uc, str + outLen);       // ASCII -> 1 byte, high -> UTF-8
-    }
-    xSemaphoreGive(sfMutex);
+  for (int i = 0; i < cells; i++) {
+    uint8_t uc = (uint8_t)vmFlapCharAt(flap[i]);
+    if (!(uc && isFlapByte(uc))) uc = (uint8_t)'?';   // a pictograph: no byte to name it
+    outLen += flapByteToUtf8(uc, str + outLen);
   }
   str[outLen] = '\0';
   char _t[80];

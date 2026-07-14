@@ -72,11 +72,17 @@ size_t utf8Next(const char* in, uint32_t* cp);
 // The CP1252 byte for a Unicode code point, or -1 if it has none. A heart has none --
 // which is exactly why the pictograph flaps are reachable only by index.
 int cp1252FromUnicode(uint32_t cp);
+// The inverse: the Unicode code point a CP1252 byte stands for (0 = undefined slot).
+uint32_t cp1252ToUnicode(uint8_t b);
 
 // Append the UTF-8 encoding of one flap byte to `out` (1-3 bytes, NOT
 // NUL-terminated); returns the number of bytes written. `out` must have room for
 // at least 3 bytes.
 size_t flapByteToUtf8(uint8_t b, char* out);
+
+// Encode ONE Unicode code point as UTF-8 (up to 3 bytes; no terminator). The pictograph
+// flaps have a code point but no CP1252 byte, so flapByteToUtf8 cannot reach them.
+size_t utf8Encode(uint32_t cp, char* out);
 
 // Transcode `inLen` flap bytes into a JSON-string-safe UTF-8 sequence in `out`:
 //   * `"` and `\` are backslash-escaped

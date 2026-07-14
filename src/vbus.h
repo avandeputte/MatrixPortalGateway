@@ -4,8 +4,8 @@
 // command as before, then hands the finished bytes to vbusDeliver() instead of
 // rs485.write(). The virtual modules parse them and QUEUE their replies; the bus
 // task drains that queue and feeds the bytes back through the same accumulator
-// the UART fed, so mqttPublishMsg / sfParseResponse are all reached by
-// the identical path. Neither the gateway nor a client can tell.
+// the UART fed, so the monitor ring and mqttPublishMsg are reached by the identical path.
+// Neither the gateway nor a client can tell.
 //
 // The PROTOCOL is emulated; the wire is not. A real RS-485 bus at 9600 baud is
 // half-duplex and slow -- an 'A' reply would take tens of ms to clock out and a
@@ -39,7 +39,7 @@ enum VmReplyKind : uint8_t {
 
 // A broadcast (m*v) makes EVERY module answer at once, so this must clear VM_MAX_MODULES
 // with room to spare -- otherwise a wall-wide identify silently drops the tail of its own
-// replies and the registry comes up short.
+// replies.
 #define VBUS_QUEUE_LEN     224   // a broadcast across a full 192-module wall + slack
 // Module think-time before an answer. Non-zero for one reason: rs485Send is still
 // inside its critical section when vbusDeliver runs, so a reply must not be

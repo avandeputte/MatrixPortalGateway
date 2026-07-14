@@ -6,8 +6,8 @@
 // taskRS485 (core 0): drains the emulated bus, frames messages, parses replies.
 // taskRTC  (core 0): refreshes the wall clock once a second.
 // taskWeb  (core 0): services the HTTP server.
-// taskNetwork (core 1): WiFi/MQTT reconnect, status publishing, registry and
-// virtual-module persistence, stale-module pruning.
+// taskNetwork (core 1): WiFi/MQTT reconnect, status publishing, virtual-module and
+// config persistence.
 // taskDisplay (core 1, in display.cpp): steps the reels and repaints the panel.
 // Each feeds its watchdog timestamp; loop() in main.cpp reboots if one stalls.
 /* ----------------------------------------------------------
@@ -74,53 +74,23 @@ static void busIngestByte(uint8_t c) {
   // synthesized by the virtual modules a microsecond ago; showing them as "received
   // from the bus" was theatre.
   mqttPublishMsg(m);
-  sfParseResponse(busLineBuf, busLineLen);   // full frame, not the truncated copy
+  // Nothing parses the reply any more: it used to feed the module registry, and the
+  // registry is gone. The frame is still mirrored to MQTT above, which is the only
+  // consumer it ever had besides that.
   busLineLen = 0;
 }
 
 void taskRS485(void* pv) {
   static uint8_t rxFrame[TX_MAX_BYTES];   // one polled reply; this task is its only reader
 
-  // Startup discovery, RECONCILED AGAINST THE WALL.
-  //
-  // The wall is this firmware's ground truth: every cell of it *is* a module, and its id is
-  // fixed by position (0..vmCount-1). So a healthy registry holds exactly vmCount entries.
-  // Anything else means the grid was resized since the registry was last written.
-  //
-  // This used to broadcast only when the registry was completely EMPTY. That rule is correct
-  // on a real RS-485 bus, where the gateway cannot know what is out there and the sticky
-  // registry is all it has to go on. Here it was wrong, and the failure was silent: growing
-  // the wall from 15x3 to 15x5 left the registry holding the 45 modules it had loaded from
-  // FATFS, so it was not empty, so the 30 NEW modules were never asked to announce
-  // themselves. The Modules tab read "45 known modules" forever, the two new rows rendered
-  // as empty cells (a cell with no registry entry means "no module here"), and any client
-  // driving the wall from /api/flap/modules kept addressing only the first 45 -- so the
-  // panel really did keep showing a 15x3 picture on a 15x5 wall. The only way out was to
-  // press Identify All and know to do it.
-  //
-  // So rebuild whenever the registry disagrees with the wall. Rediscovery is nearly free
-  // here -- the modules are software and answer immediately -- and nothing durable is lost:
-  // every persisted field is derived, the serial being a deterministic function of the MAC
-  // and the cell index. It self-heals a dropped reply on the next boot for the same reason.
-  //
-  // Delayed briefly so the bus and the RX path here are fully up before we transmit.
-  {
-    vTaskDelay(pdMS_TO_TICKS(1500));
-    int known;
-    if (sfMutex) xSemaphoreTake(sfMutex, portMAX_DELAY);
-    known = sfModuleCount;
-    if (sfMutex) xSemaphoreGive(sfMutex);
-    if (known != vmCount) {
-      printf("[MOD] registry holds %d module(s) but the wall has %d -- rediscovering\n",
-             known, vmCount);
-      sfModulesClear();               // drop the stale wall, memory and FATFS alike
-      rs485SendStr("m*v\n");          // every cell reports version + serial
-    }
-  }
+  // No startup discovery. There is nothing to discover: the wall IS the modules, all of them
+  // exist from vmInit(), and none can appear or vanish. The m*v broadcast, the registry
+  // reconciliation it fed, and the "45 known modules of 75" bug that came with it are all
+  // gone with the registry.
 
   while (true) {
-    // Stand down while a firmware image is streaming: no bus traffic, no registry
-    // writes, no flash contention. Feed the watchdog so the stall check stays happy.
+    // Stand down while a firmware image is streaming: no bus traffic, no flash
+    // contention. Feed the watchdog so the stall check stays happy.
     if (gOtaInProgress) { wdgRS485Ms = millis(); vTaskDelay(pdMS_TO_TICKS(100)); continue; }
 
     // Send any scheduled batch frames now due. This is where /api/rs485/batch's
@@ -332,7 +302,7 @@ void taskNetwork(void* pv) {
       lastStatusMs = millis();
       mqttPublishStatus();
     }
-    // Refresh the HA display sensor when tracking changed, rate-limited to avoid
+    // Refresh the HA display sensor when the wall changed, rate-limited to avoid
     // spamming HA's recorder. No-op unless HA integration is enabled. Skipped
     // during an OTA upload to keep heap/CPU free for the transfer.
     if (!gOtaInProgress && gDisplayDirty && cfg.haEnabled && millis() - lastDispPubMs > 1500) {
@@ -341,7 +311,6 @@ void taskNetwork(void* pv) {
       mqttPublishDisplayState();
     }
 
-    // Persist the module registry if it changed (debounced to limit flash wear).
     // Persist the companion URL only once it has stopped moving. See the note on
     // gCompanionUrlDirty in common.h: an unconditional save turned two co-resident
     // companions into an NVS write every heartbeat, forever.
@@ -350,19 +319,12 @@ void taskNetwork(void* pv) {
       saveConfig();
       DBG("[CFG] companion URL settled -- persisted: %s\n", cfg.companionUrl);
     }
-    if (sfModulesDirty) {
-      if (sfModulesDirtyMs == 0) sfModulesDirtyMs = millis();
-      if (millis() - sfModulesDirtyMs > MODULE_SAVE_DEBOUNCE_MS) {
-        sfModulesSave();
-        sfModulesDirty   = false;
-        sfModulesDirtyMs = 0;
-      }
-    }
-    // ...and the virtual modules' own state, on the same debounce. 'N', 'i' and
-    // the restore command dirty it; showing a character does not.
+
+    // The virtual modules' own state, debounced to limit flash wear. 'N', 'i' and the
+    // restore command dirty it; showing a character does not.
     if (vmDirty) {
       if (vmDirtyMs == 0) vmDirtyMs = millis();
-      if (millis() - vmDirtyMs > MODULE_SAVE_DEBOUNCE_MS) {
+      if (millis() - vmDirtyMs > VMODULE_SAVE_DEBOUNCE_MS) {
         vmSave();
         vmDirty   = false;
         vmDirtyMs = 0;

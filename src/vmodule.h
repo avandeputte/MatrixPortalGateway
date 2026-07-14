@@ -105,6 +105,15 @@ struct VModule {
 
   // ---- runtime ----
   int16_t  curIndex;              // the flap on show; always valid
+  // Quiet Time: the flap the host asked for while the wall was suppressed, or -1.
+  //
+  // A FLAP INDEX, and that is the whole point. The gateway used to keep this in its module
+  // registry as a BYTE (SFModule::flapChar) and restore it by re-sending that character --
+  // which routed the restore back through sfSendChar()'s uppercase fold. A wall showing
+  // "Hello world" came back as "HELLo worLD" after a quiet-time cycle, and a pictograph
+  // (which has no byte at all) came back as whatever the fallback picked. A byte cannot
+  // represent a 237-flap reel. An index can, exactly, so this is exact.
+  int16_t  pendFlap;              // -1 = nothing pending
   int16_t  target;                // where the reel is flipping to; -1 = at rest
   uint8_t  flipPhase;             // 0 = settled, 1 = mid-flip (see display.cpp)
   uint32_t nextStepMs;            // millis() of the next flap advance
@@ -144,6 +153,10 @@ void vmBuildReel();
 
 // The character at flap `i`, or 0 if `i` is off the reel.
 char vmFlapCharAt(int i);
+// The code point a flap shows, or 0 for a colour flap. Unlike vmFlapCharAt() this can name
+// a pictograph -- which has no CP1252 byte at all -- so it is what /api/display/state
+// reports through.
+uint32_t vmFlapCodepointAt(int i);
 // The flap index carrying `c`, or -1 if the reel cannot show it.
 //
 // Resolution order, and it matters:

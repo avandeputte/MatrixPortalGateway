@@ -18,13 +18,12 @@
 void setup() {
   // 1. Mutexes first -- must exist before any task touches shared data
   msgMutex   = xSemaphoreCreateMutexStatic(&msgMutexBuf);
-  sfMutex    = xSemaphoreCreateMutexStatic(&sfMutexBuf);
   timeMutex  = xSemaphoreCreateMutexStatic(&timeMutexBuf);
   mqttQMutex = xSemaphoreCreateMutexStatic(&mqttQMutexBuf);
   txMutex    = xSemaphoreCreateMutexStatic(&txMutexBuf);
   txQMutex   = xSemaphoreCreateMutexStatic(&txQMutexBuf);
   vmMutex    = xSemaphoreCreateMutexStatic(&vmMutexBuf);
-  psramAllocInit();   // ring + MQTT queue + module registry -> PSRAM
+  psramAllocInit();   // monitor ring + MQTT queue + TX queue -> PSRAM
 
   // Debug output over native USB CDC (the board boots with CDC on).
   Serial.begin(115200);
@@ -57,12 +56,9 @@ void setup() {
            (unsigned)ESP.getFlashChipSize()/1024, ESP.getSdkVersion());
   }
 
-  // 2. Config, then the gateway's module registry
+  // 2. Config
   cfgSetDefaults();
   loadConfig();
-  memset(sfModules, 0, sizeof(SFModule) * MAX_MODULES);
-  for (int i = 0; i < MAX_MODULES; i++) sfModules[i].id = 255;
-  sfModuleCount = 0;
 
   // 3. Clock (before WiFi so timestamps work from boot; invalid until NTP)
   rtcHwInit();
@@ -76,19 +72,11 @@ void setup() {
     printf("[PANEL] wall %ux%u does not fit a %ux%u panel -- using %ux%u\n",
            cfg.gridCols, cfg.gridRows, cfg.panelW, cfg.panelH, gPanel.cols, gPanel.rows);
 
-  // 5. Filesystem, then the two things that restore from it: the virtual
-  //    modules' own state and the gateway's sticky registry.
+  // 5. Filesystem, then the thing that restores from it: the virtual modules' own
+  //    state (/vmods.dat). Nothing else on this board is sticky.
   sfFsInit();
   vmBuildReel();      // the shared reel: every CP1252 glyph, then the colours
   vmInit((int)gPanel.cols * (int)gPanel.rows);
-  // The reels just came up HOMED (autoHome), so seed the wall mirror to match. Without this
-  // the mirror reads "?" -- "present, character unknown" -- for every cell, which is a lie we
-  // would be telling ourselves: we homed them, so we know exactly what they show. The mirror
-  // is what /api/display/state and the Live Preview read.
-  for (int i = 0; i < vmCount; i++)
-    if (vmods[i].id < (int)sizeof(gWallChars))
-      gWallChars[vmods[i].id] = vmFlapCharAt(vmods[i].curIndex);
-  sfModulesLoad();
 
   // 6. Panel. Before WiFi: the DMA framebuffer must come out of internal SRAM
   //    (this board's PSRAM is quad SPI and too slow to feed it), and the WiFi
@@ -161,7 +149,8 @@ void loop() {
     // heap/min/maxblk are INTERNAL RAM only -- that is what
     // (unsigned)ESP.getFreeHeap() reports -- and the panel's DMA framebuffer is the big claimant
     // on that pool, so a modest maxblk is expected. psram is counted separately; the
-    // registry, monitor ring, MQTT queue and virtual modules all live there.
+    // monitor ring, the MQTT queue and the TX queue live there. The virtual modules do
+    // NOT -- they are pinned to internal RAM, see vmInit().
     // Heap + min-ever heap + largest free block
     // (fragmentation: a big gap between freeHeap and maxAlloc is a common
     // pre-crash signature). Per-task stack high-water marks catch the
@@ -181,7 +170,7 @@ void loop() {
     printf("[WDG] up=%lus heap=%u min=%u maxblk=%u minblk=%u "
            "stk(bus/web/net/ota/rtc/disp)=%u/%u/%u/%u/%u/%u "
            "rx=%lu tx=%lu drop=%lu psram=%u panel=%d "
-           "wifi=%d ap=%d rssi=%d mqtt=%d mods=%d/%d\n",
+           "wifi=%d ap=%d rssi=%d mqtt=%d mods=%d\n",
            now/1000, freeHeap, minHeap, maxBlk, minBlkEver,
            sBus, sWeb, sNet, sOta, sRtc, sDsp,
            rxCount, txCount, vbusDropped,
@@ -189,7 +178,7 @@ void loop() {
            (int)(WiFi.status()==WL_CONNECTED),
            (int)gApActive,
            (WiFi.status()==WL_CONNECTED) ? (int)WiFi.RSSI() : 0,
-           (int)mqtt.connected(), sfModuleCount, vmCount);
+           (int)mqtt.connected(), vmCount);
 
     // Boot grace period: skip stall detection for the first 60 s. The first boot
     // after flashing formats the FATFS partition (a long blocking flash

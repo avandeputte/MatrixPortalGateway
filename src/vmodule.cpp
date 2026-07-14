@@ -41,6 +41,7 @@ void vmBuildReel() {
 
 const char* vmReel()          { return sReel; }
 char vmFlapCharAt(int i)      { return reelCharAt(sReel, i); }
+uint32_t vmFlapCodepointAt(int i) { return reelCodepointAt(sReel, i); }
 int  vmFlapIndexOf(char c)    { return reelIndexOf(sReel, c); }
 int  vmFlapGlyph(int i)       { return reelGlyph(sReel, i); }
 int  vmFlapTint(int i)        { return reelTint(i); }
@@ -51,8 +52,8 @@ int  vmFlapIndexOfCodepoint(uint32_t cp) { return reelIndexOfCodepoint(sReel, cp
 // A deterministic, obviously-fake serial number: 20 uppercase hex chars over
 // {0xFA, 0x5E, <the board's 6 MAC bytes>, <module index>, <crc8>}. It reads
 // "FA5E..." -- fabricated -- so a serial from this emulator is never mistaken for
-// an ATtiny SIGROW read, while still being unique per board and stable across
-// reboots (the registry keys modules by serial).
+// an ATtiny SIGROW read, while still being unique per board and stable across reboots.
+// Reported by the 'v' and 'A' replies, exactly as a real module reports its own.
 static void vmMakeSerial(int index, char* out) {
   uint8_t mac[6] = {0};
   esp_read_mac(mac, ESP_MAC_WIFI_STA);
@@ -216,8 +217,8 @@ void vmInit(int count) {
   // is where the display task runs. This board's PSRAM is quad SPI: a
   // cache miss stalls the pipeline for most of a microsecond and the ISR cannot be
   // taken until the load retires, so the OE window for the short bitplanes wanders
-  // and the panel flickers. The registry, the monitor ring and the MQTT queue stay in
-  // PSRAM -- nothing on the display path touches them. ~12 KB for a 45-module wall.
+  // and the panel flickers. The monitor ring and the MQTT queue stay in PSRAM -- nothing
+  // on the display path touches them. ~2 KB for a 45-module wall.
   size_t vmBytes = sizeof(VModule) * (size_t)count;
   vmods = (VModule*) heap_caps_malloc(vmBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (!vmods) { printf("[VM] FATAL: cannot allocate %d modules\n", count); return; }
@@ -250,6 +251,7 @@ void vmInit(int count) {
     }
     m.bootCount  = (uint8_t)(m.bootCount + 1);   // wraps at 255, like the real one
     m.target     = -1;
+    m.pendFlap   = -1;
     m.flipPhase  = 0;
     m.nextStepMs = millis();
     // HOME AT BOOT, if the module says to -- which by default it does.
