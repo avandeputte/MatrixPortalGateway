@@ -140,7 +140,7 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define RTC_YEAR_OFFSET   2000
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "1.11.0"   // this product's version (UI + boot log)
+#define FW_VERSION           "1.12.0"   // this product's version (UI + boot log)
 // The gateway REST/MQTT surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it
