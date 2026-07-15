@@ -13,7 +13,7 @@
 // state (/vmods.dat) and the companion's settings blob (/compset.gz).
 extern bool sfFsReady;
 
-void sfFsInit();
+void sfFsInit(bool forceFormat = false);
 
 void sfSendChar(int addr, char c);       // legacy path: one CP1252 byte, folds lowercase
 void sfSendIndex(int addr, int idx);     // by flap index: exact, reaches every flap
