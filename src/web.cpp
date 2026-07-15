@@ -671,6 +671,18 @@ static void handleApiCapabilities() {
   capPutReel();
   capPut("\"}],");
 
+  // How the wall MOVES. "drawn": a cell is a repaint, not a mechanism — a new value can
+  // retarget it mid-flip, nothing queues, so sub-second updates (a ticking seconds field)
+  // are honest here. settleMs is the worst-case flip ANIMATION (flapMs x flapMax, both
+  // live-configurable) — cosmetic pacing, not a physical constraint; it is advisory, for a
+  // client pacing full-wall animations. The RS-485 gateway answers the same key with kind
+  // "mechanical", where the number IS a physical constraint. Stated directly, so a client
+  // never has to infer motion from which endpoints exist.
+  { char motion[64];
+    snprintf(motion, sizeof(motion), "\"motion\":{\"kind\":\"drawn\",\"settleMs\":%lu},",
+             (unsigned long)cfg.flapMs * (unsigned long)cfg.flapMax);
+    capPut(motion); }
+
   // What the wall can DO, not just show, so a client reads this instead of sniffing the
   // firmware version and guessing.
   capPut("\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
