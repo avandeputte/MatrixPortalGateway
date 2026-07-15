@@ -160,5 +160,5 @@ unsigned long mqttRetryMs  = 0;
 // Grows on repeated MQTT connect failures (30s -> 300s) so an unreachable broker is
 // not retried every 30 s forever; reset to 30 s on a successful connect.
 unsigned long mqttRetryDelayMs = 30000UL;
-WebServer server(80);
+HealWebServer server(80);
 unsigned long staDownSince = 0;   // millis() the station last dropped (0 = up/never)

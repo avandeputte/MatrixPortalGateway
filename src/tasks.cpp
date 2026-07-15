@@ -203,6 +203,14 @@ void taskWeb(void* pv) {
 
     wdgWebMs = millis();      // touch AFTER handling
 
+    // Self-heal a silently-dead port-80 listener (see webEnsureListening): a ground-truth
+    // listening() check every 20s, acted on only when the listener is genuinely down.
+    static unsigned long lastListenCheck = 0;
+    if (millis() - lastListenCheck >= 20000UL) {
+      lastListenCheck = millis();
+      webEnsureListening();
+    }
+
     // handleClient() has returned, so the 200 is on the wire and the socket is closed.
     // Now it is safe to boot the image we just flashed.
     if (gOtaRebootPending) {
