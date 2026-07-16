@@ -1,5 +1,11 @@
 # Matrix Portal Gateway
 
+> ### 📖 [SplitFlap Wiki — the comprehensive documentation](https://github.com/avandeputte/SplitFlapGateway/wiki)
+> Quick start · choosing a configuration · provisioning & calibration · the SplitFlap and
+> Matrix Gateways · the companion and its apps · APIs and wire protocols — the whole
+> ecosystem, documented in one place.
+
+
 A split-flap display with no split flaps.
 
 This is the [Split-Flap Gateway](../../SplitFlapGateway/3.1) v3.1 firmware, ported to an
