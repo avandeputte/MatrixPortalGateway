@@ -38,6 +38,32 @@ module registry. See **New in 1.10**.)
 
 ---
 
+## New in 1.14
+
+- **On-device effects — smooth animation the panel renders itself.** Pushing frames over HTTP
+  (raw canvas, above) tops out around **8 fps**: the web server closes the socket after every
+  request, so each frame pays a fresh TCP connection and slow-start, and that fixed cost — not
+  bandwidth — is the wall (rgb565 frames are no faster than rgb888). So animation moved *onto*
+  the gateway. **`POST /api/canvas/effect {"type":"plasma|fire|matrix","speed":1-10}`** runs the
+  animation on the display task at the panel's native **~70 fps**, with nothing on the network:
+
+  - **`plasma`** — a flowing rainbow sine-interference field.
+  - **`fire`** — bottom-up flames (a Doom-style spread: random sideways drift plus decay makes
+    tongues, not a smooth wash) through a black→red→orange→yellow→white palette.
+  - **`matrix`** — falling green streaks, bright heads and fading trails, per-column speeds.
+
+  An effect is a third display mode beside the wall and the raw canvas: it owns the panel until
+  `{"type":"none"}` (or `POST /api/canvas {"active":false"}`) hands it back. All integer/LUT work
+  — a sine table, two palettes, a PSRAM heat buffer — so a full frame fits inside one refresh.
+
+- **rgb565 raw frames actually work now.** `PUT /api/canvas/frame` inferred its pixel format from
+  the `?fmt=` query arg, but a raw-body handler cannot read URL args — the WebServer discards them
+  once it starts streaming the body — so `fmt=rgb565` silently fell back to rgb888 and every
+  16 KB frame was rejected as the wrong length. The format is now taken from the **body length**
+  (`W×H×3` = rgb888, `W×H×2` = rgb565), which is unambiguous and needs no query arg.
+
+---
+
 ## New in 1.13
 
 - **Raw canvas — the panel with the flaps taken off.** Every cell of this wall is *drawn*, so

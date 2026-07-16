@@ -1,5 +1,6 @@
 #include "gateway.h"
 #include "panel.h"   // panelSetColourOrder: a BGR panel is a runtime fact, not a build one
+#include "effects.h"
 #include "web_ui.h"
 
 
@@ -1382,6 +1383,7 @@ static void handleApiCompanionSettingsGet() {
 // means the next swap on the panel is ours. Bounded, so a wedged display task cannot hang the
 // request; feed the web watchdog while we wait.
 static void canvasStandDown() {
+  gEffect = EFFECT_NONE;          // a raw canvas supersedes any on-device effect
   gCanvasMode = true;
   gDispParked = false;
   uint32_t t0 = millis();
@@ -1392,8 +1394,10 @@ static void canvasEnter(bool clear) {
   if (!gCanvasMode) canvasStandDown();
   if (clear && gPanel.ready) { panelClear(); panelShow(); }
 }
-static void canvasLeave() {
-  if (gCanvasMode) { gCanvasMode = false; dispMarkDirty(); }   // repaint the wall
+static void canvasLeave() {                                    // hand the panel back to the wall
+  if (gCanvasMode || gEffect != EFFECT_NONE) {
+    gCanvasMode = false; gEffect = EFFECT_NONE; dispMarkDirty();
+  }
 }
 
 // The bundled face closest to a requested pixel height; 6x10 is the readable default.
@@ -1444,10 +1448,41 @@ static void handleApiCanvas() {
     server.send(200, "application/json", buf);
     return;
   }
-  char buf[160];
+  char buf[224];
   snprintf(buf, sizeof(buf),
-           "{\"active\":%s,\"width\":%u,\"height\":%u,\"formats\":[\"rgb888\",\"rgb565\"]}",
-           gCanvasMode ? "true" : "false", (unsigned)gPanel.panelW, (unsigned)gPanel.panelH);
+           "{\"active\":%s,\"width\":%u,\"height\":%u,\"formats\":[\"rgb888\",\"rgb565\"],"
+           "\"effect\":\"%s\",\"effects\":[\"plasma\",\"fire\",\"matrix\"]}",
+           gCanvasMode ? "true" : "false", (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
+           effectName(gEffect));
+  server.send(200, "application/json", buf);
+}
+
+// POST /api/canvas/effect  {"type":"plasma|fire|matrix|none","speed":1..10}
+// Start an on-device effect (rendered by taskDisplay at the panel's native rate) or, with
+// "none", return to the wall. Supersedes raw-canvas mode -- the display task, not HTTP, owns the
+// panel -- so it clears gCanvasMode too.
+static void handleApiCanvasEffect() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  if (!gPanel.ready) { sendJsonError(503, "Panel not running"); return; }
+  JsonDocument doc;
+  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
+    sendJsonError(400, "Invalid JSON"); return;
+  }
+  uint8_t e  = effectByName(doc["type"] | "none");
+  int     sp = doc["speed"] | (int)gEffectSpeed;
+  gEffectSpeed = (uint8_t)(sp < 1 ? 1 : sp > 10 ? 10 : sp);
+  gEffect = EFFECT_NONE;            // stop any running effect first...
+  gCanvasMode = false;
+  delay(40);                        // ...and let an in-flight effectRender() finish before we reset
+  if (e == EFFECT_NONE) {
+    dispMarkDirty();                // return to the reel wall
+  } else {
+    effectReset();
+    gEffect = e;                    // set last: taskDisplay renders only once its state is ready
+  }
+  char buf[96];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"effect\":\"%s\",\"speed\":%u}",
+           effectName(gEffect), (unsigned)gEffectSpeed);
   server.send(200, "application/json", buf);
 }
 
@@ -1497,9 +1532,11 @@ static void handleApiCanvasOps() {
   server.send(200, "application/json", buf);
 }
 
-// PUT /api/canvas/frame?fmt=rgb888|rgb565 -- a full raw frame, width*height pixels, row-major,
-// top-left origin. rgb888 = 3 bytes/px; rgb565 = 2 bytes/px, big-endian. Streamed straight to
-// the back buffer so no multi-KB frame is ever buffered whole; presented on RAW_END.
+// PUT /api/canvas/frame -- a full raw frame, width*height pixels, row-major, top-left origin.
+// The pixel format follows from the body LENGTH: W*H*3 is rgb888 (3 bytes/px), W*H*2 is rgb565
+// (2 bytes/px, big-endian). The ?fmt= hint is not read here -- the WebServer discards URL query
+// args once it begins streaming a raw body -- so the length is authoritative. Streamed straight
+// to the back buffer so no multi-KB frame is ever buffered whole; presented on RAW_END.
 static volatile int canvasErr = 0;
 static uint32_t     canvasPix = 0;      // pixels written this frame
 static uint8_t      canvasCarry[3];     // partial pixel across a chunk boundary
@@ -1511,13 +1548,15 @@ static void handleApiCanvasFrameRaw() {
   switch (raw.status) {
     case RAW_START: {
       canvasErr = 0; canvasPix = 0; canvasCarryN = 0;
-      String fmt = server.arg("fmt"); if (!fmt.length()) fmt = "rgb888";
-      if      (fmt == "rgb888") canvasBpp = 3;
-      else if (fmt == "rgb565") canvasBpp = 2;
-      else { canvasErr = 415; break; }
       if (!gPanel.ready) { canvasErr = 503; break; }
-      size_t need = (size_t)gPanel.panelW * gPanel.panelH * canvasBpp;
-      if ((size_t)server.clientContentLength() != need) { canvasErr = 400; break; }
+      // Infer the pixel format from the body length -- a full frame is unambiguously W*H*3
+      // (rgb888) or W*H*2 (rgb565). server.arg("fmt") reads empty in a raw handler, so the
+      // length is the source of truth; the client's ?fmt= is only a hint.
+      const size_t px  = (size_t)gPanel.panelW * gPanel.panelH;
+      const size_t len = (size_t)server.clientContentLength();
+      if      (len == px * 3) canvasBpp = 3;
+      else if (len == px * 2) canvasBpp = 2;
+      else { canvasErr = 400; break; }
       canvasStandDown();                 // stand the wall down and wait for the renderer to park
       break;
     }
@@ -1550,8 +1589,7 @@ static void handleApiCanvasFrame() {
   int err = canvasErr; canvasErr = 0;
   switch (err) {
     case 0:   break;
-    case 400: sendJsonError(400, "Body length must equal width*height*bytesPerPixel"); return;
-    case 415: sendJsonError(415, "fmt must be rgb888 or rgb565"); return;
+    case 400: sendJsonError(400, "Body length must equal width*height*3 (rgb888) or *2 (rgb565)"); return;
     case 503: sendJsonError(503, "Panel not running"); return;
     default:  sendJsonError(500, "Canvas frame failed"); return;
   }
@@ -1631,6 +1669,8 @@ void webInit() {
   server.on("/api/canvas/frame",     HTTP_OPTIONS, handleOptions);
   server.on("/api/canvas/ops",       HTTP_POST,    handleApiCanvasOps);
   server.on("/api/canvas/ops",       HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/effect",    HTTP_POST,    handleApiCanvasEffect);
+  server.on("/api/canvas/effect",    HTTP_OPTIONS, handleOptions);
   server.begin();
   printf("[Web] HTTP server %s (port 80)\n",
          server.listening() ? "started" : "FAILED to bind -- taskWeb will retry");

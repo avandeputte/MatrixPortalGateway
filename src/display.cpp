@@ -1,5 +1,6 @@
 #include "gateway.h"
 #include "panel.h"
+#include "effects.h"
 
 // display.cpp -- the HUB75 flap wall: geometry, the flap renderer, and the reel task.
 // All output goes through panel.h; this file never sees a pixel format, a bitplane or a
@@ -382,6 +383,14 @@ void taskDisplay(void* pv) {
     // -- is the acknowledgement the take-over waits for before it draws its first frame.
     if (gCanvasMode) { gDispParked = true; vTaskDelay(pdMS_TO_TICKS(50)); continue; }
     gDispParked = false;                  // rendering again: the panel is ours until we next park
+    // On-device effect owns the panel: render a frame at the panel's native rate (panelShow
+    // inside effectRender paces us to one refresh), instead of the reel wall.
+    if (gEffect != EFFECT_NONE) {
+      effectRender(gEffect);
+      wdgDispMs = millis();
+      vTaskDelay(pdMS_TO_TICKS(2));
+      continue;
+    }
     if (vmTick(now)) pending = true;
     // dispRender clears dispDirty itself, but only once it is committed to
     // painting -- so a repaint it declined still leaves work for the next tick.

@@ -289,8 +289,8 @@ paths:
         own every pixel; releasing it repaints the wall from the modules' current state. Nothing
         is persisted — a reboot returns to the wall.
 
-        This GET reports whether a canvas is active and the panel dimensions, so a client can
-        size the frames it pushes.
+        This GET reports whether a canvas is active, the panel dimensions (so a client can size
+        the frames it pushes), and which on-device `effect` (if any) is currently running.
       responses:
         "200":
           description: OK
@@ -303,6 +303,8 @@ paths:
                   width:   { type: integer, example: 128 }
                   height:  { type: integer, example: 32 }
                   formats: { type: array, items: { type: string }, example: [rgb888, rgb565] }
+                  effect:  { type: string, example: none, description: Running on-device effect, or "none". }
+                  effects: { type: array, items: { type: string }, example: [plasma, fire, matrix] }
     post:
       tags: [Canvas]
       summary: Take over the panel, or release it back to the wall (v1.13)
@@ -340,16 +342,22 @@ paths:
         panel. The body is streamed straight to the back buffer, so no multi-KB frame is buffered
         whole.
 
-        * `fmt=rgb888` (default) — 3 bytes per pixel, `R G B`.
-        * `fmt=rgb565` — 2 bytes per pixel, big-endian (high byte first).
+        The **pixel format is inferred from the body length** — a full frame is unambiguously one
+        of these, so nothing else has to be signalled:
 
-        The body length **must equal** `width × height × bytesPerPixel` exactly — a partial frame
-        is a `400`. Get the dimensions from `GET /api/canvas`.
+        * `width × height × 3` bytes → **rgb888**, `R G B` per pixel.
+        * `width × height × 2` bytes → **rgb565**, big-endian (high byte first).
+
+        Any other length is a `400`. The `fmt` query arg is accepted as a hint but ignored by the
+        firmware (a raw-body handler cannot read URL args); the length is authoritative. Get the
+        dimensions from `GET /api/canvas`. rgb565 halves the upload — worth it for animation, and
+        the panel's colour depth loses nothing.
       parameters:
         - name: fmt
           in: query
-          schema: { type: string, enum: [rgb888, rgb565], default: rgb888 }
-          description: Pixel format of the body.
+          required: false
+          schema: { type: string, enum: [rgb888, rgb565] }
+          description: Optional hint; the actual format is inferred from the body length.
       requestBody:
         required: true
         content:
@@ -368,10 +376,7 @@ paths:
                   height: { type: integer, example: 32 }
                   pixels: { type: integer, example: 4096 }
         "400":
-          description: Body length does not equal width×height×bytesPerPixel
-          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
-        "415":
-          description: Unknown fmt (not rgb888 or rgb565)
+          description: Body length is neither width×height×3 (rgb888) nor width×height×2 (rgb565)
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "503":
           description: Panel not running (the gateway is headless)
@@ -419,6 +424,53 @@ paths:
                   applied: { type: integer, example: 4 }
         "400":
           description: Body is not a JSON array
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: Panel not running (the gateway is headless)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/canvas/effect:
+    post:
+      tags: [Canvas]
+      summary: Run an on-device animated effect (v1.14)
+      description: |
+        Start an animation that the **gateway renders itself**, on the display task, at the panel's
+        native frame rate (~70 fps) — no client and nothing on the network. This is the smooth way
+        to animate: pushing frames over HTTP tops out near 8 fps (one TCP connection per frame),
+        while an on-device effect is limited only by the panel.
+
+        An effect supersedes raw-canvas mode and owns the panel until you stop it. `{"type":"none"}`
+        (or `POST /api/canvas {"active":false}`) hands the panel back to the split-flap wall.
+
+        * `plasma` — flowing rainbow sine-interference field.
+        * `fire` — bottom-up flames through a black→red→orange→yellow→white palette.
+        * `matrix` — falling green streaks with bright heads and fading trails.
+
+        `speed` is `1`–`10` (default keeps the current value). Nothing is persisted — a reboot
+        returns to the wall.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type:  { type: string, enum: [plasma, fire, matrix, none] }
+                speed: { type: integer, minimum: 1, maximum: 10 }
+            example: { type: plasma, speed: 4 }
+      responses:
+        "200":
+          description: Effect set (or stopped)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:     { type: boolean, example: true }
+                  effect: { type: string, example: plasma }
+                  speed:  { type: integer, example: 4 }
+        "400":
+          description: Invalid JSON
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "503":
           description: Panel not running (the gateway is headless)
