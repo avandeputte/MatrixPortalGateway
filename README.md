@@ -38,6 +38,34 @@ module registry. See **New in 1.10**.)
 
 ---
 
+## New in 1.13
+
+- **Raw canvas — the panel with the flaps taken off.** Every cell of this wall is *drawn*, so
+  under the split-flap costume it was always just a HUB75 framebuffer. Three new endpoints hand
+  you that framebuffer directly, bypassing the wall entirely — something the physical gateway
+  cannot offer, because it has no framebuffer to expose, only motors:
+
+  - **`PUT /api/canvas/frame?fmt=rgb888|rgb565`** — a full frame as raw pixel bytes,
+    `width × height`, row-major, top-left origin. Render whatever you like on the client and push
+    it. The body is **streamed straight to the back buffer**, so a 256×64 frame is never buffered
+    whole; its length must equal `width × height × bytesPerPixel` *exactly*, or it is a `400`.
+    `rgb565` is 2 bytes, big-endian.
+  - **`POST /api/canvas/ops`** — a JSON array of draw commands for shapes and labels without
+    composing a frame client-side: `clear`, `pixel`, `hline`, `vline`, `rect` (outline or filled),
+    `text` (the bundled CP1252 faces, sizes 8–20) and `show`. Colours are `[r, g, b]`; off-panel
+    pixels are dropped, not clamped or crashed.
+  - **`GET /api/canvas`** reports the panel size and whether a canvas is active; **`POST`** with
+    `{"active": true|false}` takes over and blanks, or releases. Pushing a frame or ops takes over
+    on its own, so this call is only for blank-and-hold, or hand-back.
+
+- **The reel renderer stands down while a canvas is up.** `gCanvasMode` makes `taskDisplay` yield
+  the panel exactly as it does during an OTA — so the HTTP handlers own every pixel and nothing
+  repaints the wall from under them, and nothing writes the back buffer they are drawing into.
+  Releasing marks the display dirty and the wall comes back from the modules' current state.
+  Nothing is persisted: a reboot returns to the wall.
+
+---
+
 ## New in 1.9
 
 - **The wall comes up blank after a reboot.** `autoHome` defaults to true, `'A'` reports it,

@@ -1365,6 +1365,202 @@ static void handleApiCompanionSettingsGet() {
   f.close();
 }
 
+/* ----------------------------------------------------------
+   Raw canvas  (Matrix gateway only; the RS-485 gateway has no framebuffer to expose)
+   ----------------------------------------------------------
+   Direct pixel control of the HUB75 panel, bypassing the split-flap wall. While a canvas is
+   active gCanvasMode makes taskDisplay stand down -- exactly as it does during an OTA -- so the
+   handlers below own every pixel. Leaving canvas mode marks the display dirty, and the reel
+   renderer repaints the wall from the modules' current state. Nothing here is persisted: a
+   reboot returns to the wall. panelPixel/panelFillRect etc. bounds-check, so off-panel writes
+   are dropped rather than clamped or crashed.
+---------------------------------------------------------- */
+// Take the panel over from the reel renderer, and BLOCK until it confirms it has parked. A
+// blind delay is not enough: taskDisplay may be mid-repaint when we raise gCanvasMode, and its
+// closing panelShow() would swap the wall straight back over our first frame. gDispParked goes
+// true only at the top of its loop, once any in-flight repaint has returned -- so waiting for it
+// means the next swap on the panel is ours. Bounded, so a wedged display task cannot hang the
+// request; feed the web watchdog while we wait.
+static void canvasStandDown() {
+  gCanvasMode = true;
+  gDispParked = false;
+  uint32_t t0 = millis();
+  while (!gDispParked && (uint32_t)(millis() - t0) < 250) { wdgWebMs = millis(); delay(2); }
+}
+// Take the panel over (waiting for the renderer to park), then optionally blank it.
+static void canvasEnter(bool clear) {
+  if (!gCanvasMode) canvasStandDown();
+  if (clear && gPanel.ready) { panelClear(); panelShow(); }
+}
+static void canvasLeave() {
+  if (gCanvasMode) { gCanvasMode = false; dispMarkDirty(); }   // repaint the wall
+}
+
+// The bundled face closest to a requested pixel height; 6x10 is the readable default.
+static const Font1252* canvasFace(int size) {
+  switch (size) {
+    case 20: return &FONT_10x20;
+    case 18: return &FONT_9x18;
+    case 13: return &FONT_8x13;
+    case 9:  return &FONT_6x9;
+    case 8:  return &FONT_5x8;
+    default: return &FONT_6x10;
+  }
+}
+// One CP1252 string at (x,y) top-left, one flap-font glyph per byte, solid colour. Fixed-width
+// faces, so the advance is just the face width; bit 15 of each row is the leftmost column.
+static void canvasText(int x, int y, const char* s, uint8_t r, uint8_t g, uint8_t b,
+                       const Font1252* f) {
+  int cx = x;
+  for (const uint8_t* p = (const uint8_t*)s; *p; ++p) {
+    uint8_t gi = FONT1252_INDEX[*p];
+    if (gi != 0xFF)
+      for (int row = 0; row < f->height; row++) {
+        uint16_t bits = font1252Row(*f, gi, row);
+        for (int col = 0; col < f->width; col++)
+          if (bits & (uint16_t)(0x8000 >> col)) panelPixel(cx + col, y + row, r, g, b);
+      }
+    cx += f->width;
+  }
+}
+// A [r,g,b] triple from an op field, leaving the caller's defaults untouched when absent.
+static void canvasColor(JsonVariantConst c, uint8_t& r, uint8_t& g, uint8_t& b) {
+  if (c.is<JsonArrayConst>() && c.size() >= 3) {
+    r = (uint8_t)c[0].as<int>(); g = (uint8_t)c[1].as<int>(); b = (uint8_t)c[2].as<int>();
+  }
+}
+
+// GET  /api/canvas -> {active,width,height,formats}   POST {"active":bool} take over / release.
+static void handleApiCanvas() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  if (server.method() == HTTP_POST) {
+    JsonDocument doc;
+    if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
+      sendJsonError(400, "Invalid JSON"); return;
+    }
+    if (doc["active"] | false) canvasEnter(true); else canvasLeave();
+    char buf[48];
+    snprintf(buf, sizeof(buf), "{\"ok\":true,\"active\":%s}", gCanvasMode ? "true" : "false");
+    server.send(200, "application/json", buf);
+    return;
+  }
+  char buf[160];
+  snprintf(buf, sizeof(buf),
+           "{\"active\":%s,\"width\":%u,\"height\":%u,\"formats\":[\"rgb888\",\"rgb565\"]}",
+           gCanvasMode ? "true" : "false", (unsigned)gPanel.panelW, (unsigned)gPanel.panelH);
+  server.send(200, "application/json", buf);
+}
+
+// POST /api/canvas/ops -- a JSON array of draw commands, applied in order then presented.
+// Ops: clear | pixel | hline | vline | rect(+fill) | text | show. Colours are [r,g,b], default
+// white (black for clear). Auto-takes-over the panel.
+static void handleApiCanvasOps() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  if (!gPanel.ready) { sendJsonError(503, "Panel not running"); return; }
+  JsonDocument doc;
+  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok || !doc.is<JsonArray>()) {
+    sendJsonError(400, "Body must be a JSON array of ops"); return;
+  }
+  canvasEnter(false);
+  int applied = 0; bool shown = false;
+  for (JsonVariantConst op : doc.as<JsonArrayConst>()) {
+    const char* k = op["op"] | "";
+    int x = op["x"] | 0, y = op["y"] | 0, w = op["w"] | 0, h = op["h"] | 0;
+    if (!strcmp(k, "clear")) {
+      uint8_t r = 0, g = 0, b = 0; canvasColor(op["color"], r, g, b);
+      panelFillRect(0, 0, gPanel.panelW, gPanel.panelH, r, g, b);
+    } else if (!strcmp(k, "pixel")) {
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      panelPixel(x, y, r, g, b);
+    } else if (!strcmp(k, "hline")) {
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      panelHLine(x, y, w, r, g, b);
+    } else if (!strcmp(k, "vline")) {
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      panelVLine(x, y, h, r, g, b);
+    } else if (!strcmp(k, "rect")) {
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      if (op["fill"] | false) panelFillRect(x, y, w, h, r, g, b);
+      else { panelHLine(x, y, w, r, g, b); panelHLine(x, y + h - 1, w, r, g, b);
+             panelVLine(x, y, h, r, g, b); panelVLine(x + w - 1, y, h, r, g, b); }
+    } else if (!strcmp(k, "text")) {
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      canvasText(x, y, op["s"] | "", r, g, b, canvasFace(op["size"] | 10));
+    } else if (!strcmp(k, "show")) {
+      panelShow(); shown = true; continue;
+    } else continue;                      // unknown op: skip, do not count
+    applied++;
+  }
+  if (!shown) panelShow();
+  char buf[48];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"applied\":%d}", applied);
+  server.send(200, "application/json", buf);
+}
+
+// PUT /api/canvas/frame?fmt=rgb888|rgb565 -- a full raw frame, width*height pixels, row-major,
+// top-left origin. rgb888 = 3 bytes/px; rgb565 = 2 bytes/px, big-endian. Streamed straight to
+// the back buffer so no multi-KB frame is ever buffered whole; presented on RAW_END.
+static volatile int canvasErr = 0;
+static uint32_t     canvasPix = 0;      // pixels written this frame
+static uint8_t      canvasCarry[3];     // partial pixel across a chunk boundary
+static uint8_t      canvasCarryN = 0;
+static uint8_t      canvasBpp = 3;
+static void handleApiCanvasFrameRaw() {
+  HTTPRaw& raw = server.raw();
+  wdgWebMs = millis();                   // a slow client must not trip the web watchdog
+  switch (raw.status) {
+    case RAW_START: {
+      canvasErr = 0; canvasPix = 0; canvasCarryN = 0;
+      String fmt = server.arg("fmt"); if (!fmt.length()) fmt = "rgb888";
+      if      (fmt == "rgb888") canvasBpp = 3;
+      else if (fmt == "rgb565") canvasBpp = 2;
+      else { canvasErr = 415; break; }
+      if (!gPanel.ready) { canvasErr = 503; break; }
+      size_t need = (size_t)gPanel.panelW * gPanel.panelH * canvasBpp;
+      if ((size_t)server.clientContentLength() != need) { canvasErr = 400; break; }
+      canvasStandDown();                 // stand the wall down and wait for the renderer to park
+      break;
+    }
+    case RAW_WRITE:
+      if (canvasErr) break;
+      for (size_t i = 0; i < raw.currentSize; i++) {
+        canvasCarry[canvasCarryN++] = raw.buf[i];
+        if (canvasCarryN < canvasBpp) continue;
+        canvasCarryN = 0;
+        uint8_t r, g, b;
+        if (canvasBpp == 3) { r = canvasCarry[0]; g = canvasCarry[1]; b = canvasCarry[2]; }
+        else { uint16_t p = ((uint16_t)canvasCarry[0] << 8) | canvasCarry[1];
+               r = (uint8_t)(((p >> 11) & 0x1F) << 3);
+               g = (uint8_t)(((p >> 5)  & 0x3F) << 2);
+               b = (uint8_t)(( p        & 0x1F) << 3); }
+        panelPixel((int)(canvasPix % gPanel.panelW), (int)(canvasPix / gPanel.panelW), r, g, b);
+        canvasPix++;
+      }
+      break;
+    case RAW_END:
+      if (!canvasErr && gPanel.ready) panelShow();
+      break;
+    case RAW_ABORTED:
+      canvasErr = 400;
+      break;
+  }
+}
+static void handleApiCanvasFrame() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  int err = canvasErr; canvasErr = 0;
+  switch (err) {
+    case 0:   break;
+    case 400: sendJsonError(400, "Body length must equal width*height*bytesPerPixel"); return;
+    case 415: sendJsonError(415, "fmt must be rgb888 or rgb565"); return;
+    case 503: sendJsonError(503, "Panel not running"); return;
+    default:  sendJsonError(500, "Canvas frame failed"); return;
+  }
+  char buf[96];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"width\":%u,\"height\":%u,\"pixels\":%lu}",
+           (unsigned)gPanel.panelW, (unsigned)gPanel.panelH, (unsigned long)canvasPix);
+  server.send(200, "application/json", buf);
+}
+
 void webInit() {
   static const char* COLLECT_HDRS[] = { "If-None-Match" };
   server.collectHeaders(COLLECT_HDRS, 1);   // so handleRoot can honour conditional GETs
@@ -1427,6 +1623,14 @@ void webInit() {
   server.on("/api/config/mqtt",      HTTP_OPTIONS, handleOptions);
   server.on("/api/config/settings",  HTTP_POST,    handleApiConfigSettings);
   server.on("/api/config/settings",  HTTP_OPTIONS, handleOptions);
+  // Raw canvas (Matrix-only): direct pixel control of the panel.
+  server.on("/api/canvas",           HTTP_GET,     handleApiCanvas);
+  server.on("/api/canvas",           HTTP_POST,    handleApiCanvas);
+  server.on("/api/canvas",           HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/frame",     HTTP_PUT,     handleApiCanvasFrame, handleApiCanvasFrameRaw);
+  server.on("/api/canvas/frame",     HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/ops",       HTTP_POST,    handleApiCanvasOps);
+  server.on("/api/canvas/ops",       HTTP_OPTIONS, handleOptions);
   server.begin();
   printf("[Web] HTTP server %s (port 80)\n",
          server.listening() ? "started" : "FAILED to bind -- taskWeb will retry");

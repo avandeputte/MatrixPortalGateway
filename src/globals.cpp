@@ -49,6 +49,11 @@ volatile bool gDisplayDirty = false;
 // cause of mid-upload connection drops). Set by the OTA handlers; read by the
 // network task.
 volatile bool gOtaInProgress = false;
+volatile bool gCanvasMode    = false;
+// taskDisplay sets this true once it has seen gCanvasMode (or gOtaInProgress) and parked,
+// having finished any in-flight repaint. The canvas take-over waits for it, so the reel
+// renderer's closing swap can never land the wall back over the first canvas frame.
+volatile bool gDispParked    = false;
 // Set once a verified image is flashed and the HTTP 200 has been queued. taskWeb
 // reboots when it sees this, AFTER handleClient() has flushed and closed the socket.
 // Restarting from inside the handler tears the connection down mid-response, which

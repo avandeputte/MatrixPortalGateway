@@ -39,6 +39,8 @@ tags:
     description: Split-flap module display control
   - name: Display
     description: The visual state of the wall
+  - name: Canvas
+    description: Raw pixel control of the LED panel (Matrix only) — bypasses the split-flap wall
   - name: Status
     description: System status and diagnostics
   - name: Config
@@ -275,6 +277,152 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+
+  /api/canvas:
+    get:
+      tags: [Canvas]
+      summary: Raw-canvas state and panel size (v1.13)
+      description: |
+        The raw-canvas API is unique to the Matrix gateway: it hands you the HUB75 panel as a
+        plain framebuffer, bypassing the split-flap wall entirely. While a canvas is **active**
+        the reel renderer stands down (the same way it does during an OTA) and these endpoints
+        own every pixel; releasing it repaints the wall from the modules' current state. Nothing
+        is persisted — a reboot returns to the wall.
+
+        This GET reports whether a canvas is active and the panel dimensions, so a client can
+        size the frames it pushes.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  active:  { type: boolean, example: false }
+                  width:   { type: integer, example: 128 }
+                  height:  { type: integer, example: 32 }
+                  formats: { type: array, items: { type: string }, example: [rgb888, rgb565] }
+    post:
+      tags: [Canvas]
+      summary: Take over the panel, or release it back to the wall (v1.13)
+      description: |
+        `{"active": true}` blanks the panel and stands the reel renderer down so the canvas
+        endpoints own it. `{"active": false}` returns to the split-flap wall. Pushing a frame or
+        ops also takes over automatically, so this is only needed to blank-and-hold, or to release.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                active: { type: boolean }
+            example: { active: true }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:     { type: boolean, example: true }
+                  active: { type: boolean, example: true }
+
+  /api/canvas/frame:
+    put:
+      tags: [Canvas]
+      summary: Blit a full raw frame — draw anything (v1.13)
+      description: |
+        A complete frame as raw pixel bytes: **width × height** pixels, row-major, top-left
+        origin. Render whatever you like on the client and push the pixels. Auto-takes-over the
+        panel. The body is streamed straight to the back buffer, so no multi-KB frame is buffered
+        whole.
+
+        * `fmt=rgb888` (default) — 3 bytes per pixel, `R G B`.
+        * `fmt=rgb565` — 2 bytes per pixel, big-endian (high byte first).
+
+        The body length **must equal** `width × height × bytesPerPixel` exactly — a partial frame
+        is a `400`. Get the dimensions from `GET /api/canvas`.
+      parameters:
+        - name: fmt
+          in: query
+          schema: { type: string, enum: [rgb888, rgb565], default: rgb888 }
+          description: Pixel format of the body.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Frame presented
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:     { type: boolean, example: true }
+                  width:  { type: integer, example: 128 }
+                  height: { type: integer, example: 32 }
+                  pixels: { type: integer, example: 4096 }
+        "400":
+          description: Body length does not equal width×height×bytesPerPixel
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "415":
+          description: Unknown fmt (not rgb888 or rgb565)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: Panel not running (the gateway is headless)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/canvas/ops:
+    post:
+      tags: [Canvas]
+      summary: Draw commands — pixels, lines, rects, text (v1.13)
+      description: |
+        A JSON **array** of drawing ops, applied in order, then the frame is presented. Handy for
+        shapes and labels without composing a whole frame client-side. Auto-takes-over the panel.
+        Colours are `[r, g, b]` (0–255), defaulting to white — black for `clear`. Off-panel
+        pixels are dropped.
+
+        Ops:
+        * `{"op":"clear"}` or `{"op":"clear","color":[r,g,b]}` — fill the whole panel
+        * `{"op":"pixel","x":,"y":,"color":[…]}`
+        * `{"op":"hline","x":,"y":,"w":,"color":[…]}` / `{"op":"vline","x":,"y":,"h":,"color":[…]}`
+        * `{"op":"rect","x":,"y":,"w":,"h":,"color":[…],"fill":true|false}`
+        * `{"op":"text","x":,"y":,"s":"HELLO","color":[…],"size":10}` — built-in CP1252 font;
+          `size` picks a bundled face height (8, 9, 10, 13, 18, 20), default 10
+        * `{"op":"show"}` — present mid-batch (otherwise presented once at the end)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { type: object }
+            example:
+              - { op: clear }
+              - { op: rect, x: 0, y: 0, w: 128, h: 32, color: [0, 40, 80], fill: true }
+              - { op: text, x: 4, y: 2, s: "HELLO", color: [255, 255, 0], size: 13 }
+              - { op: pixel, x: 100, y: 20, color: [255, 0, 0] }
+      responses:
+        "200":
+          description: Applied and presented
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:      { type: boolean, example: true }
+                  applied: { type: integer, example: 4 }
+        "400":
+          description: Body is not a JSON array
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: Panel not running (the gateway is headless)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
   /api/flap/modules:
     get:

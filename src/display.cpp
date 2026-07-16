@@ -375,7 +375,13 @@ void taskDisplay(void* pv) {
     // A firmware image is streaming in. Don't step reels, don't repaint -- just keep
     // the watchdog fed. Standing down voluntarily (rather than being suspended) means
     // we can never be frozen holding vmMutex.
-    if (gOtaInProgress) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+    if (gOtaInProgress) { gDispParked = true; vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+    // Raw-canvas mode: HTTP handlers own the panel. Stand down (like OTA) so we never write
+    // the back buffer from under them, and never repaint the wall over their canvas. Raising
+    // gDispParked AFTER the check -- reached only once any in-flight repaint above has returned
+    // -- is the acknowledgement the take-over waits for before it draws its first frame.
+    if (gCanvasMode) { gDispParked = true; vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+    gDispParked = false;                  // rendering again: the panel is ours until we next park
     if (vmTick(now)) pending = true;
     // dispRender clears dispDirty itself, but only once it is committed to
     // painting -- so a repaint it declined still leaves work for the next tick.
