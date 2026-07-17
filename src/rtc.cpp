@@ -62,6 +62,16 @@ bool rtcNTPSync() {
     }
   }
   rtcRead();
+  // configTime(0,0,..) resets the TZ env to UTC to keep the system clock in UTC -- but that also
+  // clobbers the zone we set from cfg.posixTZ at boot, so every NTP sync silently reverted the
+  // whole gateway (bus log timestamps, the clock effect, HA) to UTC. Restore the configured zone
+  // so rtcFormatTime's localtime_r shows LOCAL time. timeMutex guards setenv/tzset/localtime,
+  // which are not thread-safe in newlib.
+  if (timeMutex && xSemaphoreTake(timeMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    setenv("TZ", gPosixTZ, 1);
+    tzset();
+    xSemaphoreGive(timeMutex);
+  }
   char tbuf[32];
   strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", &info);
   printf("[NTP] clock set: %s UTC\n", tbuf);
