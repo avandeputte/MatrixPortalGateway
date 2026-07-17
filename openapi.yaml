@@ -304,7 +304,7 @@ paths:
                   height:  { type: integer, example: 32 }
                   formats: { type: array, items: { type: string }, example: [rgb888, rgb565] }
                   effect:  { type: string, example: none, description: Running on-device effect, or "none". }
-                  effects: { type: array, items: { type: string }, example: [plasma, fire, matrix] }
+                  effects: { type: array, items: { type: string }, example: [plasma, fire, matrix, fliporama, clock, life] }
     post:
       tags: [Canvas]
       summary: Take over the panel, or release it back to the wall (v1.13)
@@ -445,6 +445,10 @@ paths:
         * `plasma` — flowing rainbow sine-interference field.
         * `fire` — bottom-up flames through a black→red→orange→yellow→white palette.
         * `matrix` — falling green streaks with bright heads and fading trails.
+        * `fliporama` — the whole board flips random glyphs, like a live departure board.
+        * `clock` — a digital clock: big anti-aliased HH:MM (JetBrains Mono) in a drifting rainbow,
+          with the date and seconds; uses the gateway's configured timezone.
+        * `life` — Conway's Game of Life, cells coloured by age, reseeded when it settles.
 
         `speed` is `1`–`10` (default keeps the current value). Nothing is persisted — a reboot
         returns to the wall.
@@ -455,7 +459,7 @@ paths:
             schema:
               type: object
               properties:
-                type:  { type: string, enum: [plasma, fire, matrix, none] }
+                type:  { type: string, enum: [plasma, fire, matrix, fliporama, clock, life, none] }
                 speed: { type: integer, minimum: 1, maximum: 10 }
             example: { type: plasma, speed: 4 }
       responses:
@@ -700,7 +704,7 @@ paths:
                       On-device animated effects the gateway renders itself — Matrix only; absent
                       on the Split-Flap gateway. Start one with `POST /api/canvas/effect`.
                     items: { type: string }
-                    example: [plasma, fire, matrix]
+                    example: [plasma, fire, matrix, fliporama, clock, life]
                   features:
                     type: array
                     description: "Capability tokens a client checks instead of sniffing the firmware version. 'canvas' and 'effects' appear on the Matrix gateway only."

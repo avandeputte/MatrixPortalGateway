@@ -1488,7 +1488,7 @@ static void handleApiCanvasEffect() {
   if (e == EFFECT_NONE) {
     dispMarkDirty();                // return to the reel wall
   } else {
-    effectReset();
+    effectReset(e);
     gEffect = e;                    // set last: taskDisplay renders only once its state is ready
   }
   char buf[96];
