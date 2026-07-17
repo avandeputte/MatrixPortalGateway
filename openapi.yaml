@@ -684,10 +684,28 @@ paths:
                         source:  { type: string, enum: [reported, assumed, builtin] }
                         chars:   { type: string, description: "The reel verbatim, in flap-index order" }
                         modules: { type: string, description: "Compressed id list", example: "0-44,50" }
+                  canvas:
+                    type: object
+                    description: >
+                      Raw-framebuffer support — Matrix only; absent on the Split-Flap gateway,
+                      which has no framebuffer. The panel a client can push frames to via
+                      `PUT /api/canvas/frame` / `POST /api/canvas/ops`.
+                    properties:
+                      formats: { type: array, items: { type: string }, example: [rgb888, rgb565] }
+                      width:   { type: integer, example: 128 }
+                      height:  { type: integer, example: 64 }
+                  effects:
+                    type: array
+                    description: >
+                      On-device animated effects the gateway renders itself — Matrix only; absent
+                      on the Split-Flap gateway. Start one with `POST /api/canvas/effect`.
+                    items: { type: string }
+                    example: [plasma, fire, matrix]
                   features:
                     type: array
+                    description: "Capability tokens a client checks instead of sniffing the firmware version. 'canvas' and 'effects' appear on the Matrix gateway only."
                     items: { type: string }
-                    example: ["colors","index","batch","quiet","maintenance","ha","ota","flapconfig"]
+                    example: ["cells","colors","index","lowercase","pictographs","quiet","maintenance","ha","ota","canvas","effects"]
 
   /api/status:
     get:

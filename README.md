@@ -56,6 +56,11 @@ module registry. See **New in 1.10**.)
   `{"type":"none"}` (or `POST /api/canvas {"active":false"}`) hands it back. All integer/LUT work
   — a sine table, two palettes, a PSRAM heat buffer — so a full frame fits inside one refresh.
 
+  Both are **advertised in `GET /api/capabilities`** — a `canvas` object (formats + panel size),
+  an `effects` array, and `canvas`/`effects` tokens in `features` — so the companion lights up
+  the right controls from capabilities, never from a firmware-version sniff. The Split-Flap
+  Gateway, which has no framebuffer, answers the same URL without those keys.
+
 - **rgb565 raw frames actually work now.** `PUT /api/canvas/frame` inferred its pixel format from
   the `?fmt=` query arg, but a raw-body handler cannot read URL args — the WebServer discards them
   once it starts streaming the body — so `fmt=rgb565` silently fell back to rgb888 and every

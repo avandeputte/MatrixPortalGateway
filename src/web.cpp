@@ -684,10 +684,21 @@ static void handleApiCapabilities() {
              (unsigned long)cfg.flapMs * (unsigned long)cfg.flapMax);
     capPut(motion); }
 
+  // Raw canvas and on-device effects are Matrix-only -- the RS-485 wall has no framebuffer to
+  // hand out, and answers this URL without these keys. Stated here so the companion lights up
+  // canvas/effect controls from capabilities, not from a firmware-version sniff: `canvas` is the
+  // framebuffer a client would push frames to, `effects` the on-device animation set.
+  { char cv[144];
+    snprintf(cv, sizeof(cv),
+             "\"canvas\":{\"formats\":[\"rgb888\",\"rgb565\"],\"width\":%u,\"height\":%u},"
+             "\"effects\":%s,",
+             (unsigned)gPanel.panelW, (unsigned)gPanel.panelH, effectListJson());
+    capPut(cv); }
+
   // What the wall can DO, not just show, so a client reads this instead of sniffing the
   // firmware version and guessing.
   capPut("\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
-         "\"quiet\",\"maintenance\",\"ha\",\"ota\"]}");
+         "\"quiet\",\"maintenance\",\"ha\",\"ota\",\"canvas\",\"effects\"]}");
   capFlush();
   server.sendContent("");
 }
@@ -1451,9 +1462,9 @@ static void handleApiCanvas() {
   char buf[224];
   snprintf(buf, sizeof(buf),
            "{\"active\":%s,\"width\":%u,\"height\":%u,\"formats\":[\"rgb888\",\"rgb565\"],"
-           "\"effect\":\"%s\",\"effects\":[\"plasma\",\"fire\",\"matrix\"]}",
+           "\"effect\":\"%s\",\"effects\":%s}",
            gCanvasMode ? "true" : "false", (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
-           effectName(gEffect));
+           effectName(gEffect), effectListJson());
   server.send(200, "application/json", buf);
 }
 

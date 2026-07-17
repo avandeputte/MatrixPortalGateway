@@ -83,6 +83,8 @@ const char* effectName(uint8_t e) {
                case EFFECT_MATRIX: return "matrix";
                default:            return "none"; }
 }
+// One source of truth for the advertised set -- used by GET /api/canvas and /api/capabilities.
+const char* effectListJson() { return "[\"plasma\",\"fire\",\"matrix\"]"; }
 
 void effectReset() {
   fxBuildLUTs();

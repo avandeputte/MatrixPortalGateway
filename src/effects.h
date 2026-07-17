@@ -21,6 +21,7 @@ extern volatile uint8_t gEffectSpeed;
 
 uint8_t     effectByName(const char* name);   // "plasma"/"fire"/"matrix"/"none" -> id (NONE if unknown)
 const char* effectName(uint8_t e);            // id -> canonical name
+const char* effectListJson();                 // the effect names as a JSON array, e.g. ["plasma",...]
 
 // Prepare per-effect state for a fresh run (seed drops, clear the heat buffer, build LUTs once).
 void effectReset();
