@@ -147,6 +147,19 @@ void dispInit() {
 #endif
 }
 
+// Hand the panel back to the reel wall: cancel any pending/running effect and release the raw
+// canvas, then mark the wall dirty so it repaints. The effect is only cleared, never reset here,
+// so this is safe to call from any task (the render task owns effectReset). Called when a display
+// command arrives (so content the user sends is actually shown), on canvas release, and by Quiet
+// Time. A no-op when the wall already owns the panel.
+void dispReturnToWall() {
+  if (gEffect == EFFECT_NONE && gEffectReq == EFFECT_REQ_IDLE && !gCanvasMode) return;
+  gEffectReq  = EFFECT_REQ_IDLE;   // cancel a pending start
+  gEffect     = EFFECT_NONE;       // stop rendering the current effect (taskDisplay just stops)
+  gCanvasMode = false;             // release the raw canvas
+  dispMarkDirty();                 // repaint the wall
+}
+
 // Show black and halt output. Used while a firmware image streams in: writing flash
 // disables the instruction cache on both cores. Reversible -- see dispResume().
 void dispBlank() { if (gPanel.ready) panelStop(); }
@@ -383,6 +396,14 @@ void taskDisplay(void* pv) {
     // -- is the acknowledgement the take-over waits for before it draws its first frame.
     if (gCanvasMode) { gDispParked = true; vTaskDelay(pdMS_TO_TICKS(50)); continue; }
     gDispParked = false;                  // rendering again: the panel is ours until we next park
+    // Pick up a pending effect start HERE, on the render task: effectReset() (which frees/reallocs
+    // the PSRAM grid and rewrites the cell arrays) then never runs under an in-flight effectRender()
+    // on the web task's core -- the source of the old cellN=0 divide-by-zero / use-after-free race.
+    if (gEffectReq != EFFECT_REQ_IDLE) {
+      uint8_t req = gEffectReq; gEffectReq = EFFECT_REQ_IDLE;
+      effectReset(req);
+      gEffect = req;
+    }
     // On-device effect owns the panel: render a frame at the panel's native rate (panelShow
     // inside effectRender paces us to one refresh), instead of the reel wall.
     if (gEffect != EFFECT_NONE) {

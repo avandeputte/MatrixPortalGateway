@@ -329,6 +329,11 @@ void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
   char cmd = *p++;
   const char* payload = p;
 
+  // A command that changes what the wall shows (character, flap index, home) means the user wants
+  // the split-flap wall, not an on-device effect or raw canvas -- so hand the panel back. A no-op
+  // (one volatile compare) unless one is actually running; only the first frame of a cascade acts.
+  if (cmd == '-' || cmd == '+' || cmd == 'h') dispReturnToWall();
+
   // 'v' and 'A' accept an optional "<lo>-<hi>" id range on a broadcast, so a
   // controller can poll a large bus in retryable batches.
   int lo = 0, hi = 254;

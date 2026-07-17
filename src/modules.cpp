@@ -103,6 +103,7 @@ void sfSetQuietTime(bool on) {
       xSemaphoreGive(vmMutex);
     }
     sfHome(-1);          // unlocked, and quiet is still off -- so this is not suppressed
+    dispReturnToWall();  // drop any effect/raw-canvas so the blanked wall is what the panel shows
     printf("[QUIET] on -- wall blanked (home all)\n");
   }
 

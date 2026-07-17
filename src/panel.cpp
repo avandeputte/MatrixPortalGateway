@@ -118,8 +118,8 @@ static uint8_t  DEPTH = 0, ROWS = 0, ADDR_BITS = 0;
 static uint32_t BLOCK = 0;              // words per (row, plane) block
 static uint8_t  drawBuf = 1;            // buffer the CPU draws into
 static uint8_t  liveBuf = 0;            // buffer GDMA is walking
-static uint8_t  bright  = 255;
-static uint8_t  brightPending = 0;      // buffers still to receive the new OE duty
+static volatile uint8_t bright        = 255;   // written from taskWeb (settings) + taskDisplay
+static volatile uint8_t brightPending = 0;      // buffers still to receive the new OE duty
 static uint32_t frameUs = 0;            // one full pass over the chain
 
 static inline word_t* blockPtr(uint8_t buf, int row, int plane) {
@@ -431,7 +431,7 @@ void panelFillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b) 
 // engine is still reading.
 void panelShow() {
   if (!info.ok) return;
-  if (brightPending) { writeControlBits(drawBuf); brightPending--; }
+  if (brightPending) { writeControlBits(drawBuf); brightPending = (uint8_t)(brightPending - 1); }
 
   const uint8_t next = drawBuf;
   desc[liveBuf][descN - 1].next = &desc[next][0];

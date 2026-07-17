@@ -124,9 +124,6 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 
 
 /* ---- Other MatrixPortal S3 hardware ---- */
-#define PIN_NEOPIX      4        // single status NeoPixel
-#define PIN_BTN_UP      6
-#define PIN_BTN_DOWN    7
 #define I2C_SDA_PIN     16       // STEMMA QT (also the onboard LIS3DH at 0x19)
 #define I2C_SCL_PIN     17
 
@@ -137,10 +134,9 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
    from power-on until the first successful sync. Everything downstream already
    copes: rtcEpochNow() returns 0 while the clock is unset, which is exactly the
    "RTC not valid yet" path the frame timestamps handle. */
-#define RTC_YEAR_OFFSET   2000
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "1.15.0"   // this product's version (UI + boot log)
+#define FW_VERSION           "1.17.0"   // this product's version (UI + boot log)
 // The gateway REST/MQTT surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it
@@ -174,7 +170,6 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define HOSTNAME_MAX         32
 #define HOSTNAME_PREFIX      "splitflap-gw"
 #define DEFAULT_AP_PASS      "12345678"       // SoftAP password (>= 8 chars)
-#define DEFAULT_BAUD         9600UL           // emulated bus baud (paces replies)
 #define DEFAULT_MQTT_PORT    1883
 #define DEFAULT_MQTT_PREFIX  "splitflap"
 #define DEFAULT_NTP_SERVER   "pool.ntp.org"

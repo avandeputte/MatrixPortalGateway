@@ -66,6 +66,10 @@ void dispTestPattern();
 // Force a redraw on the next display-task iteration (config change, boot).
 void dispMarkDirty();
 
+// Drop any running/pending effect and release the raw canvas, then repaint the reel wall. Safe
+// from any task. Called when a split-flap command arrives, on canvas release, and by Quiet Time.
+void dispReturnToWall();
+
 // Show black and halt the refresh ISR, so writing flash cannot scramble the panel.
 // Reversible -- a failed upload calls dispResume().
 void dispBlank();

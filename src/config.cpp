@@ -87,8 +87,7 @@ void loadConfig() {
   cfg.quietDays = prefs.getUChar("qsDays", 0x7F);
   cfg.quietTzOffsetMin = prefs.getShort("qsTzOff", 0);
   strlcpy(gPosixTZ, cfg.posixTZ, sizeof(gPosixTZ));
-  setenv("TZ", gPosixTZ, 1);
-  tzset();
+  cfgApplyTZ();
   prefs.end();
 }
 

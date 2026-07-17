@@ -1,36 +1,82 @@
 #!/usr/bin/env python3
-# Generates src/aafont.h -- anti-aliased (8-bit grayscale coverage) glyph data for the clock
-# effect, rendered from JetBrains Mono Bold (SIL Open Font License, tools/JetBrainsMono-Bold.ttf).
-# Two faces: BIG (HH:MM) and SMALL (seconds + MM/DD date). The renderer scales the ink colour by
-# each pixel's coverage, so the digits have smooth edges on the panel's colour channels.
+# Generates src/aafont.h -- 1-bit packed glyph masks (row-major, MSB = leftmost pixel) for the clock
+# effect, rendered from Orbitron (SIL Open Font License, tools/Orbitron.ttf, a variable font baked
+# to weight 800 here). Three faces: BIG and MED are the HH MM digits (the clock draws the colon
+# itself as two dots, so digits only); SMALL is the spelled-out date. `ys` stretches glyphs
+# vertically about the baseline so the digits read taller than wide. Sizes auto-fit the panel.
 #
 # Needs Pillow:  python3 -m venv venv && venv/bin/pip install Pillow
 # Run from the project root:  venv/bin/python tools/genaafont.py
 from PIL import Image, ImageDraw, ImageFont
 
-TTF = "tools/JetBrainsMono-Bold.ttf"
+TTF = "tools/Orbitron.ttf"
+WEIGHT = 800                        # Orbitron is variable; bake this weight into the bitmaps
 OUT = "src/aafont.h"
-BIG_PX, BIG_CH = 40, "0123456789:"       # HH:MM on tall panels
-MED_PX, MED_CH = 20, "0123456789:"       # HH:MM:SS on short (128x32) panels
-SMALL_PX, SMALL_CH = 13, " /:0123456789" # seconds + MM/DD date
+DIGITS = "0123456789"
+DATE_CH = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+BIG_YS, MED_YS = 1.60, 1.35         # HH MM vertical stretch (Orbitron is limited by width, so tall is free)
 
-def render_face(px, chars):
-    fnt = ImageFont.truetype(TTF, px)
+def load(px):
+    f = ImageFont.truetype(TTF, px)
+    if WEIGHT:
+        try: f.set_variation_by_axes([WEIGHT])
+        except Exception: pass
+    return f
+
+def fit_px(maxw, maxh, ys, ref="2238"):     # largest size whose ref width and stretched digit fit
+    best = 10
+    for px in range(10, 150):
+        f = load(px)
+        bb = f.getbbox("8")
+        if f.getlength(ref) > maxw or (bb[3] - bb[1]) * ys > maxh: break
+        best = px
+    return best
+
+def fit_text(text, maxw):                    # largest size whose whole string fits maxw
+    best = 8
+    for px in range(8, 40):
+        if load(px).getlength(text) > maxw: break
+        best = px
+    return best
+
+BIG_PX   = fit_px(112, 46, BIG_YS)   # tall panel: HH MM digits <=112 wide, stretched cap <=46
+MED_PX   = fit_px(104, 24, MED_YS)   # 128x32 panel
+SMALL_PX = fit_text("SEPTEMBER 16", 122)   # the widest date must fit the panel
+
+def pack1bit(img):                           # row-padded to bytes, MSB = leftmost, ink where cov >= 128
+    w, h = img.width, img.height
+    px = img.load()
+    stride = (w + 7) // 8
+    out = bytearray(stride * h)
+    for y in range(h):
+        for x in range(w):
+            if px[x, y] >= 128:
+                out[y * stride + (x >> 3)] |= 0x80 >> (x & 7)
+    return bytes(out)
+
+def render_face(px, chars, ys=1.0):
+    fnt = load(px)
     asc, desc = fnt.getmetrics()
     baseline = asc + 4
     glyphs, cov = {}, bytearray()
     for ch in chars:
         adv = round(fnt.getlength(ch))
-        canvas = Image.new("L", (px * 2 + 16, asc + desc + 16), 0)
+        canvas = Image.new("L", (px * 3 + 16, asc + desc + 16), 0)
         ImageDraw.Draw(canvas).text((6, baseline), ch, fill=255, font=fnt, anchor="ls")
         bb = canvas.getbbox()
         if bb is None:                       # blank glyph (space)
             glyphs[ch] = (0, 0, 0, 0, adv, 0); continue
         l, t, r, b = bb
         crop = canvas.crop((l, t, r, b))
-        off = len(cov); cov += crop.tobytes()
-        glyphs[ch] = (crop.width, crop.height, l - 6, t - baseline, adv, off)
-    return {"asc": asc, "lineH": asc + desc, "glyphs": glyphs, "cov": cov, "chars": chars}
+        w, h, yoff = crop.width, crop.height, t - baseline
+        if ys != 1.0:
+            h = max(1, round(h * ys))
+            crop = crop.resize((w, h), Image.LANCZOS)
+            yoff = round(yoff * ys)
+        off = len(cov); cov += pack1bit(crop)
+        glyphs[ch] = (w, h, l - 6, yoff, adv, off)
+    return {"asc": round(asc * ys),
+            "glyphs": glyphs, "cov": cov, "chars": chars}
 
 def emit(f, name, face):
     cov, chars = face["cov"], face["chars"]
@@ -44,21 +90,25 @@ def emit(f, name, face):
     for i, ch in enumerate(chars):
         idx[ord(ch)] = i
     f.write(f"static const uint8_t {name}_IDX[128] = {{{','.join(map(str, idx))}}};\n")
-    f.write(f"static const AAFont {name} = {{ {face['asc']}, {face['lineH']}, "
+    f.write(f"static const AAFont {name} = {{ {face['asc']}, "
             f"{name}_G, {name}_COV, {name}_IDX }};\n\n")
 
-big = render_face(BIG_PX, BIG_CH)
-med = render_face(MED_PX, MED_CH)
-small = render_face(SMALL_PX, SMALL_CH)
+big   = render_face(BIG_PX, DIGITS, BIG_YS)
+med   = render_face(MED_PX, DIGITS, MED_YS)
+small = render_face(SMALL_PX, DATE_CH, 1.0)
 with open(OUT, "w") as f:
     f.write("// aafont.h -- GENERATED by tools/genaafont.py; do not edit by hand.\n"
-            "// Anti-aliased glyph coverage from JetBrains Mono Bold (SIL Open Font License).\n"
-            "// BIG = HH:MM, SMALL = seconds + MM/DD date. Coverage is 8-bit; the clock renderer\n"
-            "// scales the ink colour by it, so edges stay smooth on the panel's colour channels.\n"
+            "// 1-bit glyph masks from Orbitron (SIL Open Font License, weight 800), packed row-major,\n"
+            "// one bit per pixel, MSB = leftmost, each row padded to a whole byte. The clock renderer\n"
+            "// lights a pixel where the bit is set: grayscale anti-aliasing reads as muddy on the\n"
+            "// panel's few bitplanes, so every edge is hard.\n"
+            "// BIG/MED = HH MM digits (the clock draws the colon as two dots); SMALL = spelled date.\n"
             "#pragma once\n#include <stdint.h>\n\n"
+            "// off is the byte offset of the glyph's packed mask in cov[]; each row is (w+7)/8 bytes.\n"
             "struct AAGlyph { uint8_t w, h; int8_t xoff, yoff; uint8_t adv; uint16_t off; };\n"
-            "struct AAFont  { uint8_t asc, lineH; const AAGlyph* g; const uint8_t* cov; const uint8_t* idx; };\n\n")
+            "struct AAFont  { uint8_t asc; const AAGlyph* g; const uint8_t* cov; const uint8_t* idx; };\n\n")
     emit(f, "AAFONT_BIG", big)
     emit(f, "AAFONT_MED", med)
     emit(f, "AAFONT_SMALL", small)
-print(f"wrote {OUT}: BIG {len(big['cov'])}B, MED {len(med['cov'])}B, SMALL {len(small['cov'])}B")
+print(f"wrote {OUT}: BIG {BIG_PX}px/{len(big['cov'])}B, MED {MED_PX}px/{len(med['cov'])}B, "
+      f"SMALL {SMALL_PX}px/{len(small['cov'])}B")

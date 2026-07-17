@@ -890,8 +890,7 @@ static void handleApiConfigSettings() {
   if (doc["posixTZ"].is<const char*>()) {
     strlcpy(cfg.posixTZ, doc["posixTZ"] | "UTC0", sizeof(cfg.posixTZ));
     strlcpy(gPosixTZ, cfg.posixTZ, sizeof(gPosixTZ));
-    setenv("TZ", gPosixTZ, 1);
-    tzset();
+    cfgApplyTZ();
     ntpSynced = false;
     DBG("[CFG] Timezone set to %s\n", cfg.posixTZ);
   }
@@ -934,7 +933,10 @@ static void handleApiConfigSettings() {
     panelSetColourOrder(cfg.panelBGR);
   }
   if (doc["panelBright"].is<int>())   { int v = doc["panelBright"];
-    if (v >= 1 && v <= 255) cfg.panelBright = (uint8_t)v; }
+    // Apply now, not just on the next wall repaint: an effect or raw canvas owns the panel while
+    // taskDisplay stands down, so dispRender (the only other caller) would not push the new duty.
+    // panelSetBrightness only sets a pending flag; the next panelShow in any mode writes it.
+    if (v >= 1 && v <= 255) { cfg.panelBright = (uint8_t)v; panelSetBrightness(cfg.panelBright); } }
   if (doc["flapMs"].is<int>())        { int v = doc["flapMs"];
     if (v >= 2 && v <= 500) cfg.flapMs = (uint16_t)v; }
   if (doc["flapMax"].is<int>())       { int v = doc["flapMax"];
@@ -1394,7 +1396,8 @@ static void handleApiCompanionSettingsGet() {
 // means the next swap on the panel is ours. Bounded, so a wedged display task cannot hang the
 // request; feed the web watchdog while we wait.
 static void canvasStandDown() {
-  gEffect = EFFECT_NONE;          // a raw canvas supersedes any on-device effect
+  gEffect    = EFFECT_NONE;         // a raw canvas supersedes any on-device effect...
+  gEffectReq = EFFECT_REQ_IDLE;     // ...and cancels a pending effect start
   gCanvasMode = true;
   gDispParked = false;
   uint32_t t0 = millis();
@@ -1405,11 +1408,7 @@ static void canvasEnter(bool clear) {
   if (!gCanvasMode) canvasStandDown();
   if (clear && gPanel.ready) { panelClear(); panelShow(); }
 }
-static void canvasLeave() {                                    // hand the panel back to the wall
-  if (gCanvasMode || gEffect != EFFECT_NONE) {
-    gCanvasMode = false; gEffect = EFFECT_NONE; dispMarkDirty();
-  }
-}
+static void canvasLeave() { dispReturnToWall(); }              // hand the panel back (no-op if idle)
 
 // The bundled face closest to a requested pixel height; 6x10 is the readable default.
 static const Font1252* canvasFace(int size) {
@@ -1482,18 +1481,17 @@ static void handleApiCanvasEffect() {
   uint8_t e  = effectByName(doc["type"] | "none");
   int     sp = doc["speed"] | (int)gEffectSpeed;
   gEffectSpeed = (uint8_t)(sp < 1 ? 1 : sp > 10 ? 10 : sp);
-  gEffect = EFFECT_NONE;            // stop any running effect first...
-  gCanvasMode = false;
-  delay(40);                        // ...and let an in-flight effectRender() finish before we reset
   if (e == EFFECT_NONE) {
-    dispMarkDirty();                // return to the reel wall
+    dispReturnToWall();             // stop -> reel wall
+  } else if (gQuietTime) {
+    sendJsonError(409, "Quiet Time is active"); return;   // don't light the panel during quiet hours
   } else {
-    effectReset(e);
-    gEffect = e;                    // set last: taskDisplay renders only once its state is ready
+    gCanvasMode = false;            // an effect owns the panel via taskDisplay, which runs
+    gEffectReq  = e;                // effectReset() + starts it -- no effect state touched off-core
   }
   char buf[96];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"effect\":\"%s\",\"speed\":%u}",
-           effectName(gEffect), (unsigned)gEffectSpeed);
+           effectName(e), (unsigned)gEffectSpeed);
   server.send(200, "application/json", buf);
 }
 
@@ -1549,7 +1547,7 @@ static void handleApiCanvasOps() {
 // args once it begins streaming a raw body -- so the length is authoritative. Streamed straight
 // to the back buffer so no multi-KB frame is ever buffered whole; presented on RAW_END.
 static volatile int canvasErr = 0;
-static uint32_t     canvasPix = 0;      // pixels written this frame
+static uint16_t     canvasX = 0, canvasY = 0;   // running write position: no per-pixel divide
 static uint8_t      canvasCarry[3];     // partial pixel across a chunk boundary
 static uint8_t      canvasCarryN = 0;
 static uint8_t      canvasBpp = 3;
@@ -1558,7 +1556,7 @@ static void handleApiCanvasFrameRaw() {
   wdgWebMs = millis();                   // a slow client must not trip the web watchdog
   switch (raw.status) {
     case RAW_START: {
-      canvasErr = 0; canvasPix = 0; canvasCarryN = 0;
+      canvasErr = 0; canvasX = 0; canvasY = 0; canvasCarryN = 0;
       if (!gPanel.ready) { canvasErr = 503; break; }
       // Infer the pixel format from the body length -- a full frame is unambiguously W*H*3
       // (rgb888) or W*H*2 (rgb565). server.arg("fmt") reads empty in a raw handler, so the
@@ -1583,8 +1581,8 @@ static void handleApiCanvasFrameRaw() {
                r = (uint8_t)(((p >> 11) & 0x1F) << 3);
                g = (uint8_t)(((p >> 5)  & 0x3F) << 2);
                b = (uint8_t)(( p        & 0x1F) << 3); }
-        panelPixel((int)(canvasPix % gPanel.panelW), (int)(canvasPix / gPanel.panelW), r, g, b);
-        canvasPix++;
+        panelPixel(canvasX, canvasY, r, g, b);      // panelPixel clamps, so an over-long body is safe
+        if (++canvasX >= gPanel.panelW) { canvasX = 0; canvasY++; }
       }
       break;
     case RAW_END:
@@ -1606,7 +1604,8 @@ static void handleApiCanvasFrame() {
   }
   char buf[96];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"width\":%u,\"height\":%u,\"pixels\":%lu}",
-           (unsigned)gPanel.panelW, (unsigned)gPanel.panelH, (unsigned long)canvasPix);
+           (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
+           (unsigned long)canvasY * gPanel.panelW + canvasX);
   server.send(200, "application/json", buf);
 }
 

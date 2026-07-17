@@ -9,15 +9,17 @@
 #include "display.h"
 #include "panel.h"
 #include "font1252.h"          // flap glyphs for fliporama
-#include "aafont.h"            // anti-aliased JetBrains Mono faces for the clock
+#include "aafont.h"            // 1-bit Orbitron faces for the clock
 #include <math.h>
 #include <esp_random.h>
 #include <string.h>
+#include <time.h>
 
-extern void rtcFormatTime(char* out, size_t outLen);   // local time string from rtc.cpp
+extern bool rtcLocalNow(struct tm* out);   // broken-down local time from rtc.cpp; false if unset
 
 volatile uint8_t gEffect      = EFFECT_NONE;
 volatile uint8_t gEffectSpeed = 4;
+volatile uint8_t gEffectReq   = EFFECT_REQ_IDLE;   // pending start, picked up by taskDisplay
 
 #define FX_MAXW      256                  // widest panel the firmware supports
 #define FX_MAXCELLS  260                  // most flap cells (>= any wall grid)
@@ -42,7 +44,7 @@ static const int MTRAIL = 14;
 // flip runs cellFlip from FLIP_LEN down to 0 in gated steps, through three phases.
 static int16_t  cellX[FX_MAXCELLS], cellY[FX_MAXCELLS];
 static uint8_t  cellCur[FX_MAXCELLS], cellNxt[FX_MAXCELLS], cellFlip[FX_MAXCELLS];
-static int      cellN = 0, cellW = 0, cellH = 0, cellScale = 1;
+static int      cellN = 0, cellW = 0, cellH = 0;
 static const Font1252* cellFace = &FONT_6x10;
 static const int FLIP_LEN = 6;
 
@@ -88,71 +90,59 @@ static void fxBuildLUTs() {
   fxReady = true;
 }
 
+// Names in enum order (index 0 == EFFECT_PLASMA == enum value 1), generated from EFFECT_TABLE.
+static const char* const EFFECT_NAMES[] = {
+#define EFFECT_NAME(sym, name) name,
+  EFFECT_TABLE(EFFECT_NAME)
+#undef EFFECT_NAME
+};
+static const int EFFECT_COUNT = (int)(sizeof(EFFECT_NAMES) / sizeof(EFFECT_NAMES[0]));
+
 uint8_t effectByName(const char* name) {
-  if (!name) return EFFECT_NONE;
-  if (!strcmp(name, "plasma"))    return EFFECT_PLASMA;
-  if (!strcmp(name, "fire"))      return EFFECT_FIRE;
-  if (!strcmp(name, "matrix"))    return EFFECT_MATRIX;
-  if (!strcmp(name, "fliporama")) return EFFECT_FLIPORAMA;
-  if (!strcmp(name, "clock"))     return EFFECT_CLOCK;
-  if (!strcmp(name, "life"))      return EFFECT_LIFE;
+  if (name)
+    for (int i = 0; i < EFFECT_COUNT; i++)
+      if (!strcmp(name, EFFECT_NAMES[i])) return (uint8_t)(i + 1);
   return EFFECT_NONE;
 }
 const char* effectName(uint8_t e) {
-  switch (e) { case EFFECT_PLASMA:    return "plasma";
-               case EFFECT_FIRE:      return "fire";
-               case EFFECT_MATRIX:    return "matrix";
-               case EFFECT_FLIPORAMA: return "fliporama";
-               case EFFECT_CLOCK:     return "clock";
-               case EFFECT_LIFE:      return "life";
-               default:               return "none"; }
+  return (e >= 1 && e <= EFFECT_COUNT) ? EFFECT_NAMES[e - 1] : "none";
 }
-// One source of truth for the advertised set -- used by GET /api/canvas and /api/capabilities.
+// The advertised set as a JSON array -- one source of truth for GET /api/canvas + /api/capabilities.
 const char* effectListJson() {
-  return "[\"plasma\",\"fire\",\"matrix\",\"fliporama\",\"clock\",\"life\"]";
+  static char buf[96];
+  if (!buf[0]) {
+    int n = 0; buf[n++] = '[';
+    for (int i = 0; i < EFFECT_COUNT; i++)
+      n += snprintf(buf + n, sizeof(buf) - n, "%s\"%s\"", i ? "," : "", EFFECT_NAMES[i]);
+    snprintf(buf + n, sizeof(buf) - n, "]");
+  }
+  return buf;
 }
 
 // ---- flap cells (fliporama + clock) -------------------------------------------------------------
 
-// The largest bundled face that fits a cw x ch cell with a little gutter.
-static const Font1252* pickFace(int cw, int ch) {
-  if (cw >= 11 && ch >= 21) return &FONT_10x20;
-  if (cw >= 10 && ch >= 19) return &FONT_9x18;
-  if (cw >= 9  && ch >= 14) return &FONT_8x13;
-  if (cw >= 7  && ch >= 14) return &FONT_6x13;
-  if (cw >= 7  && ch >= 11) return &FONT_6x10;
-  if (cw >= 7  && ch >= 10) return &FONT_6x9;
-  return &FONT_5x8;
-}
-
-// Draw font rows [rowFrom,rowTo) of the glyph for ASCII `ch` at (px,py) in (r,g,b), each font
-// pixel scaled to a cellScale x cellScale block (so big clock digits stay crisp).
+// Draw font rows [rowFrom,rowTo) of the glyph for ASCII `ch` at (px,py) in (r,g,b).
 static void drawGlyphRows(int px, int py, const Font1252* f, uint8_t ch,
                           int rowFrom, int rowTo, uint8_t r, uint8_t g, uint8_t b) {
   uint8_t gi = FONT1252_INDEX[ch];
   if (gi == 0xFF) return;
   if (rowFrom < 0) rowFrom = 0;
   if (rowTo > f->height) rowTo = f->height;
-  const int s = cellScale;
   for (int row = rowFrom; row < rowTo; row++) {
     uint16_t bits = font1252Row(*f, gi, (uint8_t)row);
     for (int col = 0; col < f->width; col++)
-      if (bits & (uint16_t)(0x8000 >> col)) {
-        if (s == 1) panelPixel(px + col, py + row, r, g, b);
-        else        panelFillRect(px + col * s, py + row * s, s, s, r, g, b);
-      }
+      if (bits & (uint16_t)(0x8000 >> col)) panelPixel(px + col, py + row, r, g, b);
   }
 }
 
 // One flap cell i: a TRUE-BLACK flap with bright warm ink and a subtle split seam -- the classic
 // Solari look. (The old dim-grey card washed out to near-white at large sizes.) The glyph is
-// scaled by cellScale and split at its mid-line for the flip phases.
+// split at its mid-line for the flip phases.
 static void drawFlapCell(int i) {
-  const int s = cellScale;
   const int cx = cellX[i], cy = cellY[i], cw = cellW, ch = cellH;
   const Font1252* f = cellFace;
-  const int gx = cx + (cw - f->width * s) / 2;
-  const int gy = cy + (ch - f->height * s) / 2;
+  const int gx = cx + (cw - f->width) / 2;
+  const int gy = cy + (ch - f->height) / 2;
   const int hh = f->height / 2;                 // font rows in the top half
   const uint8_t R = 245, G = 240, B = 230;      // warm flap ink
   panelFillRect(cx, cy, cw, ch, 0, 0, 0);       // the flap: true black
@@ -163,7 +153,7 @@ static void drawFlapCell(int i) {
   else if (fl > 2) { drawGlyphRows(gx, gy, f, nxt, 0, hh, R, G, B);            // B: new top...
                      drawGlyphRows(gx, gy, f, cur, hh, f->height, R, G, B); }  //    ...old bottom
   else              drawGlyphRows(gx, gy, f, nxt, 0, f->height, R, G, B);      // C: whole new glyph
-  panelHLine(cx, gy + hh * s, cw, 30, 30, 40);  // the split seam, a subtle dark line
+  panelHLine(cx, gy + hh, cw, 30, 30, 40);      // the split seam, a subtle dark line
 }
 
 // Advance every in-progress flip one gated step; settle the ones that finish.
@@ -181,8 +171,7 @@ static void initFlipGrid(int W, int H) {
   if (cols < 1) cols = 1;
   if (rows < 1) rows = 1;
   cellW = W / cols; cellH = H / rows;
-  cellFace = pickFace(cellW, cellH);
-  cellScale = 1;
+  cellFace = font1252Best((uint8_t)cellW, (uint8_t)cellH);   // same face picker as the reel wall
   cellN = 0;
   for (int r = 0; r < rows && cellN < FX_MAXCELLS; r++)
     for (int c = 0; c < cols && cellN < FX_MAXCELLS; c++) {
@@ -209,16 +198,6 @@ static void renderFliporama() {
   panelShow();
 }
 
-// ---- split-flap clock ---------------------------------------------------------------------------
-
-// Read local time, hand back the six digits of HH:MM:SS (rtcFormatTime always ends in HH:MM:SS).
-static void clockDigits(char d[6]) {
-  char tb[24]; rtcFormatTime(tb, sizeof(tb));
-  size_t n = strlen(tb);
-  const char* t = (n >= 8) ? tb + n - 8 : "00:00:00";
-  d[0] = t[0]; d[1] = t[1]; d[2] = t[3]; d[3] = t[4]; d[4] = t[6]; d[5] = t[7];
-}
-
 // ---- anti-aliased text (aafont.h) ---------------------------------------------------------------
 
 static const AAGlyph* aaFind(const AAFont* f, char c) {
@@ -229,91 +208,149 @@ static const AAGlyph* aaFind(const AAFont* f, char c) {
 }
 static int aaAdvance(const AAFont* f, char c) { const AAGlyph* g = aaFind(f, c); return g ? g->adv : 0; }
 static int aaTextW(const AAFont* f, const char* s) { int w = 0; for (; *s; s++) w += aaAdvance(f, *s); return w; }
-// One glyph, pen baseline at (px,by): each covered pixel is the ink colour scaled by its coverage,
-// so edges are smooth on the panel instead of the hard 1-bit steps of a bitmap font.
+// One glyph, pen baseline at (px,by), from its 1-bit packed mask (row padded to whole bytes, MSB
+// = leftmost). A pixel is either lit or off -- grayscale AA reads as muddy on the few bitplanes.
 static void aaGlyph(int px, int by, const AAFont* f, char c, uint8_t r, uint8_t g, uint8_t b) {
   const AAGlyph* gl = aaFind(f, c);
   if (!gl || !gl->w) return;
-  const uint8_t* cov = f->cov + gl->off;
+  const uint8_t* bits = f->cov + gl->off;
+  const int stride = (gl->w + 7) >> 3;                 // bytes per glyph row
   const int ox = px + gl->xoff, oy = by + gl->yoff;
-  for (int yy = 0; yy < gl->h; yy++)
-    for (int xx = 0; xx < gl->w; xx++) {
-      uint8_t a = cov[yy * gl->w + xx];
-      if (a) panelPixel(ox + xx, oy + yy,
-                        (uint8_t)(r * a / 255), (uint8_t)(g * a / 255), (uint8_t)(b * a / 255));
-    }
+  for (int yy = 0; yy < gl->h; yy++) {
+    const uint8_t* row = bits + yy * stride;
+    for (int xx = 0; xx < gl->w; xx++)
+      if (row[xx >> 3] & (0x80 >> (xx & 7))) panelPixel(ox + xx, oy + yy, r, g, b);
+  }
+}
+// One glyph centred inside a fixed slotW-wide slot at slotX -- so proportional (Orbitron) digits
+// stay put in the monospaced clock instead of drifting sideways as the numbers change.
+static void aaGlyphSlot(int slotX, int slotW, int by, const AAFont* f, char c,
+                        uint8_t r, uint8_t g, uint8_t b) {
+  const AAGlyph* gl = aaFind(f, c);
+  if (!gl) return;
+  aaGlyph(slotX + (slotW - gl->w) / 2 - gl->xoff, by, f, c, r, g, b);
 }
 static void aaText(int px, int by, const AAFont* f, const char* s, uint8_t r, uint8_t g, uint8_t b) {
   for (; *s; s++) { aaGlyph(px, by, f, *s, r, g, b); px += aaAdvance(f, *s); }
 }
 
-// Local date as "MM/DD" (rtcFormatTime gives "YYYY-MM-DD HH:MM:SS"; no clock yet -> "--/--").
-static void clockDate(char* out, size_t n) {
-  char tb[24]; rtcFormatTime(tb, sizeof(tb));
-  if (strlen(tb) >= 10 && tb[4] == '-' && tb[7] == '-')
-    snprintf(out, n, "%c%c/%c%c", tb[5], tb[6], tb[8], tb[9]);
-  else snprintf(out, n, "--/--");
+// Month names for the spelled-out date, e.g. "JULY 16".
+static const char* const CLK_MONTHS[12] = {
+  "JANUARY","FEBRUARY","MARCH","APRIL","MAY","JUNE",
+  "JULY","AUGUST","SEPTEMBER","OCTOBER","NOVEMBER","DECEMBER" };
+
+// The clock reads the RTC once per frame but rebuilds these strings only when the SECOND changes,
+// not 70x a second. Both persist across an unsynced or lock-contended frame (rtcLocalNow returns
+// false), so the panel holds the last good time instead of blanking. clkDigits is HHMMSS.
+static int  clkCacheSec = -1;
+static char clkDigits[6] = {'0','0','0','0','0','0'};
+static char clkDate[16]  = "";
+static void clockRefresh() {
+  struct tm lt;
+  if (!rtcLocalNow(&lt) || lt.tm_sec == clkCacheSec) return;
+  clkCacheSec = lt.tm_sec;
+  clkDigits[0] = (char)('0' + lt.tm_hour / 10); clkDigits[1] = (char)('0' + lt.tm_hour % 10);
+  clkDigits[2] = (char)('0' + lt.tm_min  / 10); clkDigits[3] = (char)('0' + lt.tm_min  % 10);
+  clkDigits[4] = (char)('0' + lt.tm_sec  / 10); clkDigits[5] = (char)('0' + lt.tm_sec  % 10);
+  int mo = lt.tm_mon; if (mo < 0) mo = 0; else if (mo > 11) mo = 11;
+  snprintf(clkDate, sizeof(clkDate), "%s %d", CLK_MONTHS[mo], lt.tm_mday);
 }
 
-static void initClock(int, int) {}          // the clock keeps no state -- see renderClock
+// Seconds into the minute (0..60), interpolated between integer ticks with millis() so anything
+// driven off it moves smoothly rather than jumping once a second.
+static uint8_t clkLastSec = 255; static uint32_t clkSecMs = 0;
+static float clockSecondsSmooth(const char dg[6]) {
+  int sec = (dg[4]-'0')*10 + (dg[5]-'0');
+  uint32_t now = millis();
+  if (sec != clkLastSec) { clkLastSec = (uint8_t)sec; clkSecMs = now; }
+  uint32_t sub = now - clkSecMs; if (sub > 1000) sub = 1000;
+  return sec + sub / 1000.0f;
+}
 
-// A clean digital clock: big anti-aliased HH:MM (JetBrains Mono) in a slowly drifting rainbow,
-// with the date bottom-left and the seconds bottom-right in a small face. Real typography, not a
-// 7-segment or flap look.
+// A left-anchored bar that shrinks smoothly from full width to zero over the minute. It carries a
+// gentle gradient (only ~SPAN of hue across the full width) rather than a whole rainbow, so it
+// reads as one colour drifting rather than a stripe of many.
+static void clockBar(int x, int y, int w, int h, float secs, int hb) {
+  const int SPAN = 22;
+  int bw = (int)((60.0f - secs) / 60.0f * w + 0.5f);
+  if (bw > w) bw = w; else if (bw < 0) bw = 0;
+  uint8_t r, g, b;
+  for (int i = 0; i < bw; i++) {
+    hsv((uint8_t)(hb + i * SPAN / (w > 0 ? w : 1)), r, g, b);
+    panelFillRect(x + i, y, 1, h, r, g, b);
+  }
+}
+
+// Draw HH MM centred on x=cx with digits from font f, and the colon as two small dots -- so the
+// separator is tight rather than a full mono character cell. Each digit sits centred in its own
+// digW-wide slot (so proportional Orbitron digits do not jitter). Each glyph steps the rainbow.
+static void drawClockTime(int cx, int by, const AAFont* f, const char dg[6], int hb, int hstep) {
+  const int digW = aaAdvance(f, '0');
+  const AAGlyph* z = aaFind(f, '0');
+  const int capH = z ? z->h : f->asc;
+  const int dot = (capH / 8 < 2) ? 2 : capH / 8;
+  const int colonW = dot + digW / 3;                        // tight -- a fraction of a digit wide
+  int x = cx - (4 * digW + colonW) / 2;
+  uint8_t r, g, b;
+  hsv((uint8_t)(hb),           r, g, b); aaGlyphSlot(x, digW, by, f, dg[0], r, g, b); x += digW;
+  hsv((uint8_t)(hb + hstep),   r, g, b); aaGlyphSlot(x, digW, by, f, dg[1], r, g, b); x += digW;
+  hsv((uint8_t)(hb + 2*hstep), r, g, b);                    // colon: dots at the digit's 1/3 and 2/3
+  { int cxo = x + (colonW - dot) / 2;
+    panelFillRect(cxo, by - capH * 2 / 3, dot, dot, r, g, b);
+    panelFillRect(cxo, by - capH / 3,     dot, dot, r, g, b); }
+  x += colonW;
+  hsv((uint8_t)(hb + 3*hstep), r, g, b); aaGlyphSlot(x, digW, by, f, dg[2], r, g, b); x += digW;
+  hsv((uint8_t)(hb + 4*hstep), r, g, b); aaGlyphSlot(x, digW, by, f, dg[3], r, g, b);
+}
+
+// A clean digital clock: big anti-aliased HH MM (Orbitron) with a small dot colon, drifting through
+// a rainbow, the date (month spelled out) below it, and a seconds bar that shrinks over the minute.
 static void renderClock() {
   const int W = gPanel.panelW, H = gPanel.panelH;
-  char dg[6]; clockDigits(dg);
+  clockRefresh();                                          // rebuild HHMMSS + date only on a new second
   panelClear();
-  const int hb = (int)(fxTick / 3);                         // the rainbow drifts slowly along the digits
-  uint8_t r, g, b;
+  const int hb = (int)(fxTick / 3);
+  const float secs = clockSecondsSmooth(clkDigits);
+  const int barH = (H >= 48) ? 3 : 2;
+  const int barY = H - barH;
+  clockBar(1, barY, W - 2, barH, secs, hb);                 // seconds bar, full width along the bottom
 
-  if (H < 48) {                                             // short panel (e.g. 128x32): one row
-    const char hms[9] = { dg[0],dg[1],':',dg[2],dg[3],':',dg[4],dg[5],0 };
+  if (H < 48) {                                             // short panel (128x32): HH MM + bar only
     const AAFont* f = &AAFONT_MED;
-    const AAGlyph* zero = aaFind(f, '0');
-    const int capH = zero ? zero->h : f->asc;
-    const int by = (H - capH) / 2 + capH;
-    int x = (W - aaTextW(f, hms)) / 2; if (x < 0) x = 0;
-    for (int i = 0; hms[i]; i++) {
-      hsv((uint8_t)(hb + i * 20), r, g, b);
-      aaGlyph(x, by, f, hms[i], r, g, b);
-      x += aaAdvance(f, hms[i]);
-    }
+    const AAGlyph* z = aaFind(f, '0');
+    const int capH = z ? z->h : f->asc;
+    drawClockTime(W / 2, (barY - 1 - capH) / 2 + capH, f, clkDigits, hb, 8);
     panelShow();
     return;
   }
 
-  // Tall panel: big HH:MM, date bottom-left, seconds bottom-right (mockup layout #1).
-  const char hm[6] = { dg[0], dg[1], ':', dg[2], dg[3], 0 };
-  const char ss[3] = { dg[4], dg[5], 0 };
-  char date[8]; clockDate(date, sizeof(date));
+  // Tall panel: big HH MM up top, the spelled-out date centred above the bar.
   const AAFont* big = &AAFONT_BIG;
   const AAFont* sm  = &AAFONT_SMALL;
-  const AAGlyph* zero = aaFind(big, '0');
-  const int capH  = zero ? zero->h : big->asc;
-  const int byBig = (H - sm->lineH - capH) / 2 + capH;      // baseline: caps centred above the row
-  int x = (W - aaTextW(big, hm)) / 2; if (x < 0) x = 0;
-  for (int i = 0; hm[i]; i++) {
-    hsv((uint8_t)(hb + i * 26), r, g, b);
-    aaGlyph(x, byBig, big, hm[i], r, g, b);
-    x += aaAdvance(big, hm[i]);
-  }
-  const int byS = H - 2;
-  aaText(2, byS, sm, date, 120, 120, 140);                  // date left, muted
-  aaText(W - aaTextW(sm, ss) - 2, byS, sm, ss, 90, 180, 235);  // seconds right, cool blue
+  const int byDate  = barY - 3;                             // date baseline just above the bar
+  const int dateTop = byDate - sm->asc;
+  aaText((W - aaTextW(sm, clkDate)) / 2, byDate, sm, clkDate, 150, 150, 165);   // centred, muted
+  const AAGlyph* z = aaFind(big, '0');
+  const int capH = z ? z->h : big->asc;
+  int byBig = (dateTop - capH) / 2 + capH; if (byBig < capH + 1) byBig = capH + 1;
+  drawClockTime(W / 2, byBig, big, clkDigits, hb, 8);
   panelShow();
 }
 
 // ---- Conway's Game of Life ----------------------------------------------------------------------
 
+// Life keeps two generations in the shared PSRAM grid and swaps a pointer each step rather than
+// memcpy'ing the whole board back. lifeCur names the live half; the other half takes the next gen.
+static uint8_t* lifeCur = nullptr;
+
 static void seedLife(int W, int H) {
-  if (!fxBuf) return;
-  for (int i = 0; i < W * H; i++) fxBuf[i] = (rnd() % 100 < 28) ? 1 : 0;   // ~28% alive
+  if (!lifeCur) return;
+  for (int i = 0; i < W * H; i++) lifeCur[i] = (rnd() % 100 < 28) ? 1 : 0;   // ~28% alive
 }
 
 static void stepLife(int W, int H) {
-  uint8_t* cur = fxBuf;
-  uint8_t* nxt = fxBuf + W * H;
+  uint8_t* cur = lifeCur;
+  uint8_t* nxt = (cur == fxBuf) ? fxBuf + W * H : fxBuf;
   uint32_t pop = 0;
   for (int y = 0; y < H; y++)
     for (int x = 0; x < W; x++) {
@@ -332,7 +369,7 @@ static void stepLife(int W, int H) {
       nxt[y * W + x] = na;
       if (na) pop++;
     }
-  memcpy(cur, nxt, W * H);
+  lifeCur = nxt;                                          // swap generations -- no board-sized memcpy
   // A settled or dead board is dull -- reseed once it stops changing for a while.
   if (pop == 0 || pop == lifePop) { if (++lifeStale > 40) { seedLife(W, H); lifeStale = 0; } }
   else lifeStale = 0;
@@ -340,11 +377,13 @@ static void stepLife(int W, int H) {
 }
 
 static void renderLife(int W, int H) {
+  if (!lifeCur) { panelShow(); return; }                 // grid alloc failed: nothing to show
   int gate = 8 - gEffectSpeed / 2; if (gate < 1) gate = 1;
   if (fxTick % gate == 0) stepLife(W, H);
+  const uint8_t* cells = lifeCur;
   for (int y = 0; y < H; y++)
     for (int x = 0; x < W; x++) {
-      uint8_t a = fxBuf[y * W + x];
+      uint8_t a = cells[y * W + x];
       if (!a) { panelPixel(x, y, 0, 0, 0); continue; }
       if (a <= 2) panelPixel(x, y, 180, 255, 190);              // newborn: bright white-green
       else { uint8_t g = (uint8_t)(120 + (a > 135 ? 135 : a));  // older: steadier green, glowing
@@ -379,8 +418,8 @@ void effectReset(uint8_t type) {
       break;
     }
     case EFFECT_FLIPORAMA: initFlipGrid(W, H); break;
-    case EFFECT_CLOCK:     initClock(W, H);    break;
-    case EFFECT_LIFE:      lifePop = 0; lifeStale = 0; seedLife(W, H); break;
+    case EFFECT_CLOCK:     clkCacheSec = -1; clkLastSec = 255; break;   // force a fresh read
+    case EFFECT_LIFE:      lifeCur = fxBuf; lifePop = 0; lifeStale = 0; seedLife(W, H); break;
     default: break;
   }
 }
@@ -407,10 +446,12 @@ static void renderFire() {
   // white-hot spark. Keeping the base below the white tip is what stops it becoming a white slab.
   for (int x = 0; x < W; x++)
     fxBuf[(H - 1) * W + x] = (rnd() & 15) ? (uint8_t)(160 + (rnd() & 63)) : 255;
-  // Doom-style spread: carry each cell up one row with a random sideways DRIFT and a random
-  // decay. That asymmetry -- not a symmetric blur -- is what breaks the sheet into flame tongues.
-  for (int x = 0; x < W; x++)
-    for (int y = 1; y < H; y++) {
+  // Doom-style spread: carry each cell up one row with a random sideways DRIFT and a random decay.
+  // That asymmetry -- not a symmetric blur -- is what breaks the sheet into flame tongues. Rows are
+  // the outer loop (row-major) so each source row is fully read before the next iteration writes
+  // over it, and the framebuffer is walked sequentially instead of column-strided.
+  for (int y = 1; y < H; y++)
+    for (int x = 0; x < W; x++) {
       int pixel = fxBuf[y * W + x];
       if (pixel == 0) { fxBuf[(y - 1) * W + x] = 0; continue; }
       uint32_t r = rnd();

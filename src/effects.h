@@ -7,26 +7,36 @@
 #pragma once
 #include <stdint.h>
 
+// One row per effect: X(EnumSuffix, "wire-name"). The enum, effectByName(), effectName() and
+// effectListJson() are all generated from this table, so adding an effect is a single edit here
+// (plus its render/reset code and the openapi enum) instead of four hand-synced lists.
+#define EFFECT_TABLE(X) \
+  X(PLASMA,    "plasma")    \
+  X(FIRE,      "fire")      \
+  X(MATRIX,    "matrix")    \
+  X(FLIPORAMA, "fliporama") \
+  X(CLOCK,     "clock")     \
+  X(LIFE,      "life")
+
 enum EffectType : uint8_t {
-  EFFECT_NONE      = 0,
-  EFFECT_PLASMA    = 1,
-  EFFECT_FIRE      = 2,
-  EFFECT_MATRIX    = 3,
-  EFFECT_FLIPORAMA = 4,   // the whole board flips random glyphs -- "the wall is alive"
-  EFFECT_CLOCK     = 5,   // split-flap clock: digits flip over on the tick
-  EFFECT_LIFE      = 6,   // Conway's Game of Life
+  EFFECT_NONE = 0,
+#define EFFECT_ENUM(sym, name) EFFECT_##sym,
+  EFFECT_TABLE(EFFECT_ENUM)
+#undef EFFECT_ENUM
 };
 
-// The running effect (EFFECT_NONE = off, wall/canvas as normal) and its 1..10 speed. Read by
-// taskDisplay every frame; set by POST /api/canvas/effect.
+// The running effect (EFFECT_NONE = off) and its 1..10 speed, read by taskDisplay every frame.
 extern volatile uint8_t gEffect;
 extern volatile uint8_t gEffectSpeed;
+// A pending START request. Any task sets it to an EFFECT_* id; taskDisplay picks it up, runs
+// effectReset() and starts rendering -- so effect state is only ever mutated on the render task,
+// never from another core under an in-flight effectRender(). 0xFF = no request pending.
+extern volatile uint8_t gEffectReq;
+static const uint8_t EFFECT_REQ_IDLE = 0xFF;
 
-uint8_t     effectByName(const char* name);   // "plasma"/"fire"/"matrix"/"none" -> id (NONE if unknown)
-const char* effectName(uint8_t e);            // id -> canonical name
-const char* effectListJson();                 // the effect names as a JSON array, e.g. ["plasma",...]
+uint8_t     effectByName(const char* name);   // wire name -> id (EFFECT_NONE if unknown / "none")
+const char* effectName(uint8_t e);            // id -> canonical name ("none" for EFFECT_NONE)
+const char* effectListJson();                 // all names as a JSON array, e.g. ["plasma",...]
 
-// Prepare per-effect state for a fresh run (seed drops, clear the heat buffer, build LUTs once).
-void effectReset(uint8_t type);
-// Render and present one frame of `type`. Runs in taskDisplay, like dispRender().
-void effectRender(uint8_t type);
+void effectReset(uint8_t type);   // prepare per-effect state; called only on taskDisplay
+void effectRender(uint8_t type);  // render + present one frame; runs on taskDisplay

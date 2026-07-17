@@ -11,6 +11,7 @@
 #define MPGW_RTC_H
 
 #include "common.h"
+#include <time.h>
 
 struct RtcTime {
   uint16_t year;
@@ -27,5 +28,7 @@ void rtcRead();
 bool rtcNTPSync();
 void rtcFormatTime(char* out, size_t outLen);
 unsigned long rtcEpochNow();
+bool rtcLocalNow(struct tm* out);   // broken-down local time; false if clock unset or TZ lock busy
+void cfgApplyTZ();                   // (re)apply gPosixTZ to the process env, serialised on timeMutex
 
 #endif // MPGW_RTC_H
