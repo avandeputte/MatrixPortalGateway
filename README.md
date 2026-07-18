@@ -8,8 +8,10 @@
 
 A split-flap display with no split flaps.
 
-This is the [Split-Flap Gateway](../../SplitFlapGateway/3.1) v3.1 firmware, ported to an
-**Adafruit MatrixPortal ESP32-S3** driving a HUB75 RGB LED matrix. The physical gateway's
+This is the [Split-Flap Gateway](../../SplitFlapGateway/3.1) v3.1 firmware, ported to a
+**Waveshare ESP32-S3-RGB-Matrix driver board** driving a HUB75 RGB LED matrix. (Versions
+up to v1.25.0 ran on the Adafruit MatrixPortal S3; that final MatrixPortal build lives on
+the `matrixportal` git branch. See **New in 2.0**.) The physical gateway's
 serial transceiver is gone. In its place is a wall of *virtual* split-flap modules, each one
 receiving the same protocol frames a real module would, acting on the display commands
 (`-`, `+`, `h`), and rendering itself as a flapping character cell on the panel.
@@ -35,6 +37,57 @@ module registry. See **New in 1.10**.)
 ```
 
 ---
+
+## New in 2.0
+
+- **The gateway moves to the Waveshare ESP32-S3-RGB-Matrix driver board.** Same ESP32-S3, very
+  different module: **32 MB of octal flash at 1.8 V** (esptool's eFuse readout: "octal (8 data
+  lines)") and **16 MB of octal PSRAM** (`memory_type = opi_opi`), versus the MatrixPortal's
+  8 MB quad flash and 2 MB quad PSRAM. This is a **hardware port, not an API change**:
+  `FW_VERSION` is `2.0.0`, `API_VERSION` stays `3.1.0`, and every endpoint, MQTT topic and
+  client keeps working unchanged. The final MatrixPortal version, **v1.25.0, lives on the
+  `matrixportal` git branch** if the old board ever returns.
+
+- **A completely different HUB75 pin map — and the octal PSRAM is why.** Octal PSRAM consumes
+  GPIO 33–37, the range the MatrixPortal map used, so the port adopts Waveshare's own map for
+  this board (`src/common.h`):
+
+  | R1 | G1 | B1 | R2 | G2 | B2 | A | B | C | D | E | CLK | LAT | OE |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | 4 | 5 | 6 | 7 | 15 | 16 | 18 | 8 | 3 | 42 | 9 | 41 | 40 | 2 |
+
+  All thirteen signals route through the GPIO matrix into one LCD_CAM data word, so the map is
+  arbitrary as far as the driver is concerned. I2C is SDA=47 / SCL=48, carrying the PCF85063
+  RTC at `0x51` (plus a QMI8658 IMU and SHTC3 the firmware does not use).
+
+- **A battery-backed clock — the board's PCF85063 RTC is wired in.** The **system clock remains
+  the single source of truth**; the chip plays two supporting roles (`src/rtc.cpp`): at boot it
+  **seeds** the system clock when it holds a time inside a plausibility **window** (build time
+  … build + 5 years — a floor alone is not enough: a factory-fresh chip on this board read
+  **2056** with its oscillator-stop flag clear, and is correctly rejected), and it is **written
+  back on every NTP sync** so the corrected time survives power cycles. With no backup cell
+  fitted, behaviour falls back to the old wait-for-NTP path.
+
+- **What 32 MB of flash bought:** `partitions-32MB.csv` — **4 MB app0 + 4 MB app1 + 23.9 MB of
+  FATFS**, versus 2 + 2 + 3.7 before. **What 16 MB of PSRAM bought:** the on-device animation
+  store (`ANIM_MAX_BYTES`) grew **1.5 MB → 8 MB** — roughly **256 rgb565 frames at 256×64**,
+  verified with a real 6.3 MB / 200-frame upload.
+
+- **What the bigger PSRAM did *not* buy: the framebuffer stays in internal SRAM.** Even octal
+  PSRAM is not used for it — the panel's GDMA stream and WiFi share the PSRAM/cache bus, and
+  bounce-buffering would put the CPU back in the refresh loop the DMA design exists to avoid.
+  `PANEL_RAM_BUDGET` stays 120 KB, and the depth-3 rule for 256px chains stands.
+
+- **The 5 MHz pixel clock was re-tested on this board — and stays.** A 10 MHz A/B (2026-07-18)
+  showed the radio **survives** here, unlike on the MatrixPortal: instant association, 0% ping
+  loss. But 10 MHz's payoff would be depth 4 on 256×64, and *that* is blocked by RAM, not the
+  clock — the 144.6 KB double-buffered internal framebuffer left 26 KB of heap and a 1.7 KB
+  minimum, unshippable. See [Known limitations](#known-limitations).
+
+- **No UF2 bootloader — recovery changes.** The Waveshare board has no tinyuf2, so there is no
+  double-tap-reset drag-and-drop recovery: a bricked board is recovered by **holding BOOT while
+  plugging in USB, then flashing with esptool** (`pio run -t upload` does this under the hood).
+  Web OTA (`/ota`) and ArduinoOTA are unchanged.
 
 ## New in 1.24
 
@@ -728,11 +781,12 @@ the next panel may well be RGB.
 
 The swap happens in `panelPixel()`, the single choke point every pixel passes through
 (`panelHLine`, `panelVLine` and `panelFillRect` all funnel into it), rather than by
-re-mapping the pins: the pin map is correct and matches Adafruit's reference.
+re-mapping the pins: the pin map is correct and matches Waveshare's own reference map for
+this board.
 
-A 64-row panel needs the E address line, which is GPIO 21 on this board. A solder jumper on the
-MatrixPortal selects which HUB75 connector pin that reaches (pin 8 by default, or pin 16); match
-it to your panel.
+A 64-row panel needs the E address line, which is GPIO 9 on this board — wired directly on the
+HUB75 header, no jumper to set. All five address lines are always mapped; the panel height
+decides how many are actually clocked, so a 1/16-scan 32-row panel simply never drives E.
 
 ---
 
@@ -871,7 +925,8 @@ src/common.h        board config, panel defaults, buffer sizes, shared types
 src/gateway.h       umbrella header: common.h plus every subsystem's public API
 src/globals.cpp     single definition site for every shared global
 src/config.*        runtime configuration (GwConfig) persisted in NVS
-src/rtc.*           wall-clock time: the ESP32's internal RTC + NTP
+src/rtc.*           wall-clock time: the system clock, seeded by the PCF85063 battery
+                    RTC at boot and disciplined by NTP (which writes the chip back)
 src/charset.*       UTF-8 <-> Windows-1252 flap-byte transcoding
 src/reel.h          the 237-flap reel and its two resolvers — Arduino-free, so
                     tools/reel_test.cpp compiles the same code
@@ -908,7 +963,8 @@ tools/Orbitron.ttf  vendored Orbitron variable font (SIL Open Font License)
 tools/bdf/          public-domain X11 "misc-fixed" fonts (10x20, 9x18, 8x13, 6x13, 6x10, 6x9, 5x8)
 tools/reel_test.cpp native regression test for the reel and its two resolvers
 
-platformio.ini      build/upload configuration
+platformio.ini      build/upload configuration (single env: waveshare_matrix)
+partitions-32MB.csv 4 MB app0 + 4 MB app1 + 23.9 MB FATFS — no tinyuf2 slot
 ARCHITECTURE.md     why the non-obvious decisions were made
 openapi.yaml        REST API reference
 ```
@@ -922,11 +978,18 @@ whatever is out on its serial wire. That has no meaning on a drawn wall and was 
 
 ## Building
 
+One PlatformIO environment, `waveshare_matrix` (32 MB octal flash, `memory_type = opi_opi`,
+`partitions-32MB.csv`):
+
 ```sh
 pio run                 # build
-pio run -t upload       # flash over USB
+pio run -t upload       # flash over USB (esptool)
 pio device monitor      # 115200 baud, native USB CDC
 ```
+
+There is **no UF2 bootloader** on this board, so no drag-and-drop recovery: if a flash goes
+wrong, hold **BOOT** while plugging in USB and run `pio run -t upload` (esptool) again. Once a
+working firmware is on, web OTA (`/ota`) and ArduinoOTA update it as before.
 
 After changing anything under `ui/`, regenerate the dashboard header — `pio run` compiles
 `src/web_ui.h`, not `ui/index.html`, so skipping this silently builds the *old* page:
@@ -953,22 +1016,30 @@ c++ -std=c++17 -Isrc tools/reel_test.cpp src/charset.cpp src/font1252.cpp \
 
 ## Known limitations
 
-- **WiFi and HUB75 on this board share the internal-SRAM bus.** The panel's GDMA streams the
-  framebuffer continuously out of the same internal SRAM the WiFi MAC uses, and at a high pixel
-  clock that starves the radio — association fails and TCP connections drop even at close range.
-  The pixel clock is therefore held at 5 MHz (`LCD_CLK_HZ` in `src/panel.cpp`), which is ample
-  for a flicker-free refresh; do **not** raise it. If you still see WiFi trouble, drop
-  `panelBitDepth`. WiFi modem sleep is also disabled (`src/main.cpp`) for the same reason.
-- **The framebuffer cannot go in PSRAM.** This board's 2 MB is *quad* SPI, far too slow to feed
-  a panel, so `panel.cpp` allocates the double-buffered framebuffer and the DMA descriptor chain
-  from internal DMA-capable RAM (`MALLOC_CAP_DMA`). That bounds panel size and colour depth
-  together, and `panelBegin()` clamps the bit depth down until the framebuffer stops starving
-  WiFi of that pool — refusing only a geometry that will not fit even at depth 1. The
-  virtual-module array is pinned to internal RAM too — `taskDisplay` walks it 100×/s on the core
-  the refresh runs on, and quad PSRAM there causes a shimmer. (The command log, the MQTT queue
-  and the scheduled-TX ring *are* in PSRAM; nothing in the refresh path touches them.)
-- **No battery-backed RTC.** Wall-clock time is invalid from power-on until the first NTP sync.
-  Every caller already handles that state; frame timestamps show `HH:MM:SS` uptime until then.
+- **The pixel clock stays at 5 MHz — but for a different reason than before.** On the
+  MatrixPortal, 10 MHz starved the WiFi MAC of internal-SRAM bandwidth and broke association
+  outright. On this board a 10 MHz A/B (2026-07-18) showed the **radio survives** — instant
+  association, 0% ping loss, normal HTTP latency — but the thing 10 MHz would buy, depth 4 on a
+  256×64 chain at ~80 Hz, is blocked by RAM instead: that geometry's 144.6 KB double-buffered
+  internal framebuffer left 26 KB of free heap and a 1.7 KB minimum, which is unshippable. So
+  `LCD_CLK_HZ` (`src/panel.cpp`) stays 5 MHz, where refresh is ample and the radio has margin.
+  Future direction: if the driver ever grows single-buffering or PSRAM bounce buffers, 10 MHz +
+  depth 4 is on the table on this board. WiFi modem sleep remains disabled (`src/main.cpp`).
+- **The framebuffer does not go in PSRAM — even 16 MB of octal PSRAM.** The panel's GDMA stream
+  and WiFi share the PSRAM/cache bus, and bounce-buffering frames through internal RAM would put
+  the CPU back into the refresh loop the DMA design exists to keep it out of. So `panel.cpp`
+  allocates the double-buffered framebuffer and the DMA descriptor chain from internal
+  DMA-capable RAM (`MALLOC_CAP_DMA`), which bounds panel size and colour depth together
+  (`PANEL_RAM_BUDGET` stays 120 KB), and `panelBegin()` clamps the bit depth down until the
+  framebuffer stops starving WiFi of that pool — refusing only a geometry that will not fit even
+  at depth 1. The virtual-module array is pinned to internal RAM too — `taskDisplay` walks it
+  100×/s on the core the refresh runs on, and a PSRAM cache miss there causes a shimmer. (The
+  command log, the MQTT queue, the scheduled-TX ring and the 8 MB animation store *are* in
+  PSRAM; nothing in the refresh path touches them.)
+- **Wall-clock time needs a backup cell or a network.** The PCF85063 seeds the system clock at
+  boot only when it holds a plausible time; with no cell fitted (or a rejected reading — see
+  **New in 2.0**), time is invalid from power-on until the first NTP sync. Every caller already
+  handles that state; frame timestamps show `HH:MM:SS` uptime until then.
 
 ---
 

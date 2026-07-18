@@ -90,7 +90,14 @@
 
    If a long chain ghosts at the far end, lower this further (the far end sees the clock
    last) -- do not raise it. Raising it buys refresh nobody can see and takes it out of
-   the radio. Refresh also scales with bit depth: cfg.panelBitDepth is the other lever. */
+   the radio. Refresh also scales with bit depth: cfg.panelBitDepth is the other lever.
+
+   A/B'd at 10 MHz on the Waveshare board (2026-07-18): unlike the MatrixPortal,
+   the radio SURVIVED -- instant association, 0% ping loss, normal HTTP latency.
+   The clock is not what blocks depth 4 on a 256x64 panel here; the 144.6 KB
+   double-buffered internal framebuffer is (it left 26 KB of heap and a 1.7 KB
+   min -- unshippable). If the driver ever grows single-buffering or PSRAM
+   bounce buffers, 10 MHz + depth 4 at ~80 Hz is on the table on this board. */
 #define LCD_CLK_HZ      5000000u
 #define TAIL_WORDS      4           // blanked settle words after the latch: address hold
 #define MIN_ON_CLOCKS   1           // never fully dark while brightness > 0

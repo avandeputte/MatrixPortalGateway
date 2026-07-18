@@ -21,9 +21,11 @@ static void sfQuietCapturePending(const uint8_t* data, size_t len);
 
 // Allocate a large buffer in PSRAM (preferred) or internal RAM (fallback),
 // zeroed. Logs where it landed. Returns NULL only if both allocations fail.
-// NOTE: the panel framebuffer must NOT come from here -- this board's PSRAM is quad
-// SPI, far too slow to feed a display. The driver allocates DMA-capable internal RAM
-// itself, so this is a note for future callers, not a live hazard.
+// NOTE: the panel framebuffer must NOT come from here even on this board's fast
+// octal PSRAM -- the LCD_CAM GDMA chain reads internal SRAM, and sharing the
+// PSRAM/cache bus with WiFi under a continuous 5 MHz pixel stream is exactly
+// the contention panel.cpp exists to avoid. The driver allocates DMA-capable
+// internal RAM itself, so this is a note for future callers, not a live hazard.
 void* gwPsramAlloc(const char* name, size_t bytes) {
   void* p = NULL;
   if (psramFound()) p = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);

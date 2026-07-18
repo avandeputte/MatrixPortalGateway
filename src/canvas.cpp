@@ -23,7 +23,10 @@ static void claimPanel(volatile bool& mineActive) {
 
 // ---- animation loop ----------------------------------------------------------------------------
 
-#define ANIM_MAX_BYTES  (1536u * 1024u)   // most PSRAM the frame store may claim (~48 rgb565 frames)
+#define ANIM_MAX_BYTES  (8192u * 1024u)   // most PSRAM the frame store may claim. The Waveshare
+                                          // board has 16 MB of octal PSRAM; 8 MB is ~256 rgb565
+                                          // frames on a 256x64 panel (was 1.5 MB / ~48 on the
+                                          // MatrixPortal's 2 MB quad part)
 
 static uint8_t*  animBuf = nullptr;        // frames back-to-back in PSRAM, as uploaded
 static size_t    animCap = 0;              // bytes currently allocated

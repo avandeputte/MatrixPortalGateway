@@ -20,11 +20,12 @@
 // what a split-flap does, and why the reel animation reads correctly even in an
 // 8x10 cell.
 //
-// PSRAM is not an option for the framebuffer: the MatrixPortal S3's 2 MB is quad SPI,
-// far too slow to feed a panel. That bounds bitDepth and panel size together. panel.cpp
-// allocates with MALLOC_CAP_DMA, which is internal by definition, so this is no longer
-// something a careless malloc() can get wrong -- but the virtual-module array in
-// vmodule.cpp still has to be pinned by hand.
+// PSRAM is not an option for the framebuffer, even the Waveshare board's fast
+// octal part: the LCD_CAM GDMA chain streams from internal SRAM, and putting a
+// continuous 5 MHz pixel read on the PSRAM/cache bus WiFi also uses is the
+// contention this driver exists to avoid. That bounds bitDepth and panel size
+// together. panel.cpp allocates with MALLOC_CAP_DMA, which is internal by
+// definition, so this is no longer something a careless malloc() can get wrong.
 
 #ifndef MPGW_DISPLAY_H
 #define MPGW_DISPLAY_H

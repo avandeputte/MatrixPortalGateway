@@ -1,18 +1,20 @@
 #include "gateway.h"
 
-// rtc.cpp -- wall-clock time from the ESP32's internal RTC, synced by NTP.
+// rtc.cpp -- wall-clock time: the system clock, seeded by the PCF85063 and
+// disciplined by NTP.
 //
-// The physical Split-Flap Gateway reads a battery-backed PCF85063 over I2C. This board has no
-// RTC chip, so the same API is served from the system clock: rtcNTPSync() calls
-// configTime() (always with a zero offset, so the system clock is UTC and mktime
-// acts as timegm), and rtcRead() snapshots gmtime() into rtcNow once a second.
-//
-// Two consequences, both already handled by every caller:
-//   * Time is invalid from power-on until the first NTP sync. rtcNow.valid stays
-//     false and rtcEpochNow() returns 0, which the frame timestamps render as
-//     HH:MM:SS uptime instead of a wall-clock time.
-//   * A reboot without network loses the wall clock until the next sync. Nothing
-//     persisted depends on it.
+// The Waveshare board carries the same battery-backed PCF85063 the physical
+// Split-Flap Gateway reads. The SYSTEM clock stays the single source of truth
+// -- rtcRead() snapshots gmtime() once a second exactly as before -- and the
+// chip plays two supporting roles:
+//   * At boot, if it holds a plausible time (oscillator running, year >= 2020),
+//     it SEEDS the system clock, so the wall clock is valid seconds after
+//     power-on with no network at all.
+//   * On every successful NTP sync the fresh UTC time is WRITTEN BACK, so the
+//     chip (and its backup cell) carry the corrected time across power cycles.
+// With no cell fitted the chip loses time on power-off and boot falls back to
+// the old wait-for-NTP path: rtcNow.valid stays false and rtcEpochNow() returns
+// 0 until the first sync, which every consumer already handles.
 //
 // Local time is derived at format time from the configured POSIX TZ string. TZ is
 // set ONCE (loadConfig, and again only when the timezone changes) because
@@ -25,12 +27,80 @@
 // yet synced" rather than reporting 1970 timestamps as fact.
 #define RTC_VALID_AFTER  1577836800UL   // 2020-01-01T00:00:00Z
 
+/* ---- PCF85063 access (I2C, addr 0x51; registers in common.h) ---- */
+static uint8_t rtcDecToBcd(int v)     { return (uint8_t)((v / 10 * 16) + (v % 10)); }
+static int     rtcBcdToDec(uint8_t v) { return (v / 16 * 10) + (v % 16); }
+
+static bool rtcChipWrite(uint8_t reg, const uint8_t* buf, uint8_t len) {
+  Wire.beginTransmission(PCF85063_ADDR);
+  Wire.write(reg);
+  for (uint8_t i = 0; i < len; i++) Wire.write(buf[i]);
+  return Wire.endTransmission(true) == 0;
+}
+static bool rtcChipRead(uint8_t reg, uint8_t* buf, uint8_t len) {
+  Wire.beginTransmission(PCF85063_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(true) != 0) return false;
+  if (Wire.requestFrom((uint8_t)PCF85063_ADDR, len) != len) return false;
+  for (uint8_t i = 0; i < len; i++) buf[i] = Wire.read();
+  return true;
+}
+
+// Write a UTC epoch into the chip's seven time registers.
+static void rtcChipWriteUnix(time_t t) {
+  struct tm tmv;
+  gmtime_r(&t, &tmv);
+  uint8_t buf[7] = {
+    rtcDecToBcd(tmv.tm_sec),          // also clears the OS (oscillator-stop) flag
+    rtcDecToBcd(tmv.tm_min),
+    rtcDecToBcd(tmv.tm_hour),
+    rtcDecToBcd(tmv.tm_mday),
+    rtcDecToBcd(tmv.tm_wday),
+    rtcDecToBcd(tmv.tm_mon + 1),
+    rtcDecToBcd(tmv.tm_year - 100)    // reg 6 is 0-99 = 2000-2099
+  };
+  rtcChipWrite(PCF85063_SEC_REG, buf, 7);
+}
+
 void rtcHwInit() {
-  // Nothing to bring up: no RTC chip, and the ESP32's RTC is already running.
-  // I2C is started anyway so a STEMMA QT device (or the onboard LIS3DH at 0x19)
-  // can be added later without touching the boot sequence.
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  DBG("[RTC] internal RTC; waiting for NTP\n");
+  uint8_t ctrl = 0x01;                             // 24h mode, oscillator on
+  if (!rtcChipWrite(PCF85063_CTRL1, &ctrl, 1)) {
+    printf("[RTC] PCF85063 not answering -- waiting for NTP\n");
+    return;
+  }
+  // Seed the system clock from the chip if it survived the power cycle. Bit 7
+  // of the seconds register is the oscillator-stop flag: set means the time is
+  // not to be trusted (fresh board, or no backup cell).
+  uint8_t buf[7] = {0};
+  if (rtcChipRead(PCF85063_SEC_REG, buf, 7) && !(buf[0] & 0x80)) {
+    struct tm tmv = {};
+    tmv.tm_sec  = rtcBcdToDec(buf[0] & 0x7F);
+    tmv.tm_min  = rtcBcdToDec(buf[1] & 0x7F);
+    tmv.tm_hour = rtcBcdToDec(buf[2] & 0x3F);
+    tmv.tm_mday = rtcBcdToDec(buf[3] & 0x3F);
+    tmv.tm_mon  = rtcBcdToDec(buf[5] & 0x1F) - 1;
+    tmv.tm_year = rtcBcdToDec(buf[6]) + RTC_YEAR_OFFSET - 1900;
+    // The system TZ is UTC at boot (cfgApplyTZ runs later), so mktime is timegm.
+    time_t t = mktime(&tmv);
+    // Plausibility is a WINDOW, not a floor. A factory-fresh chip can hold
+    // garbage with the oscillator-stop flag clear -- this board's first boot
+    // read 2056 -- and a floor-only check happily seeds the future. Trust
+    // nothing before this firmware was built or more than ~5 years after:
+    // outside that, wait for NTP (which also rewrites the chip).
+    struct tm bt = {};
+    strptime(__DATE__ " " __TIME__, "%b %d %Y %H:%M:%S", &bt);
+    const time_t built = mktime(&bt);
+    if (t >= built && t <= built + 5L * 365 * 86400) {
+      struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
+      settimeofday(&tv, NULL);
+      printf("[RTC] PCF85063 seeded the clock: %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+             tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+             tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+      return;
+    }
+  }
+  printf("[RTC] PCF85063 present but time not trusted -- waiting for NTP\n");
 }
 
 // (Re)apply the configured POSIX zone (gPosixTZ) to the process environment. setenv/tzset and the
@@ -88,6 +158,9 @@ bool rtcNTPSync() {
     }
   }
   rtcRead();
+  // Discipline the battery RTC with the fresh NTP time, so the corrected clock
+  // survives the next power cycle.
+  rtcChipWriteUnix(time(NULL));
   // configTime(0,0,..) resets the TZ env to UTC to keep the system clock in UTC -- but that also
   // clobbers the zone we set from cfg.posixTZ at boot, so every NTP sync silently reverted the
   // whole gateway (command-log timestamps, the clock effect, HA) to UTC. Restore the configured zone

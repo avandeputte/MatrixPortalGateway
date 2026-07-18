@@ -1,5 +1,39 @@
 # Matrix Portal Gateway — Release Notes
 
+## v2.0.0 — 2026-07-18
+
+**New hardware: the Waveshare ESP32-S3-RGB-Matrix driver board.** A hardware port, not an
+API change — every endpoint, topic and behaviour is v1.25.0's. The final MatrixPortal S3
+version lives on the `matrixportal` branch.
+
+### Changed
+
+- **Board**: ESP32-S3 with **32 MB octal flash (1.8 V)** and **16 MB octal PSRAM**
+  (`opi_opi`), replacing 8 MB / 2 MB quad. New HUB75 pin map (the octal PSRAM consumes
+  GPIO 33–37, which the old map used); all 13 signals still route through the GPIO matrix
+  into the same LCD_CAM + GDMA driver, unchanged.
+- **Battery-backed PCF85063 RTC** (I2C 47/48): seeds the system clock at boot — wall-clock
+  time is valid seconds after power-on with no network — and is disciplined by every NTP
+  sync. A plausibility window (build time … +5 years) rejects a factory-fresh chip's
+  garbage (the first boot read 2056). With no backup cell fitted, behaviour falls back to
+  the old wait-for-NTP path.
+- **Partitions**: 4 MB + 4 MB OTA slots (was 2+2) and a **23.9 MB FATFS** (was 3.7). No
+  UF2 bootloader on this board: recovery is hold-BOOT + esptool; web OTA is unchanged.
+- **Animation store: 8 MB** (was 1.5 MB) — ~256 rgb565 frames at 256×64; verified with a
+  real 6.3 MB, 200-frame upload.
+
+### Findings
+
+- **The 5 MHz pixel-clock cap was MatrixPortal-specific.** A/B at 10 MHz on this board:
+  the radio survived (instant association, 0 % loss). Depth 4 at 256×64 remains blocked
+  by the 144.6 KB *internal* framebuffer (26 KB heap free — unshippable), so the clock
+  stays at 5 MHz; the framebuffer stays internal even on fast octal PSRAM (the GDMA
+  stream would share the PSRAM/cache bus with WiFi, and bounce-buffering puts the CPU
+  back in the refresh loop). Single-buffering or bounce buffers are the future path to
+  depth 4 at ~80 Hz.
+- The companion auto-discovered the new gateway and drove it unchanged; the panel needed
+  `panelBGR` (this panel is BGR-wired — confirmed visually and now persisted).
+
 ## v1.24.0 — 2026-07-18
 
 Frames now flow one way. The physical protocol's query commands existed so a controller

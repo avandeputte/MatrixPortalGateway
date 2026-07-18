@@ -3,7 +3,9 @@
 
 /*
  * Matrix Portal Gateway
- * Firmware for the Adafruit MatrixPortal ESP32-S3 driving a HUB75 RGB LED matrix.
+ * Firmware for the Waveshare ESP32-S3-RGB-Matrix driver board driving a HUB75
+ * RGB LED matrix. (Originally built on the Adafruit MatrixPortal S3; that
+ * board's final version, v1.25.0, lives on the `matrixportal` git branch.)
  *
  * A port of the Split-Flap Gateway (v3.1) that keeps the entire gateway -- web UI,
  * REST API, MQTT/Home Assistant, OTA, command monitor -- and replaces
@@ -43,7 +45,9 @@
  *   is likewise unmodelled. All such frames pass the sanitizer untrimmed and
  *   the virtual modules silently ignore them, like any unknown command.
  *
- * Board: Adafruit MatrixPortal ESP32-S3 (8MB flash, 2MB *quad* PSRAM)
+ * Board: Waveshare ESP32-S3-RGB-Matrix (32MB octal flash @1.8V, 16MB octal
+ *        PSRAM, PCF85063 battery RTC, TF slot, QMI8658 IMU, ES8311 audio --
+ *        of which this firmware uses the RTC; the rest is future headroom)
  * Libraries: none for the panel -- see panel.cpp, a direct LCD_CAM + GDMA driver.
  *            PubSubClient, ArduinoJson.
  */
@@ -94,49 +98,57 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
  *  Everything needed to retarget this firmware to a different board, panel, or
  *  default setup lives in this single block.
  *
- *  Default config is for the Adafruit MatrixPortal ESP32-S3 (product 5778).
+ *  Default config is for the Waveshare ESP32-S3-RGB-Matrix driver board.
  * ==========================================================================*/
 
 /* ---- HUB75 matrix pins ----
-   Straight from Adafruit's own MatrixPortal S3 pinout. The address list carries all
-   five lines; the panel height decides how many are actually clocked, so a
-   1/16-scan 32-row panel simply never drives E (GPIO 21).
+   Waveshare's own map for this board (shipped in their patched
+   ESP32-HUB75-MatrixPanel-DMA example: esp32s3-default-pins.hpp + the .ino's
+   gpio.e override). The octal PSRAM consumes GPIO 33-37, so nothing here may
+   touch that range -- and none of these collide with the board's I2C (47/48),
+   I2S audio (12/21/38/39/43), SD (1/14/17/44) or BOOT button (0).
 
-   The board's PSRAM is QUAD, not octal. That is what leaves GPIO 35/36/37 free
-   for D/B/B2 -- an octal-PSRAM S3 module consumes them. It is also why the panel
-   framebuffer cannot be pushed to PSRAM (too slow); it must live in internal
-   SRAM. See ARCHITECTURE.md. */
-#define HUB75_R1     42
-#define HUB75_G1     41
-#define HUB75_B1     40
-#define HUB75_R2     38
-#define HUB75_G2     39
-#define HUB75_B2     37
-#define HUB75_ADDR_A 45
-#define HUB75_ADDR_B 36
-#define HUB75_ADDR_C 48
-#define HUB75_ADDR_D 35
-#define HUB75_ADDR_E 21          // 64-row panels only; a board jumper picks the
-                                 // HUB75 connector pin (8 by default, or 16)
-#define HUB75_CLK    2
-#define HUB75_LAT    47
-#define HUB75_OE     14
+   The address list carries all five lines; the panel height decides how many
+   are actually clocked, so a 1/16-scan 32-row panel simply never drives E.
+
+   All 13 signals route through the GPIO matrix into one LCD_CAM data word
+   (panel.cpp), so the map is arbitrary as far as the driver is concerned. */
+#define HUB75_R1     4
+#define HUB75_G1     5
+#define HUB75_B1     6
+#define HUB75_R2     7
+#define HUB75_G2     15
+#define HUB75_B2     16
+#define HUB75_ADDR_A 18
+#define HUB75_ADDR_B 8
+#define HUB75_ADDR_C 3
+#define HUB75_ADDR_D 42
+#define HUB75_ADDR_E 9           // 64-row panels only
+#define HUB75_CLK    41
+#define HUB75_LAT    40
+#define HUB75_OE     2
 
 
-/* ---- Other MatrixPortal S3 hardware ---- */
-#define I2C_SDA_PIN     16       // STEMMA QT (also the onboard LIS3DH at 0x19)
-#define I2C_SCL_PIN     17
+/* ---- Other Waveshare ESP32-S3-RGB-Matrix hardware ---- */
+#define I2C_SDA_PIN     47       // shared bus: PCF85063 RTC, QMI8658 IMU, SHTC3
+#define I2C_SCL_PIN     48
 
 /* ---- Time ----
-   The MatrixPortal S3 has NO battery-backed RTC chip (unlike the Waveshare board
-   the Split-Flap Gateway runs on, which carries a PCF85063). Wall-clock time is
-   kept in the ESP32's internal RTC, seeded from NTP, and is therefore INVALID
-   from power-on until the first successful sync. Everything downstream already
-   copes: rtcEpochNow() returns 0 while the clock is unset, which is exactly the
-   "RTC not valid yet" path the frame timestamps handle. */
+   This board carries a battery-backed PCF85063 RTC (addr 0x51) on the I2C bus.
+   The SYSTEM clock remains the single source of truth downstream -- everything
+   reads it exactly as before -- but the chip now (a) SEEDS the system clock at
+   boot when it holds a plausible time, so the wall clock is valid seconds after
+   power-on with no network, and (b) is written back on every NTP sync. With no
+   backup cell fitted the chip loses time on power-off and boot falls back to
+   the old wait-for-NTP path; rtcEpochNow() returns 0 until then, which every
+   consumer already handles. */
+#define PCF85063_ADDR     0x51
+#define PCF85063_CTRL1    0x00
+#define PCF85063_SEC_REG  0x04
+#define RTC_YEAR_OFFSET   2000   // PCF85063 reg 6 is 0-99 = 2000-2099
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "1.25.0"   // this product's version (UI + boot log)
+#define FW_VERSION           "2.0.0"   // this product's version (UI + boot log)
 // The gateway REST/MQTT surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it

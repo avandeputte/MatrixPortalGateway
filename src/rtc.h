@@ -1,11 +1,10 @@
 // rtc.h -- wall-clock time: the ESP32's internal RTC + NTP.
 //
-// The API is unchanged from the physical Split-Flap Gateway, which reads a battery-backed
-// PCF85063. The MatrixPortal S3 has no such chip, so the same calls are served by
-// the ESP32's own RTC, seeded from NTP once WiFi is up. The visible difference is
-// that time is INVALID from power-on until the first sync -- rtcNow.valid stays
-// false and rtcEpochNow() returns 0 -- which is exactly the state every caller
-// already handles (an RTC with a flat cell behaves the same way).
+// The API is unchanged from the physical Split-Flap Gateway. The Waveshare
+// board carries the same battery-backed PCF85063: it seeds the system clock at
+// boot (valid time seconds after power-on, no network needed) and is written
+// back on every NTP sync. With no backup cell the old behaviour returns --
+// time is invalid until the first sync, which every caller already handles.
 
 #ifndef MPGW_RTC_H
 #define MPGW_RTC_H

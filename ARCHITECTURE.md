@@ -170,30 +170,42 @@ with no external library. Three properties fall out of that and are load-bearing
   descriptor chain (the data is not duplicated, only the descriptor pointing at it), so the
   weighting is in the DMA schedule, not in any per-pixel gamma lookup.
 
-**The framebuffer cannot leave internal SRAM.** The board's 2 MB PSRAM is **quad** SPI, far too
-slow to feed a display, so `panelBegin()` allocates both framebuffers and the descriptor chains
+**The framebuffer cannot leave internal SRAM — and 16 MB of octal PSRAM did not change that.**
+On the MatrixPortal the argument was speed: 2 MB of *quad* PSRAM was simply too slow to feed a
+display. The Waveshare board's octal PSRAM is fast enough on paper, but the panel's GDMA stream
+and WiFi **share the PSRAM/cache bus**, and the alternative — bounce-buffering frames through
+internal RAM — would put the CPU back inside the refresh loop the whole DMA design exists to
+keep it out of. So `panelBegin()` still allocates both framebuffers and the descriptor chains
 from `MALLOC_CAP_DMA` (internal by definition). That single fact bounds panel size and colour
 depth together — and because WiFi/lwIP draw from the same internal pool, `dispInit()` runs
 *before* `WiFi.mode()` in `setup()` so the panel gets first refusal, and `panelBegin()` **clamps
-the bit depth down until the framebuffer leaves WiFi enough** (`PANEL_RAM_BUDGET`/
-`PANEL_RAM_RESERVE` in `common.h`) rather than boot into a slow-motion malloc failure — since
-1.17.1 it refuses outright only when even depth 1 does not fit, so an over-deep geometry dims
-instead of going blank.
+the bit depth down until the framebuffer leaves WiFi enough** (`PANEL_RAM_BUDGET` — still
+120 KB — and `PANEL_RAM_RESERVE` in `common.h`) rather than boot into a slow-motion malloc
+failure — since 1.17.1 it refuses outright only when even depth 1 does not fit, so an over-deep
+geometry dims instead of going blank.
 
-The same quad-vs-octal fact is why the pinout works at all — an octal-PSRAM S3 module consumes
-GPIO 35/36/37, which this board uses for the HUB75 D, B and B2 lines.
+The octal PSRAM is also why this board's HUB75 pin map is what it is: octal PSRAM consumes
+GPIO 33–37, the range the MatrixPortal map used for its D, B and B2 lines, so the port adopts
+Waveshare's own map (`common.h`) — legal because all thirteen signals route through the GPIO
+matrix into one LCD_CAM data word, so the driver does not care which pins they are.
 
-**The pixel clock is 5 MHz, and that is a radio constraint.** The GDMA chain reads the
-framebuffer out of internal SRAM continuously; at 10 MHz that traffic (~20 MB/s plus the
-descriptor fetches) starved the WiFi MAC, which shares that SRAM — association failed with
-`4WAY_HANDSHAKE_TIMEOUT` at close range and MQTT could not connect. 5 MHz still yields ~157 Hz
-refresh at the default geometry, well above flicker. Do not raise `LCD_CLK_HZ`; if a long chain
-ghosts, lower it.
+**The pixel clock is 5 MHz.** On the MatrixPortal that was a hard radio constraint: the GDMA
+chain reads the framebuffer out of internal SRAM continuously, and at 10 MHz that traffic
+(~20 MB/s plus the descriptor fetches) starved the WiFi MAC, which shares that SRAM —
+association failed with `4WAY_HANDSHAKE_TIMEOUT` at close range and MQTT could not connect.
+**Re-tested on the Waveshare board (a 10 MHz A/B, 2026-07-18): the radio survived** — instant
+association, 0% ping loss, normal HTTP latency. But the payoff 10 MHz would unlock, depth 4 on
+a 256×64 chain at ~80 Hz, is blocked by RAM instead of the clock: that geometry's 144.6 KB
+double-buffered internal framebuffer left 26 KB of free heap and a 1.7 KB minimum — unshippable.
+So `LCD_CLK_HZ` stays 5 MHz (~157 Hz at the default geometry, well above flicker); if the driver
+ever grows single-buffering or PSRAM bounce buffers, 10 MHz + depth 4 becomes worth revisiting.
+If a long chain ghosts, lower the clock, don't raise it.
 
-Conversely, the command log, the MQTT queue and the scheduled-TX ring
-are in PSRAM (`gwPsramAlloc`), precisely to leave that internal SRAM free.
+Conversely, the command log, the MQTT queue, the scheduled-TX ring and the 8 MB on-device
+animation store (`ANIM_MAX_BYTES`, grown from 1.5 MB now that there is 16 MB to draw on)
+are in PSRAM, precisely to leave that internal SRAM free.
 The virtual-module array is the exception — it is pinned to internal RAM, because `taskDisplay`
-walks it 100×/s on the core the refresh runs on, and a quad-PSRAM cache miss there shimmers the
+walks it 100×/s on the core the refresh runs on, and a PSRAM cache miss there shimmers the
 wall. None of the PSRAM structures is on a hot path, in an ISR, or fed by DMA.
 
 If `panelBegin()` still fails — a geometry too big even at depth 1 — the firmware logs why and
@@ -258,28 +270,39 @@ anything this firmware draws.
 
 ## Time
 
-The MatrixPortal S3 has no battery-backed RTC — unlike the Waveshare board upstream, which carries
-a PCF85063. `rtc.cpp` keeps the same API and serves it from the ESP32's internal RTC, seeded from
-NTP with a zero offset (so the system clock is UTC and `mktime` acts as `timegm`).
+The Waveshare board carries a battery-backed **PCF85063** RTC on I2C (SDA=47/SCL=48, addr
+`0x51`) — the same chip the physical Split-Flap Gateway reads. The design decision (`rtc.cpp`)
+is that the **system clock remains the single source of truth**: everything downstream reads
+`gmtime()` exactly as before (synced from NTP with a zero offset, so the system clock is UTC),
+and the chip plays two supporting roles:
 
-The visible difference is that time is **invalid from power-on until the first sync**:
-`rtcNow.valid` stays false and `rtcEpochNow()` returns 0. Every caller already handles that — it
-is exactly the state an RTC with a flat cell produces. Frame timestamps skip work while the
-clock is untrustworthy, and frame timestamps fall back to `HH:MM:SS` uptime.
+- **At boot it seeds the system clock** — so the wall clock is valid seconds after power-on
+  with no network — but only when the reading is *plausible*. Plausibility is a **window, not a
+  floor**: build time … build + 5 years. A floor alone is not enough, because a factory-fresh
+  chip can hold garbage with its oscillator-stop flag clear — this board's first boot read
+  **2056** — and a floor-only check happily seeds the future.
+- **Every successful NTP sync writes the fresh UTC time back** into the chip, so the corrected
+  clock (and its backup cell) carry across power cycles.
+
+With no cell fitted (or a rejected reading) the chip loses time on power-off and boot falls
+back to the old wait-for-NTP path: `rtcNow.valid` stays false and `rtcEpochNow()` returns 0
+until the first sync. Every caller already handles that state — it is exactly what an RTC with
+a flat cell produces — and frame timestamps fall back to `HH:MM:SS` uptime.
 
 The `setenv("TZ", …)` heap leak documented upstream is avoided the same way: TZ is set once at
 boot and again only when the timezone changes; `rtcFormatTime()` computes the UTC epoch by hand.
 
 ## Partition table
 
-`tinyuf2-partitions-8MB.csv` — the board's own scheme: 2 MB `ota_0` + 2 MB `ota_1` (so ArduinoOTA
-and the browser uploader both work), a 256 KB `uf2` factory slot at `0x410000`, and 3776 KB of
-FATFS.
+`partitions-32MB.csv` — written for this board's 32 MB octal flash: **4 MB `app0` + 4 MB
+`app1`** (so ArduinoOTA and the browser uploader both keep working) and **23.9 MB of FATFS**.
 
-Do **not** substitute a generic 8 MB table. The board manifest flashes `tinyuf2.bin` at
-`0x410000`, which lands inside `app1` on most of them, and losing tinyuf2 costs the
-double-tap-reset UF2 bootloader. The firmware currently uses **1.33 MB of the 2 MB app slot**
-(63%), of which the 13 UI translation dictionaries are 61 KB. There is room for many more.
+There is **no `uf2` slot**, because the Waveshare board ships no tinyuf2 bootloader — the
+MatrixPortal's double-tap-reset UF2 recovery does not exist here, and recovery is hold-BOOT +
+esptool instead (`pio run -t upload`). That also removed the old constraint of protecting a
+factory slot at `0x410000`; the table is free to spend the flash on the app slots and FATFS.
+The firmware currently uses **~1.36 MB of the 4 MB app slot** (~32%), so there is enormous
+headroom.
 
 ## Firmware identity vs API level
 

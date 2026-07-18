@@ -3,14 +3,19 @@ info:
   title: Matrix Portal Gateway API
   version: "3.1"
   description: |
-    REST API for the **Matrix Portal Gateway** firmware, running on an
-    Adafruit MatrixPortal ESP32-S3. It emulates a wall of split-flap modules on a HUB75 LED
-    matrix and speaks the Split-Flap Gateway's API, so existing clients work unchanged.
+    REST API for the **Matrix Portal Gateway** firmware, running on a
+    Waveshare ESP32-S3-RGB-Matrix driver board. It emulates a wall of split-flap modules on a
+    HUB75 LED matrix and speaks the Split-Flap Gateway's API, so existing clients work unchanged.
+
+    **Firmware 2.0 changed the target board, not the API.** Versions up to 1.25.0 ran on the
+    Adafruit MatrixPortal S3 (that final build lives on the `matrixportal` git branch); the port
+    is hardware-only, so every endpoint, schema and behaviour documented here is identical on
+    both boards.
 
     **The `version` above is the gateway API level (3.1), not the firmware's version.** That is
     deliberate: the companion app gates its features on reading `>= 3.1` from `GET /api/config`,
     so this firmware answers `3.1.0` there and reports its own firmware version (currently
-    `1.24.0`) in `fwVersion`, next to `product`. See ARCHITECTURE.md → "Firmware identity vs
+    `2.0.0`) in `fwVersion`, next to `product`. See ARCHITECTURE.md → "Firmware identity vs
     API level".
 
     Endpoints for calibration and provisioning are absent by design — this product's modules are
@@ -904,7 +909,7 @@ paths:
                 type: object
                 properties:
                   product:  { type: string, example: "Matrix Portal Gateway" }
-                  fw:       { type: string, example: "1.24.0" }
+                  fw:       { type: string, example: "2.0.0" }
                   api:      { type: string, example: "3.1.0" }
                   grid:
                     type: object
@@ -1606,7 +1611,7 @@ components:
       properties:
         version:      { type: string,  example: "3.1.0", description: "The gateway API level, NOT this firmware's version — the companion parses MAJOR.MINOR out of it and gates its features on >= 3.1. `product` and `fwVersion` are what tell the firmwares apart. Absent on pre-3.1 gateways" }
         product:      { type: string,  example: "Matrix Portal Gateway" }
-        fwVersion:    { type: string,  example: "1.24.0", description: "This firmware's own version" }
+        fwVersion:    { type: string,  example: "2.0.0", description: "This firmware's own version" }
         wSSID:        { type: string,  example: "MyNetwork" }
         mqHost:       { type: string,  example: "192.168.1.50" }
         mqPort:       { type: integer, example: 1883 }

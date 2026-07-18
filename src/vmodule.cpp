@@ -107,14 +107,11 @@ void vmInit(int count) {
   if (count < 1) count = 1;
   if (count > VM_MAX_MODULES) count = VM_MAX_MODULES;
   // INTERNAL RAM, deliberately -- not gwPsramAlloc like the large buffers.
-  // taskDisplay walks this array a hundred times a second (vmTick) on the core
-  // the panel driver's setup ran on. This board's PSRAM is quad SPI: a cache
-  // miss stalls the pipeline for most of a microsecond, and in the old
-  // ISR-driven driver that visibly wandered the OE window (an idle wall that
-  // shimmers -- see platformio.ini). Today's driver refreshes by GDMA with no
-  // CPU involvement, but the array is small (~40 B/module) and hot, so it stays
-  // internal. The command log and the MQTT queue stay in PSRAM -- nothing on
-  // the display path touches them. ~2 KB for a 45-module wall.
+  // taskDisplay walks this array a hundred times a second (vmTick). The
+  // Waveshare board's octal PSRAM is far faster than the MatrixPortal's quad
+  // part that set this rule, but the array is tiny (~16 B/module) and hot, so
+  // there is nothing to win by moving it. The command log and the MQTT queue
+  // stay in PSRAM -- nothing on the display path touches them.
   size_t vmBytes = sizeof(VModule) * (size_t)count;
   vmods = (VModule*) heap_caps_malloc(vmBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (!vmods) { printf("[VM] FATAL: cannot allocate %d modules\n", count); return; }
