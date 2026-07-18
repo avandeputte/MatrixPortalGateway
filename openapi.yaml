@@ -969,7 +969,7 @@ paths:
                     type: array
                     description: "Capability tokens a client checks instead of sniffing the firmware version. 'canvas', 'effects' and 'ticker' appear on the Matrix gateway only."
                     items: { type: string }
-                    example: ["cells","colors","index","lowercase","pictographs","quiet","maintenance","ha","ota","canvas","effects","ticker"]
+                    example: ["cells","colors","index","lowercase","pictographs","quiet","ha","ota","canvas","effects","ticker"]
 
   /api/status:
     get:
@@ -1018,47 +1018,6 @@ paths:
                   state:  { type: integer, description: "PubSubClient state code" }
                   detail: { type: string,  example: "bad username or password" }
 
-  /api/maintenance:
-    get:
-      tags: [Status]
-      summary: Get maintenance-mode state
-      responses:
-        "200":
-          description: Current state
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  ok: { type: boolean, example: true }
-                  on: { type: boolean, example: false }
-    post:
-      tags: [Status]
-      summary: Enable or disable maintenance mode
-      description: |
-        When enabled, the gateway ignores all commands arriving via MQTT and
-        does not relay them to the RS-485 bus. The web UI / REST API continue to
-        work normally. Always resets to off on reboot (not persisted).
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [on]
-              properties:
-                on: { type: boolean }
-            example: { on: true }
-      responses:
-        "200":
-          description: New state
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  ok: { type: boolean, example: true }
-                  on: { type: boolean, example: true }
 
   /api/quiet:
     get:
@@ -1592,7 +1551,6 @@ components:
         modules:   { type: integer, example: 45 }
         time:      { type: string,  description: "Local RTC time", example: "2026-06-10 14:32:01" }
         ntpSynced: { type: boolean, example: true }
-        maint:     { type: boolean, description: "true if maintenance mode is on (external MQTT commands ignored)", example: false }
         quiet:     { type: boolean, description: "true if quiet time is on (flaps do not move for display updates)", example: false }
         minheap:   { type: integer, description: "Minimum free heap ever observed (bytes)", example: 98000 }
         stk:

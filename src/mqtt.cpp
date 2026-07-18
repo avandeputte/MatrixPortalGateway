@@ -87,12 +87,12 @@ void mqttPublishStatus() {
     "\"maxblk\":%u,\"psram\":%u,\"rssi\":%d,\"wifi\":%s,"
     "\"stkbus\":%u,\"stkweb\":%u,\"stknet\":%u,\"stkota\":%u,\"stkrtc\":%u,\"stkdisp\":%u,"
     "\"ip\":\"%s\",\"url\":\"http://%s/\",\"version\":\"%s\","
-    "\"maintenance\":%s,\"quiet\":%s}",
+    "\"quiet\":%s}",
     millis()/1000, rxCount, txCount, vmCount,
     timeBuf, ntpSynced?"true":"false", freeHeap, minHeap,
     maxBlk, (unsigned)ESP.getFreePsram(), rssi, (WiFi.status()==WL_CONNECTED)?"true":"false",
     sBus, sWeb, sNet, sOta, sRtc, sDsp,
-    ip, ip, FW_VERSION, gMaintenanceMode?"true":"false", gQuietTime?"true":"false");
+    ip, ip, FW_VERSION, gQuietTime?"true":"false");
   if (n >= sizeof(buf)) n = sizeof(buf) - 1;
   char _t[80];
   snprintf(_t, sizeof(_t), "%s/status", cfg.mqttPrefix);
@@ -137,14 +137,12 @@ bool mqttPublishDisplayState() {
   return true;
 }
 
-// Publish the HA-facing entity state topics (maintenance + quiet switches, and
-// the display string). Called on connect, on any toggle, and when display
-// tracking changes. No-op unless HA integration is enabled.
+// Publish the HA-facing entity state topics (the quiet switch and the display
+// string). Called on connect, on any toggle, and when display tracking
+// changes. No-op unless HA integration is enabled.
 void mqttPublishStateTopics() {
   if (!mqtt.connected() || !cfg.haEnabled) return;
   char t[80];
-  snprintf(t, sizeof(t), "%s/maintenance/state", cfg.mqttPrefix);
-  mqttEnqueue(t, gMaintenanceMode ? "ON" : "OFF", gMaintenanceMode ? 2 : 3);
   snprintf(t, sizeof(t), "%s/quiet/state", cfg.mqttPrefix);
   mqttEnqueue(t, gQuietTime ? "ON" : "OFF", gQuietTime ? 2 : 3);
   mqttPublishDisplayState();
@@ -182,16 +180,7 @@ void haPublishDiscovery(bool enable) {
     mqttEnqueue(topic, pl, strlen(pl));
   } else mqttEnqueue(topic, "", 0);
 
-  // 2) Maintenance mode switch.
-  snprintf(topic, sizeof(topic), "homeassistant/switch/%s/maintenance/config", node);
-  if (enable) {
-    snprintf(pl, sizeof(pl),
-      "{\"name\":\"Maintenance Mode\",\"uniq_id\":\"%s_maint\",\"cmd_t\":\"%s/maintenance/set\","
-      "\"stat_t\":\"%s/maintenance/state\",\"ic\":\"mdi:wrench\",%s}", node, pfx, pfx, dev);
-    mqttEnqueue(topic, pl, strlen(pl));
-  } else mqttEnqueue(topic, "", 0);
-
-  // 3) Quiet Time switch.
+  // 2) Quiet Time switch.
   snprintf(topic, sizeof(topic), "homeassistant/switch/%s/quiet/config", node);
   if (enable) {
     snprintf(pl, sizeof(pl),
@@ -200,7 +189,7 @@ void haPublishDiscovery(bool enable) {
     mqttEnqueue(topic, pl, strlen(pl));
   } else mqttEnqueue(topic, "", 0);
 
-  // 4) Diagnostic sensors -- all read the <prefix>/status JSON via value_template.
+  // 3) Diagnostic sensors -- all read the <prefix>/status JSON via value_template.
   //    Mirrors the [WDG] heartbeat: heap/min/maxblk/psram, the six
   //    per-task stack high-water marks, plus connectivity and identity.
   struct DiagS { const char* obj; const char* name; const char* fld; const char* unit; const char* dc; const char* ic; };
@@ -240,10 +229,13 @@ void haPublishDiscovery(bool enable) {
     } else mqttEnqueue(topic, "", 0);
   }
 
-  // v1.20: the bus task's stack sensor moved from object id "stk485" to "stkbus".
-  // Delete the old retained discovery config so a broker that saw earlier
-  // firmware does not keep a dead sensor around.
+  // Retained-config cleanup for entities earlier firmware advertised: the bus
+  // task's stack sensor moved from "stk485" to "stkbus" (v1.20), and the
+  // Maintenance Mode switch was removed outright (v1.21 -- it was the physical
+  // gateway's service mode, and there is nothing to service here).
   snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/stk485/config", node);
+  mqttEnqueue(topic, "", 0);
+  snprintf(topic, sizeof(topic), "homeassistant/switch/%s/maintenance/config", node);
   mqttEnqueue(topic, "", 0);
 
   printf("[HA] Discovery %s (node %s)\n", enable ? "published" : "removed", node);
@@ -252,9 +244,8 @@ void haPublishDiscovery(bool enable) {
 //                          {"id":-1,"text":"HELLO","start":0}  multi-module text
 //   <prefix>/flap/home     {"id":5}  or  {"id":-1}  (broadcast)
 static void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  // Control topics are handled FIRST, before the maintenance-mode gate, so the
-  // maintenance and quiet switches remain reachable over MQTT/HA even while
-  // maintenance mode is on (otherwise you could never turn it back off remotely).
+  // Control topics are handled first, before any JSON parsing: their payloads
+  // are plain ON/OFF strings.
   if (length < MQTT_BUF_SIZE) {
     static char cbuf[64];
     size_t cl = length < sizeof(cbuf) - 1 ? length : sizeof(cbuf) - 1;
@@ -264,13 +255,6 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     bool on = (strcasecmp(cbuf, "ON") == 0 || strcasecmp(cbuf, "true") == 0 ||
                strcasecmp(cbuf, "1") == 0);
     char ctl[80];
-    snprintf(ctl, sizeof(ctl), "%s/maintenance/set", cfg.mqttPrefix);
-    if (strcmp(topic, ctl) == 0) {
-      gMaintenanceMode = on;
-      printf("[MAINT] Maintenance mode %s (MQTT)\n", on ? "ENABLED" : "disabled");
-      mqttPublishStateTopics();
-      return;
-    }
     snprintf(ctl, sizeof(ctl), "%s/quiet/set", cfg.mqttPrefix);
     if (strcmp(topic, ctl) == 0) {
       // The quiet SCHEDULE is authoritative inside its window: refuse an external
@@ -286,13 +270,6 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
       mqttPublishStateTopics();
       return;
     }
-  }
-  // Maintenance mode: ignore all externally-originated DISPLAY commands. Nothing
-  // from MQTT is relayed to the bus while this is on; only the gateway's own web
-  // UI / REST API can drive the display.
-  if (gMaintenanceMode) {
-    DBG("[MQTT] ignored (maintenance mode): %s\n", topic);
-    return;
   }
   if (length >= MQTT_BUF_SIZE) return;
   // static (not stack): mqttCallback is invoked only from mqtt.loop() in
@@ -440,7 +417,6 @@ void mqttConnect() {
     snprintf(t,sizeof(t),"%s/flap/set",       cfg.mqttPrefix); mqtt.subscribe(t);
     snprintf(t,sizeof(t),"%s/flap/home",      cfg.mqttPrefix); mqtt.subscribe(t);
     snprintf(t,sizeof(t),"%s/display/set",    cfg.mqttPrefix); mqtt.subscribe(t);
-    snprintf(t,sizeof(t),"%s/maintenance/set",cfg.mqttPrefix); mqtt.subscribe(t);
     snprintf(t,sizeof(t),"%s/quiet/set",      cfg.mqttPrefix); mqtt.subscribe(t);
     // Home Assistant integration: publish discovery + initial entity state.
     if (cfg.haEnabled) {

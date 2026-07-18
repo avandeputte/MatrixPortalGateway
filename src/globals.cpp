@@ -9,11 +9,6 @@
 // Debug flag read by the DBG() macro. Mirrors cfg.serialDebug, kept in sync in
 // loadConfig() and handleApiConfigSettings().
 volatile bool gSerialDebug = false;
-// Maintenance mode: when true, external commands arriving via MQTT are ignored
-// and not relayed to the virtual modules. The web UI / REST API (the gateway
-// itself) continue to work normally. Always OFF at boot -- never persisted -- so a
-// reboot is a guaranteed return to normal operation.
-volatile bool gMaintenanceMode = false;
 // Quiet Time: when true the gateway still accepts and acknowledges every command,
 // but does NOT transmit normal display-motion frames to the bus (show character,
 // show index, and home), so the flaps stay still during quiet hours. What each
@@ -28,7 +23,8 @@ volatile bool gMaintenanceMode = false;
 // goes out as m*h through busSend -> vbus -> vmodule, so the panel visibly flips
 // down to blank.
 //
-// Runtime-only -- OFF at boot, never persisted -- like maintenance mode.
+// Runtime-only -- OFF at boot, never persisted -- so a reboot is a guaranteed
+// return to normal operation.
 volatile bool gQuietTime = false;
 // Last status the companion app reported, and when (millis). Runtime-only.
 char gCompanionStatus[80] = "";

@@ -1,5 +1,26 @@
 # Matrix Portal Gateway — Release Notes
 
+## v1.21.0 — 2026-07-18
+
+### Removed
+
+- **Maintenance mode is gone.** It was the physical gateway's service mode — ignore
+  external MQTT commands so an operator could calibrate or repair modules without
+  automations fighting them. This product has nothing to service: the modules are drawn,
+  calibration does not exist, and Quiet Time already covers "hold the display still".
+  Removed end-to-end: the `/api/maintenance` endpoint, the `<prefix>/maintenance/set`
+  MQTT topic and its command gate, the Home Assistant "Maintenance Mode" switch (its
+  retained discovery config is deleted on connect, like the v1.20 `stk485` cleanup),
+  the `maint`/`maintenance` fields in `/api/status` and the MQTT status JSON, the
+  `maintenance` capabilities token, and the dashboard's yellow maintenance banner with
+  its CSS and translations. Neither the companion nor the web UI ever depended on it.
+- **The Monitor tab is gone from the dashboard.** The command-log viewer and the raw
+  Send Frame card were bus-debugging surfaces inherited from the physical gateway; with
+  no wire to debug they earned their keep poorly, and the 600 ms `/api/log` poll they ran
+  was the dashboard's chattiest request. The REST surface is untouched — `GET /api/log`
+  and `POST /api/bus/send` (with `{"raw":true}`) still exist for scripted debugging —
+  and the embedded page shrank by ~24 KB.
+
 ## v1.20.0 — 2026-07-18
 
 A full-codebase audit release: the RS-485 terminology is gone, the last physical-gateway

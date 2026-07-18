@@ -18,9 +18,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 
 | English | Where | What kind of thing it is |
 |---|---|---|
-| `(raw)` | — | RUNTIME MESSAGE (shown after an action, in doSend()) |
 | `.local` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
-| `0 entries` | Monitor tab (live REST/MQTT command log) | INLINE TEXT; RUNTIME MESSAGE (shown after an action, in clearLog()) |
 | `128×32 · 15×3 grid — standard (6×9 font)` | Settings tab | DROPDOWN OPTION |
 | `128×64 · 10×3 grid — large flaps (10×20 font)` | Settings tab | DROPDOWN OPTION |
 | `128×64 · 15×5 grid — full wall, 75 modules (6×10 font)` | Settings tab | DROPDOWN OPTION |
@@ -34,7 +32,6 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Auckland (UTC+12/+13)` | Settings tab | DROPDOWN OPTION |
 | `Auto` | Settings tab | EMPHASIS |
 | `Auto (browser)` | — | RUNTIME MESSAGE (shown after an action, in go()) |
-| `Auto-scroll` | — | (built at runtime) |
 | `Automatically enable Quiet Time on a daily schedule. When the window opens the gateway blanks the display and stops moving flaps for normal updates. The display is restored when the window ends. Times are in your browser's local time zone.` | Settings tab | HELP TEXT (a full sentence) |
 | `Azores (UTC-1/0)` | Settings tab | DROPDOWN OPTION |
 | `Bangkok (UTC+7 no DST)` | Settings tab | DROPDOWN OPTION |
@@ -47,7 +44,6 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Changing it creates or destroys modules — reboot to apply.` | Settings tab | EMPHASIS |
 | `Character` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Choose a layout…` | Settings tab | DROPDOWN OPTION |
-| `Clear` | Monitor tab (live REST/MQTT command log) | BUTTON (an action -- use the imperative) |
 | `Clock` | Status tab (diagnostics) | HEADING |
 | `Color depth (bitplanes, 1-6)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Columns` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
@@ -57,12 +53,10 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Connected` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
 | `Could not load display state` | — | RUNTIME MESSAGE (shown after an action, in refreshWall()) |
 | `Currently` | — | (built at runtime) |
-| `Data (ASCII)` | Monitor tab (live REST/MQTT command log) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Debug disabled` | — | RUNTIME MESSAGE (shown after an action, in saveDebug()) |
 | `Debug enabled` | — | RUNTIME MESSAGE (shown after an action, in saveDebug()) |
 | `Dhaka (UTC+6 no DST)` | Settings tab | DROPDOWN OPTION |
 | `Display` | — | TAB / LINK LABEL (a noun) |
-| `Download Log` | Monitor tab (live REST/MQTT command log) | BUTTON (an action -- use the imperative) |
 | `Dubai (UTC+4 no DST)` | Settings tab | DROPDOWN OPTION |
 | `Enable Home Assistant integration` | — | (built at runtime) |
 | `Enable Serial Debug Output` | — | (built at runtime) |
@@ -70,7 +64,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Enable verbose serial output on the native USB serial port (115200 baud). Shows every RX/TX frame, MQTT events, and module activity.` | Settings tab | HELP TEXT (a full sentence) |
 | `Enter a character` | — | RUNTIME MESSAGE (shown after an action, in sendChar()) |
 | `Error` | — | RUNTIME MESSAGE (shown after an action, in g()) |
-| `Error:` | — | RUNTIME MESSAGE (shown after an action); RUNTIME MESSAGE (shown after an action, in applyGeomPreset()); RUNTIME MESSAGE (shown after an action, in doSend()); RUNTIME MESSAGE (shown after an action, in g()); RUNTIME MESSAGE (shown after an action, in saveDebug()); RUNTIME MESSAGE (shown after an action, in saveGrid()); RUNTIME MESSAGE (shown after an action, in saveHa()); RUNTIME MESSAGE (shown after an action, in saveHost()); RUNTIME MESSAGE (shown after an action, in saveMqtt()); RUNTIME MESSAGE (shown after an action, in saveOTA()); RUNTIME MESSAGE (shown after an action, in savePanel()); RUNTIME MESSAGE (shown after an action, in saveTz()); RUNTIME MESSAGE (shown after an action, in saveWifi()); RUNTIME MESSAGE (shown after an action, in sendChar()); RUNTIME MESSAGE (shown after an action, in sendIndex()); RUNTIME MESSAGE (shown after an action, in sendText()); RUNTIME MESSAGE (shown after an action, in testMqtt()) |
+| `Error:` | — | RUNTIME MESSAGE (shown after an action); RUNTIME MESSAGE (shown after an action, in applyGeomPreset()); RUNTIME MESSAGE (shown after an action, in g()); RUNTIME MESSAGE (shown after an action, in saveDebug()); RUNTIME MESSAGE (shown after an action, in saveGrid()); RUNTIME MESSAGE (shown after an action, in saveHa()); RUNTIME MESSAGE (shown after an action, in saveHost()); RUNTIME MESSAGE (shown after an action, in saveMqtt()); RUNTIME MESSAGE (shown after an action, in saveOTA()); RUNTIME MESSAGE (shown after an action, in savePanel()); RUNTIME MESSAGE (shown after an action, in saveTz()); RUNTIME MESSAGE (shown after an action, in saveWifi()); RUNTIME MESSAGE (shown after an action, in sendChar()); RUNTIME MESSAGE (shown after an action, in sendIndex()); RUNTIME MESSAGE (shown after an action, in sendText()); RUNTIME MESSAGE (shown after an action, in testMqtt()) |
 | `Failed:` | — | RUNTIME MESSAGE (shown after an action, in testMqtt()) |
 | `Flap Index (0-236)` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Flip speed (ms per flap)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
@@ -104,7 +98,6 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Localization` | Settings tab | HEADING (card title -- a noun phrase) |
 | `London (UTC+0/+1)` | Settings tab | DROPDOWN OPTION |
 | `Lowest minimum-ever free stack across tasks. Trending toward 0 warns of a stack overflow before it crashes.` | Status tab (diagnostics) | TOOLTIP |
-| `MAINTENANCE MODE - external MQTT commands are being ignored` | — | (built at runtime) |
 | `MQTT` | Settings tab; Status tab (diagnostics) | HEADING (card title -- a noun phrase); TEXT |
 | `MQTT saved - reconnecting...` | — | RUNTIME MESSAGE (shown after an action, in saveMqtt()) |
 | `Matrix Portal Gateway` | — | TITLE |
@@ -115,14 +108,12 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Module ID (-1 = all)` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Module Wall` | Settings tab | HEADING (card title -- a noun phrase) |
 | `Modules` | Status tab (diagnostics) | TEXT |
-| `Monitor` | Monitor tab (live REST/MQTT command log) | HEADING (card title -- a noun phrase); TAB / LINK LABEL (a noun) |
 | `Moscow (UTC+3 no DST)` | Settings tab | DROPDOWN OPTION |
 | `NTP Server` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `NTP Sync` | Status tab (diagnostics) | TEXT |
 | `Network` | Settings tab; Status tab (diagnostics) | HEADING; HEADING (card title -- a noun phrase) |
 | `Network name` | Settings tab | INPUT PLACEHOLDER (example text) |
 | `Not registered` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
-| `Nothing to send.` | — | RUNTIME MESSAGE (shown after an action, in doSend()) |
 | `OTA Firmware Update` | Settings tab | HEADING (card title -- a noun phrase) |
 | `OTA Password` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `OTA password saved` | — | RUNTIME MESSAGE (shown after an action, in saveOTA()) |
@@ -135,7 +126,6 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Panel width (px)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Paris/Berlin (UTC+1/+2)` | Settings tab | DROPDOWN OPTION |
 | `Password` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
-| `Pause` | — | (built at runtime) |
 | `Pending` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
 | `Playlists` | — | TAB / LINK LABEL (a noun) |
 | `Port` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
@@ -144,7 +134,6 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Pub: .../rx   .../tx   .../status   .../display/state` | — | (built at runtime) |
 | `QUIET TIME - the display is blanked and flaps will not move. It is restored when Quiet Time ends` | — | TEXT |
 | `Quiet Time Schedule` | Settings tab | HEADING (card title -- a noun phrase) |
-| `Raw — send verbatim, skip sanitizing & framing (debug)` | — | (built at runtime) |
 | `Reboot (power-cycle) to apply.` | Settings tab | EMPHASIS |
 | `Reboot to apply.` | Settings tab | EMPHASIS |
 | `Rows` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
@@ -161,15 +150,13 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Saved` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()); RUNTIME MESSAGE (shown after an action, in g()) |
 | `Saved — reboot to apply` | — | (built at runtime) |
 | `Saving...` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()); RUNTIME MESSAGE (shown after an action, in saveHost()) |
-| `Send` | Monitor tab (live REST/MQTT command log) | BUTTON (an action -- use the imperative) |
 | `Send Character` | Display tab (send text/characters to the wall) | BUTTON (an action -- use the imperative) |
-| `Send Frame` | Monitor tab (live REST/MQTT command log) | HEADING (card title -- a noun phrase) |
 | `Send Index` | Display tab (send text/characters to the wall) | BUTTON (an action -- use the imperative) |
 | `Send Single Character` | Display tab (send text/characters to the wall) | HEADING (card title -- a noun phrase) |
 | `Send Text to Display` | Display tab (send text/characters to the wall) | HEADING (card title -- a noun phrase) |
 | `Send by Index` | Display tab (send text/characters to the wall) | HEADING (card title -- a noun phrase) |
 | `Send to Display` | Display tab (send text/characters to the wall) | BUTTON (an action -- use the imperative) |
-| `Sent` | — | RUNTIME MESSAGE (shown after an action, in doSend()); RUNTIME MESSAGE (shown after an action, in sendChar()); RUNTIME MESSAGE (shown after an action, in sendIndex()); RUNTIME MESSAGE (shown after an action, in sendText()) |
+| `Sent` | — | RUNTIME MESSAGE (shown after an action, in sendChar()); RUNTIME MESSAGE (shown after an action, in sendIndex()); RUNTIME MESSAGE (shown after an action, in sendText()) |
 | `Serial Debug` | Settings tab | HEADING (card title -- a noun phrase) |
 | `Set by the ?lang= in the URL.` | — | RUNTIME MESSAGE (shown after an action, in go()) |
 | `Settings` | — | TAB / LINK LABEL (a noun) |
@@ -180,7 +167,6 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Stack Min (task)` | Status tab (diagnostics) | TEXT |
 | `Start Module ID` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Status` | — | TAB / LINK LABEL (a noun) |
-| `Stops fetching. Entries beyond the 64-entry ring are lost while paused.` | Monitor tab (live REST/MQTT command log) | TOOLTIP |
 | `Sub: .../send   .../flap/set   .../flap/home   .../display/set   .../maintenance/set   .../quiet/set` | — | (built at runtime) |
 | `Sydney (UTC+10/+11)` | Settings tab | DROPDOWN OPTION |
 | `Synced` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
@@ -198,7 +184,6 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Tokyo (UTC+9 no DST)` | Settings tab | DROPDOWN OPTION |
 | `Topic Prefix` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Triggers` | — | TAB / LINK LABEL (a noun) |
-| `Turn Off Maintenance` | — | BUTTON (an action -- use the imperative) |
 | `US Central (UTC-6/-5)` | Settings tab | DROPDOWN OPTION |
 | `US Eastern (UTC-5/-4)` | Settings tab | DROPDOWN OPTION |
 | `US Mountain (UTC-7/-6)` | Settings tab | DROPDOWN OPTION |

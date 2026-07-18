@@ -138,7 +138,7 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
    "RTC not valid yet" path the frame timestamps handle. */
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "1.20.0"   // this product's version (UI + boot log)
+#define FW_VERSION           "1.21.0"   // this product's version (UI + boot log)
 // The gateway REST/MQTT surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it
@@ -353,7 +353,6 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
  *  SHARED INFRASTRUCTURE  (cross-cutting; defined once in globals.cpp)
  * ==========================================================================*/
 extern volatile bool gSerialDebug;
-extern volatile bool gMaintenanceMode;
 extern volatile bool gQuietTime;
 extern char gCompanionStatus[80];
 extern char gCompanionTabs[COMPANION_TABS_MAX];   // the companion's tabs, already serialised JSON

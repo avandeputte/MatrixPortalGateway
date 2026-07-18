@@ -20,7 +20,6 @@ static void handleApiConfigWifi();
 static void handleApiDisplayState();
 static void handleApiHome();
 static void handleApiIndex();
-static void handleApiMaintenance();
 static void handleApiMessages();
 static void handleApiModules();
 static void handleApiMqttTest();
@@ -710,7 +709,7 @@ static void handleApiCapabilities() {
   // What the wall can DO, not just show, so a client reads this instead of sniffing the
   // firmware version and guessing.
   capPut("\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
-         "\"quiet\",\"maintenance\",\"ha\",\"ota\",\"canvas\",\"effects\",\"ticker\"]}");
+         "\"quiet\",\"ha\",\"ota\",\"canvas\",\"effects\",\"ticker\"]}");
   capFlush();
   server.sendContent("");
 }
@@ -739,7 +738,7 @@ static void handleApiStatus() {
     "\"stk\":{\"bus\":%u,\"web\":%u,\"net\":%u,\"ota\":%u,\"rtc\":%u,\"disp\":%u},"
     "\"panel\":{\"ok\":%s,\"w\":%u,\"h\":%u,\"cols\":%u,\"rows\":%u,"
     "\"cellW\":%u,\"cellH\":%u,\"depth\":%u,\"font\":\"%s\",\"vmods\":%d,\"drop\":%lu},"
-    "\"time\":\"%s\",\"ntpSynced\":%s,\"maint\":%s,\"quiet\":%s,"
+    "\"time\":\"%s\",\"ntpSynced\":%s,\"quiet\":%s,"
     "\"companion\":{\"url\":\"%s\",\"status\":\"%s\",\"age\":%ld}}",
     millis()/1000, rxCount, txCount,
     (WiFi.status()==WL_CONNECTED)?"true":"false",
@@ -754,7 +753,6 @@ static void handleApiStatus() {
     dispFontName(), vmCount, vbusDropped,
     rtcBuf,
     ntpSynced?"true":"false",
-    gMaintenanceMode?"true":"false",
     gQuietTime?"true":"false",
     cfg.companionUrl, gCompanionStatus, compAge);
   server.send(200, "application/json", out);
@@ -1060,27 +1058,6 @@ static void handleApiMqttTest() {
   snprintf(out, sizeof(out),
     "{\"ok\":%s,\"tcp\":true,\"mqtt\":%s,\"state\":%d,\"detail\":\"%s\"}",
     mqOk ? "true" : "false", mqOk ? "true" : "false", state, why);
-  server.send(200, "application/json", out);
-}
-
-// GET/POST /api/maintenance
-static void handleApiMaintenance() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  // GET returns current state; POST {"on":true|false} sets it.
-  if (server.method() == HTTP_POST) {
-    if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
-    JsonDocument doc;
-    if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-      sendJsonError(400, "Bad JSON"); return;
-    }
-    if (!doc["on"].is<bool>()) { sendJsonError(400, "'on' (bool) required"); return; }
-    gMaintenanceMode = doc["on"].as<bool>();
-    printf("[MAINT] Maintenance mode %s\n", gMaintenanceMode ? "ENABLED" : "disabled");
-    mqttPublishStateTopics();
-  }
-  char out[40];
-  snprintf(out, sizeof(out), "{\"ok\":true,\"on\":%s}",
-           gMaintenanceMode ? "true" : "false");
   server.send(200, "application/json", out);
 }
 
@@ -1908,9 +1885,6 @@ void webInit() {
   server.on("/api/status",           HTTP_GET,     handleApiStatus);
   server.on("/api/mqtt/test",        HTTP_POST,    handleApiMqttTest);
   server.on("/api/mqtt/test",        HTTP_OPTIONS, handleOptions);
-  server.on("/api/maintenance",      HTTP_GET,     handleApiMaintenance);
-  server.on("/api/maintenance",      HTTP_POST,    handleApiMaintenance);
-  server.on("/api/maintenance",      HTTP_OPTIONS, handleOptions);
   server.on("/api/quiet",            HTTP_GET,     handleApiQuiet);
   server.on("/api/quiet",            HTTP_POST,    handleApiQuiet);
   server.on("/api/quiet",            HTTP_OPTIONS, handleOptions);
