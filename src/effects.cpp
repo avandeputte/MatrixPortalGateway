@@ -20,6 +20,8 @@ extern bool rtcLocalNow(struct tm* out);   // broken-down local time from rtc.cp
 volatile uint8_t gEffect      = EFFECT_NONE;
 volatile uint8_t gEffectSpeed = 4;
 volatile uint8_t gEffectReq   = EFFECT_REQ_IDLE;   // pending start, picked up by taskDisplay
+volatile int     gEffectHue     = -1;              // -1 = effect default; else 0..255 (see effects.h)
+volatile int     gEffectDensity = -1;              // -1 = effect default; else 1..100
 
 #define FX_MAXW      256                  // widest panel the firmware supports
 #define FX_MAXCELLS  260                  // most flap cells (>= any wall grid)
@@ -187,7 +189,8 @@ static int flipGate() { int g = 7 - gEffectSpeed / 2; return g < 2 ? 2 : g; }
 static void renderFliporama() {
   if (fxTick % flipGate() == 0) {
     stepFlips();
-    int nTrigger = 1 + cellN / 24;              // a few new flips each gated step
+    const int dens = (gEffectDensity >= 0) ? gEffectDensity : 50;   // churn; 50 == the classic rate
+    int nTrigger = 1 + cellN * dens / 1200;     // a few new flips each gated step
     for (int k = 0; k < nTrigger; k++) {
       int i = (int)(rnd() % (uint32_t)cellN);
       if (!cellFlip[i]) { cellNxt[i] = (uint8_t)randGlyph(); cellFlip[i] = (uint8_t)FLIP_LEN; }
@@ -345,7 +348,8 @@ static uint8_t* lifeCur = nullptr;
 
 static void seedLife(int W, int H) {
   if (!lifeCur) return;
-  for (int i = 0; i < W * H; i++) lifeCur[i] = (rnd() % 100 < 28) ? 1 : 0;   // ~28% alive
+  const int seed = (gEffectDensity >= 0) ? gEffectDensity : 28;   // % alive, default ~28
+  for (int i = 0; i < W * H; i++) lifeCur[i] = ((int)(rnd() % 100) < seed) ? 1 : 0;
 }
 
 static void stepLife(int W, int H) {
@@ -385,9 +389,16 @@ static void renderLife(int W, int H) {
     for (int x = 0; x < W; x++) {
       uint8_t a = cells[y * W + x];
       if (!a) { panelPixel(x, y, 0, 0, 0); continue; }
-      if (a <= 2) panelPixel(x, y, 180, 255, 190);              // newborn: bright white-green
-      else { uint8_t g = (uint8_t)(120 + (a > 135 ? 135 : a));  // older: steadier green, glowing
-             panelPixel(x, y, 0, g, a > 90 ? 60 : 0); }
+      if (gEffectHue < 0) {                                      // classic green colouring
+        if (a <= 2) panelPixel(x, y, 180, 255, 190);            // newborn: bright white-green
+        else { uint8_t g = (uint8_t)(120 + (a > 135 ? 135 : a)); // older: steadier green, glowing
+               panelPixel(x, y, 0, g, a > 90 ? 60 : 0); }
+      } else {                                                   // tinted by hue, brightness by age
+        uint8_t hr, hg, hb; hsv((uint8_t)gEffectHue, hr, hg, hb);
+        if (a <= 2) panelPixel(x, y, (uint8_t)(128 + hr / 2), (uint8_t)(128 + hg / 2), (uint8_t)(128 + hb / 2));
+        else { uint8_t lv = (uint8_t)(120 + (a > 135 ? 135 : a));
+               panelPixel(x, y, (uint8_t)(hr * lv / 255), (uint8_t)(hg * lv / 255), (uint8_t)(hb * lv / 255)); }
+      }
     }
   panelShow();
 }
@@ -434,6 +445,7 @@ static void renderPlasma() {
       uint8_t c = sinT[(uint8_t)((x + y) + (t >> 1))];
       uint8_t d = sinT[(uint8_t)((x - y) + t)];
       uint8_t idx = (uint8_t)(((int)a + b + c + d) >> 2);
+      if (gEffectHue >= 0) idx = (uint8_t)(idx + gEffectHue);   // tint: rotate the palette
       panelPixel(x, y, plasmaPal[idx][0], plasmaPal[idx][1], plasmaPal[idx][2]);
     }
   panelShow();
@@ -481,13 +493,19 @@ static void renderMatrix() {
       mSpeed[x] = (uint8_t)(4 + (rnd() % 12));
       hy = mHead[x] >> 4;
     }
+    const int mh = gEffectHue;                           // -1 = the classic green rain
+    uint8_t hr = 0, hg = 0, hb = 0;
+    if (mh >= 0) hsv((uint8_t)mh, hr, hg, hb);
     for (int k = 0; k < MTRAIL; k++) {
       int yy = hy - k;
       if (yy < 0 || yy >= H) continue;
-      if (k == 0) panelPixel(x, yy, 200, 255, 200);      // bright near-white head
-      else {
-        uint8_t g = (uint8_t)(230 * (MTRAIL - k) / MTRAIL);
-        panelPixel(x, yy, 0, g, 0);
+      if (k == 0) {                                      // bright near-white head
+        if (mh < 0) panelPixel(x, yy, 200, 255, 200);
+        else panelPixel(x, yy, (uint8_t)(128 + hr / 2), (uint8_t)(128 + hg / 2), (uint8_t)(128 + hb / 2));
+      } else {
+        uint8_t lvl = (uint8_t)(230 * (MTRAIL - k) / MTRAIL);
+        if (mh < 0) panelPixel(x, yy, 0, lvl, 0);        // classic green trail
+        else panelPixel(x, yy, (uint8_t)(hr * lvl / 255), (uint8_t)(hg * lvl / 255), (uint8_t)(hb * lvl / 255));
       }
     }
   }

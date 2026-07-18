@@ -1,6 +1,7 @@
 #include "gateway.h"
 #include "panel.h"
 #include "effects.h"
+#include "canvas.h"
 
 // display.cpp -- the HUB75 flap wall: geometry, the flap renderer, and the reel task.
 // All output goes through panel.h; this file never sees a pixel format, a bitplane or a
@@ -153,10 +154,13 @@ void dispInit() {
 // command arrives (so content the user sends is actually shown), on canvas release, and by Quiet
 // Time. A no-op when the wall already owns the panel.
 void dispReturnToWall() {
-  if (gEffect == EFFECT_NONE && gEffectReq == EFFECT_REQ_IDLE && !gCanvasMode) return;
+  if (gEffect == EFFECT_NONE && gEffectReq == EFFECT_REQ_IDLE && !gCanvasMode
+      && !gAnimActive && !gTickerActive) return;
   gEffectReq  = EFFECT_REQ_IDLE;   // cancel a pending start
   gEffect     = EFFECT_NONE;       // stop rendering the current effect (taskDisplay just stops)
   gCanvasMode = false;             // release the raw canvas
+  canvasAnimStop();                // stop animation playback / the ticker
+  canvasTickerStop();
   dispMarkDirty();                 // repaint the wall
 }
 
@@ -412,6 +416,10 @@ void taskDisplay(void* pv) {
       vTaskDelay(pdMS_TO_TICKS(2));
       continue;
     }
+    // On-device animation loop / scrolling ticker: same deal as an effect -- taskDisplay owns the
+    // panel and each render call presents a frame (or yields until its next step is due).
+    if (gAnimActive)   { canvasAnimRender();   wdgDispMs = millis(); continue; }
+    if (gTickerActive) { canvasTickerRender(); wdgDispMs = millis(); continue; }
     if (vmTick(now)) pending = true;
     // dispRender clears dispDirty itself, but only once it is committed to
     // painting -- so a repaint it declined still leaves work for the next tick.

@@ -1,6 +1,7 @@
 #include "gateway.h"
 #include "panel.h"   // panelSetColourOrder: a BGR panel is a runtime fact, not a build one
 #include "effects.h"
+#include "canvas.h"
 #include "web_ui.h"
 
 
@@ -688,17 +689,18 @@ static void handleApiCapabilities() {
   // hand out, and answers this URL without these keys. Stated here so the companion lights up
   // canvas/effect controls from capabilities, not from a firmware-version sniff: `canvas` is the
   // framebuffer a client would push frames to, `effects` the on-device animation set.
-  { char cv[144];
+  { char cv[224];
     snprintf(cv, sizeof(cv),
-             "\"canvas\":{\"formats\":[\"rgb888\",\"rgb565\"],\"width\":%u,\"height\":%u},"
-             "\"effects\":%s,",
+             "\"canvas\":{\"formats\":[\"rgb888\",\"rgb565\",\"qoi\"],\"width\":%u,\"height\":%u,"
+             "\"rect\":true,\"anim\":true,\"ticker\":true},"
+             "\"effects\":%s,\"effectParams\":[\"hue\",\"density\"],",
              (unsigned)gPanel.panelW, (unsigned)gPanel.panelH, effectListJson());
     capPut(cv); }
 
   // What the wall can DO, not just show, so a client reads this instead of sniffing the
   // firmware version and guessing.
   capPut("\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
-         "\"quiet\",\"maintenance\",\"ha\",\"ota\",\"canvas\",\"effects\"]}");
+         "\"quiet\",\"maintenance\",\"ha\",\"ota\",\"canvas\",\"effects\",\"ticker\"]}");
   capFlush();
   server.sendContent("");
 }
@@ -1460,10 +1462,11 @@ static void handleApiCanvas() {
   }
   char buf[224];
   snprintf(buf, sizeof(buf),
-           "{\"active\":%s,\"width\":%u,\"height\":%u,\"formats\":[\"rgb888\",\"rgb565\"],"
-           "\"effect\":\"%s\",\"effects\":%s}",
+           "{\"active\":%s,\"width\":%u,\"height\":%u,\"formats\":[\"rgb888\",\"rgb565\",\"qoi\"],"
+           "\"effect\":\"%s\",\"anim\":%s,\"ticker\":%s,\"effects\":%s}",
            gCanvasMode ? "true" : "false", (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
-           effectName(gEffect), effectListJson());
+           effectName(gEffect), gAnimActive ? "true" : "false", gTickerActive ? "true" : "false",
+           effectListJson());
   server.send(200, "application/json", buf);
 }
 
@@ -1481,6 +1484,11 @@ static void handleApiCanvasEffect() {
   uint8_t e  = effectByName(doc["type"] | "none");
   int     sp = doc["speed"] | (int)gEffectSpeed;
   gEffectSpeed = (uint8_t)(sp < 1 ? 1 : sp > 10 ? 10 : sp);
+  // Optional per-start overrides; absent -> -1 -> the effect keeps its own look (see effects.h).
+  int hv = doc["hue"].is<int>()     ? (int)doc["hue"]     : -1;
+  int dv = doc["density"].is<int>() ? (int)doc["density"] : -1;
+  gEffectHue     = (hv < 0) ? -1 : (hv > 255 ? 255 : hv);
+  gEffectDensity = (dv < 0) ? -1 : (dv < 1 ? 1 : (dv > 100 ? 100 : dv));
   if (e == EFFECT_NONE) {
     dispReturnToWall();             // stop -> reel wall
   } else if (gQuietTime) {
@@ -1489,9 +1497,9 @@ static void handleApiCanvasEffect() {
     gCanvasMode = false;            // an effect owns the panel via taskDisplay, which runs
     gEffectReq  = e;                // effectReset() + starts it -- no effect state touched off-core
   }
-  char buf[96];
-  snprintf(buf, sizeof(buf), "{\"ok\":true,\"effect\":\"%s\",\"speed\":%u}",
-           effectName(e), (unsigned)gEffectSpeed);
+  char buf[112];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"effect\":\"%s\",\"speed\":%u,\"hue\":%d,\"density\":%d}",
+           effectName(e), (unsigned)gEffectSpeed, gEffectHue, gEffectDensity);
   server.send(200, "application/json", buf);
 }
 
@@ -1609,6 +1617,219 @@ static void handleApiCanvasFrame() {
   server.send(200, "application/json", buf);
 }
 
+// PUT /api/canvas/rect -- update one rectangle without resending the whole panel. Body: an 8-byte
+// big-endian header [x, y, w, h] (u16 each) then w*h pixels, rgb888 or rgb565 (by remaining length).
+// Drawn ON TOP of what is on screen: the back buffer is synced to the live frame first.
+static int      rectErr = 0;
+static uint8_t  rectHdr[8]; static uint8_t rectHdrN = 0;
+static int      rectX = 0, rectY = 0, rectW = 0, rectH = 0;
+static uint8_t  rectBpp = 3, rectCarry[3], rectCarryN = 0;
+static int      rectCol = 0, rectRow = 0;
+static bool     rectStarted = false;
+static void handleApiCanvasRectRaw() {
+  HTTPRaw& raw = server.raw();
+  wdgWebMs = millis();
+  switch (raw.status) {
+    case RAW_START:
+      rectErr = 0; rectHdrN = 0; rectCarryN = 0; rectCol = 0; rectRow = 0; rectStarted = false;
+      if (!gPanel.ready) rectErr = 503;
+      break;
+    case RAW_WRITE: {
+      if (rectErr) break;
+      size_t i = 0;
+      while (rectHdrN < 8 && i < raw.currentSize) rectHdr[rectHdrN++] = raw.buf[i++];
+      if (rectHdrN < 8) break;                       // header can straddle chunks
+      if (!rectStarted) {
+        rectX = (rectHdr[0] << 8) | rectHdr[1]; rectY = (rectHdr[2] << 8) | rectHdr[3];
+        rectW = (rectHdr[4] << 8) | rectHdr[5]; rectH = (rectHdr[6] << 8) | rectHdr[7];
+        long cells = (long)rectW * rectH;
+        long body  = (long)server.clientContentLength() - 8;
+        if (rectW <= 0 || rectH <= 0 || (body != cells * 3 && body != cells * 2)) { rectErr = 400; break; }
+        rectBpp = (body == cells * 3) ? 3 : 2;
+        canvasStandDown();                           // take the panel, then start from what is shown
+        panelCloneToBack();
+        rectStarted = true;
+      }
+      for (; i < raw.currentSize; i++) {
+        rectCarry[rectCarryN++] = raw.buf[i];
+        if (rectCarryN < rectBpp) continue;
+        rectCarryN = 0;
+        uint8_t r, g, b;
+        if (rectBpp == 3) { r = rectCarry[0]; g = rectCarry[1]; b = rectCarry[2]; }
+        else { uint16_t v = ((uint16_t)rectCarry[0] << 8) | rectCarry[1];
+               r = (uint8_t)(((v >> 11) & 0x1F) << 3);
+               g = (uint8_t)(((v >> 5)  & 0x3F) << 2);
+               b = (uint8_t)((v & 0x1F) << 3); }
+        if (rectRow < rectH) panelPixel(rectX + rectCol, rectY + rectRow, r, g, b);   // panelPixel clamps
+        if (++rectCol >= rectW) { rectCol = 0; rectRow++; }
+      }
+      break;
+    }
+    case RAW_END:
+      if (!rectErr && rectStarted && gPanel.ready) panelShow();
+      break;
+    case RAW_ABORTED:
+      rectErr = 400;
+      break;
+  }
+}
+static void handleApiCanvasRect() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  int e = rectErr; rectErr = 0;
+  if (e == 400) { sendJsonError(400, "Body must be an 8-byte x,y,w,h header then w*h*3 or w*h*2 pixels"); return; }
+  if (e == 503) { sendJsonError(503, "Panel not running"); return; }
+  char buf[96];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}", rectX, rectY, rectW, rectH);
+  server.send(200, "application/json", buf);
+}
+
+// ---- QOI image decode (https://qoiformat.org) --------------------------------------------------
+// Decode a full-panel QOI image to the back buffer. False if the magic or the dimensions do not
+// match this panel. Alpha is ignored (the panel has none). One pass, 64-entry running index.
+static bool qoiDecodeToPanel(const uint8_t* d, size_t len) {
+  if (len < 14 || d[0] != 'q' || d[1] != 'o' || d[2] != 'i' || d[3] != 'f') return false;
+  uint32_t w = ((uint32_t)d[4] << 24) | ((uint32_t)d[5] << 16) | ((uint32_t)d[6] << 8) | d[7];
+  uint32_t h = ((uint32_t)d[8] << 24) | ((uint32_t)d[9] << 16) | ((uint32_t)d[10] << 8) | d[11];
+  if ((int)w != gPanel.panelW || (int)h != gPanel.panelH) return false;
+  size_t p = 14;
+  uint8_t ir[64] = {0}, ig[64] = {0}, ib[64] = {0}, ia[64] = {0};
+  uint8_t r = 0, g = 0, b = 0, a = 255;
+  const long total = (long)w * h;
+  int cx = 0, cy = 0, run = 0;
+  for (long px = 0; px < total; px++) {
+    if (run > 0) run--;
+    else if (p < len) {
+      uint8_t op = d[p++];
+      if      (op == 0xFE) { if (p + 3 > len) return false; r = d[p++]; g = d[p++]; b = d[p++]; }
+      else if (op == 0xFF) { if (p + 4 > len) return false; r = d[p++]; g = d[p++]; b = d[p++]; a = d[p++]; }
+      else if ((op & 0xC0) == 0x00) { int k = op & 0x3F; r = ir[k]; g = ig[k]; b = ib[k]; a = ia[k]; }
+      else if ((op & 0xC0) == 0x40) { r += (uint8_t)(((op >> 4) & 3) - 2); g += (uint8_t)(((op >> 2) & 3) - 2); b += (uint8_t)((op & 3) - 2); }
+      else if ((op & 0xC0) == 0x80) { if (p >= len) return false; uint8_t v = d[p++]; int dg = (op & 0x3F) - 32;
+                                      r += (uint8_t)(dg + ((v >> 4) & 0xF) - 8); g += (uint8_t)dg; b += (uint8_t)(dg + (v & 0xF) - 8); }
+      else                          { run = op & 0x3F; }   // QOI_OP_RUN: this pixel + `run` more
+      int k = (r * 3 + g * 5 + b * 7 + a * 11) & 63;
+      ir[k] = r; ig[k] = g; ib[k] = b; ia[k] = a;
+    } else return false;
+    panelPixel(cx, cy, r, g, b);
+    if (++cx >= (int)w) { cx = 0; cy++; }
+  }
+  return true;
+}
+// PUT /api/canvas/qoi -- a full-panel QOI image. Buffered whole in PSRAM (it is compressed) then
+// decoded straight to the panel. Same takeover as /frame.
+static uint8_t* qoiBuf = nullptr; static size_t qoiCap = 0, qoiLen = 0; static int qoiErr = 0;
+static void handleApiCanvasQoiRaw() {
+  HTTPRaw& raw = server.raw();
+  wdgWebMs = millis();
+  switch (raw.status) {
+    case RAW_START: {
+      qoiErr = 0; qoiLen = 0;
+      if (!gPanel.ready) { qoiErr = 503; break; }
+      size_t need = (size_t)server.clientContentLength();
+      size_t cap  = (size_t)gPanel.panelW * gPanel.panelH * 4 + 1024;   // QOI worst case + header
+      if (need < 14 || need > cap) { qoiErr = 400; break; }
+      if (qoiCap < need) {
+        if (qoiBuf) free(qoiBuf);
+        qoiBuf = (uint8_t*)ps_malloc(need);
+        if (!qoiBuf) qoiBuf = (uint8_t*)malloc(need);
+        qoiCap = qoiBuf ? need : 0;
+      }
+      if (!qoiBuf) { qoiErr = 503; break; }
+      canvasStandDown();
+      break;
+    }
+    case RAW_WRITE:
+      if (qoiErr || !qoiBuf) break;
+      if (qoiLen + raw.currentSize <= qoiCap) { memcpy(qoiBuf + qoiLen, raw.buf, raw.currentSize); qoiLen += raw.currentSize; }
+      break;
+    case RAW_END:
+      if (!qoiErr && gPanel.ready) { if (qoiDecodeToPanel(qoiBuf, qoiLen)) panelShow(); else qoiErr = 400; }
+      break;
+    case RAW_ABORTED:
+      qoiErr = 400;
+      break;
+  }
+}
+static void handleApiCanvasQoi() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  int e = qoiErr; qoiErr = 0;
+  if (e == 400) { sendJsonError(400, "Not a QOI image matching the panel size"); return; }
+  if (e == 503) { sendJsonError(503, "Panel not running or out of memory"); return; }
+  char buf[96];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"width\":%u,\"height\":%u}", (unsigned)gPanel.panelW, (unsigned)gPanel.panelH);
+  server.send(200, "application/json", buf);
+}
+
+// PUT /api/canvas/anim -- upload a looping animation that plays on-device (client can disconnect).
+// Header (14 B, big-endian): "MPGA"(4) ver(1)=1 fmt(1: 2=rgb565,3=rgb888) fps(1) flags(1: bit0=loop)
+// w(2) h(2) frames(2), then frames*w*h*fmt bytes of frame data. Streamed straight into PSRAM.
+static int      animErr = 0;
+static uint8_t  animHdr[14]; static uint8_t animHdrN = 0; static bool animBegun = false;
+static void handleApiCanvasAnimRaw() {
+  HTTPRaw& raw = server.raw();
+  wdgWebMs = millis();
+  switch (raw.status) {
+    case RAW_START:
+      animErr = 0; animHdrN = 0; animBegun = false;
+      if (!gPanel.ready) { animErr = 503; break; }
+      canvasStandDown();                              // park the render task while the store refills
+      break;
+    case RAW_WRITE: {
+      if (animErr) break;
+      size_t i = 0;
+      while (animHdrN < 14 && i < raw.currentSize) animHdr[animHdrN++] = raw.buf[i++];
+      if (animHdrN < 14) break;
+      if (!animBegun) {
+        if (memcmp(animHdr, "MPGA", 4) != 0 || animHdr[4] != 1) { animErr = 400; break; }
+        uint16_t w  = (animHdr[8]  << 8) | animHdr[9];
+        uint16_t h  = (animHdr[10] << 8) | animHdr[11];
+        uint16_t fr = (animHdr[12] << 8) | animHdr[13];
+        int rc = canvasAnimBegin(animHdr[5], animHdr[6], animHdr[7] & 1, w, h, fr);
+        if (rc) { animErr = rc; break; }
+        animBegun = true;
+      }
+      if (i < raw.currentSize) canvasAnimFeed(raw.buf + i, raw.currentSize - i);
+      break;
+    }
+    case RAW_END:
+      if (!animErr && animBegun) { int rc = canvasAnimCommit(); if (rc) animErr = rc; }
+      if (animErr) dispReturnToWall();                // failed mid-upload: hand the panel back
+      break;
+    case RAW_ABORTED:
+      animErr = 400; dispReturnToWall();
+      break;
+  }
+}
+static void handleApiCanvasAnim() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  int e = animErr; animErr = 0;
+  if (e == 400) { sendJsonError(400, "Bad MPGA header or truncated upload"); return; }
+  if (e == 413) { sendJsonError(413, "Animation exceeds the PSRAM budget"); return; }
+  if (e == 503) { sendJsonError(503, "Panel not running or out of memory"); return; }
+  char buf[64];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"frames\":%u}", (unsigned)canvasAnimCount());
+  server.send(200, "application/json", buf);
+}
+
+// POST /api/canvas/ticker -- one line of text scrolling right-to-left, rendered on-device.
+// {text, color:[r,g,b], speed:1..20}. Empty text hands the panel back to the wall.
+static void handleApiCanvasTicker() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  if (!gPanel.ready) { sendJsonError(503, "Panel not running"); return; }
+  JsonDocument doc;
+  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) { sendJsonError(400, "Invalid JSON"); return; }
+  const char* text = doc["text"] | "";
+  if (!text[0]) { dispReturnToWall(); server.send(200, "application/json", "{\"ok\":true,\"active\":false}"); return; }
+  if (gQuietTime) { sendJsonError(409, "Quiet Time is active"); return; }
+  uint8_t r = 255, g = 255, b = 255;
+  if (doc["color"].is<JsonArray>() && doc["color"].size() >= 3) {
+    r = (uint8_t)(int)doc["color"][0]; g = (uint8_t)(int)doc["color"][1]; b = (uint8_t)(int)doc["color"][2];
+  }
+  int speed = doc["speed"] | 2;
+  canvasTickerSet(text, r, g, b, speed);
+  server.send(200, "application/json", "{\"ok\":true,\"active\":true}");
+}
+
 void webInit() {
   static const char* COLLECT_HDRS[] = { "If-None-Match" };
   server.collectHeaders(COLLECT_HDRS, 1);   // so handleRoot can honour conditional GETs
@@ -1677,6 +1898,14 @@ void webInit() {
   server.on("/api/canvas",           HTTP_OPTIONS, handleOptions);
   server.on("/api/canvas/frame",     HTTP_PUT,     handleApiCanvasFrame, handleApiCanvasFrameRaw);
   server.on("/api/canvas/frame",     HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/rect",      HTTP_PUT,     handleApiCanvasRect,  handleApiCanvasRectRaw);
+  server.on("/api/canvas/rect",      HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/qoi",       HTTP_PUT,     handleApiCanvasQoi,   handleApiCanvasQoiRaw);
+  server.on("/api/canvas/qoi",       HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/anim",      HTTP_PUT,     handleApiCanvasAnim,  handleApiCanvasAnimRaw);
+  server.on("/api/canvas/anim",      HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/ticker",    HTTP_POST,    handleApiCanvasTicker);
+  server.on("/api/canvas/ticker",    HTTP_OPTIONS, handleOptions);
   server.on("/api/canvas/ops",       HTTP_POST,    handleApiCanvasOps);
   server.on("/api/canvas/ops",       HTTP_OPTIONS, handleOptions);
   server.on("/api/canvas/effect",    HTTP_POST,    handleApiCanvasEffect);

@@ -46,6 +46,11 @@ void panelFillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b);
 // then wait one frame so the caller cannot draw into a buffer GDMA is still reading.
 void panelShow();
 
+// Sync the back buffer to what is currently on screen, so a partial update (a rectangle, one
+// changed region) can be drawn on top of it instead of on a stale frame. Call before drawing a
+// partial region, then panelShow(). No-op if the panel is down.
+void panelCloneToBack();
+
 // Halt output. Used before writing flash: the instruction cache goes away on both cores
 // and a half-driven HUB75 latches garbage. panelResume() undoes it.
 void panelStop();

@@ -34,6 +34,12 @@ extern volatile uint8_t gEffectSpeed;
 extern volatile uint8_t gEffectReq;
 static const uint8_t EFFECT_REQ_IDLE = 0xFF;
 
+// Optional per-start overrides from /api/canvas/effect. -1 means "use the effect's own default", so
+// an unparameterised start looks exactly as before. hue is 0..255 around the colour wheel (matrix
+// rain, plasma tint, Life cells); density is 1..100 (Life seed %, flip-o-rama churn rate).
+extern volatile int gEffectHue;
+extern volatile int gEffectDensity;
+
 uint8_t     effectByName(const char* name);   // wire name -> id (EFFECT_NONE if unknown / "none")
 const char* effectName(uint8_t e);            // id -> canonical name ("none" for EFFECT_NONE)
 const char* effectListJson();                 // all names as a JSON array, e.g. ["plasma",...]

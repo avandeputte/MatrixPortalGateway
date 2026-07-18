@@ -442,6 +442,15 @@ void panelFillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b) 
   for (int j = 0; j < h; j++) panelHLine(x, y + j, w, r, g, b);
 }
 
+// Copy the live buffer into the back buffer, so a PARTIAL draw lands on top of what is currently on
+// screen rather than on the frame from two shows ago (the two buffers otherwise diverge). Both
+// buffers carry the same control-bit skeleton, and pixel writes only touch RGB, so copying whole
+// words is safe. Reading the live buffer while GDMA also reads it is fine -- both are readers.
+void panelCloneToBack() {
+  if (!info.ok) return;
+  memcpy(fb[drawBuf], fb[liveBuf], (size_t)ROWS * DEPTH * BLOCK * sizeof(word_t));
+}
+
 // Swap buffers by re-pointing the LIVE chain's tail at the other chain's head. GDMA reads
 // desc->next when it finishes a descriptor, so the switch happens at a block boundary and
 // never mid-row. Then wait one frame, so the caller cannot start drawing into a buffer the

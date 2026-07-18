@@ -38,6 +38,35 @@ module registry. See **New in 1.10**.)
 
 ---
 
+## New in 1.18
+
+- **The canvas does more, over far less WiFi.** Five additions, all Matrix-only (the RS-485 wall has
+  no framebuffer):
+
+  - **`PUT /api/canvas/rect`** — update *one rectangle* instead of resending the whole panel. Body is
+    an 8-byte big-endian header `[x, y, w, h]` (u16 each) then `w × h` pixels, `rgb888` or `rgb565`
+    (by length). It is drawn on top of what is already on screen — the back buffer is synced to the
+    live frame first — so animating a small area costs only that area's bytes.
+  - **`PUT /api/canvas/qoi`** — a full-panel image, [QOI](https://qoiformat.org)-encoded. Lossless,
+    decodes in one pass, and typically 2–4× smaller than raw (a 256×64 gradient: ~16 KB vs 49 KB).
+  - **`PUT /api/canvas/anim`** — upload a short loop *once* and it plays on-device from PSRAM, so the
+    client can disconnect. Body is a 14-byte `MPGA` header (`ver, fmt, fps, flags, w, h, frames`)
+    then the frames back-to-back. The 2 MB PSRAM the framebuffer can't use holds ~48 frames at
+    256×64. `taskDisplay` plays it at the set fps; a split-flap command or Quiet Time stops it.
+  - **`POST /api/canvas/ticker`** — `{"text", "color":[r,g,b], "speed":1-20}` scrolls one line of
+    text across the panel on-device, no streaming. Empty text hands the panel back.
+  - **Effect parameters** — `POST /api/canvas/effect` now takes optional `hue` (0–255) and `density`
+    (1–100): recolour the matrix rain, tint plasma and Life, set the Life seed % or flip-o-rama
+    churn. Omit them and every effect looks exactly as before.
+
+  `GET /api/canvas` and `/api/capabilities` advertise all of it (`rect`, `anim`, `ticker`, the `qoi`
+  format, and `effectParams`), so a client reads the feature set instead of sniffing the version.
+
+- **A too-deep panel dims itself instead of going blank (1.17.1).** A 256×64 at bit depth 4 needs
+  more internal DMA RAM than the driver will spend before WiFi; rather than refuse and run headless,
+  it now steps the depth down to the deepest that fits (256×64 lands on depth 3) and lights up.
+  `GET /api/status` reports the actual running `panel.depth`.
+
 ## New in 1.15
 
 - **Three more on-device effects — flip-o-rama, clock, and Game of Life.** They join plasma, fire
