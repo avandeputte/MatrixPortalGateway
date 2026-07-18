@@ -451,6 +451,44 @@ void panelCloneToBack() {
   memcpy(fb[drawBuf], fb[liveBuf], (size_t)ROWS * DEPTH * BLOCK * sizeof(word_t));
 }
 
+// Reconstruct the LIVE frame (what is on screen right now, in any mode) into `out` as raw pixels,
+// row-major, top-left origin: W*H*3 rgb888, or W*H*2 big-endian rgb565 if rgb565. This reverses the
+// bitplane packing, so the colours are quantised to the panel's actual bit depth -- a true
+// screenshot, not the intended image. Brightness is the OE duty, not in the framebuffer, so it is
+// not reflected (a dim wall reads back at full value). Read-only: it never parks or swaps, so a
+// frame swap mid-read can tear a live effect slightly -- fine for a preview. Snapshot fast, then the
+// caller streams `out` at leisure. out must hold W*H*(rgb565?2:3) bytes.
+void panelReadback(uint8_t* out, bool rgb565) {
+  if (!info.ok || !out) return;
+  const uint16_t maxv = (uint16_t)((1u << DEPTH) - 1);
+  const uint8_t buf = liveBuf;                     // the displayed buffer (single-byte, atomic read)
+  size_t o = 0;
+  for (int y = 0; y < H; y++) {
+    const bool lower = (y >= ROWS);
+    const int  row   = lower ? (y - ROWS) : y;
+    const word_t rmask = lower ? BIT_R2 : BIT_R1;
+    const word_t gmask = lower ? BIT_G2 : BIT_G1;
+    const word_t bmask = lower ? BIT_B2 : BIT_B1;
+    for (int x = 0; x < W; x++) {
+      uint16_t qr = 0, qg = 0, qb = 0;
+      for (int p = 0; p < DEPTH; p++) {
+        word_t w = blockPtr(buf, row, p)[x];
+        if (w & rmask) qr |= (uint16_t)(1u << p);
+        if (w & gmask) qg |= (uint16_t)(1u << p);
+        if (w & bmask) qb |= (uint16_t)(1u << p);
+      }
+      uint8_t r = (uint8_t)((qr * 255 + maxv / 2) / maxv);   // undo quant() back to 8-bit
+      uint8_t g = (uint8_t)((qg * 255 + maxv / 2) / maxv);
+      uint8_t b = (uint8_t)((qb * 255 + maxv / 2) / maxv);
+      if (bgrOrder) { uint8_t t = r; r = b; b = t; }          // undo the BGR swap on the way out
+      if (rgb565) {
+        uint16_t v = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        out[o++] = (uint8_t)(v >> 8); out[o++] = (uint8_t)(v & 0xFF);
+      } else { out[o++] = r; out[o++] = g; out[o++] = b; }
+    }
+  }
+}
+
 // Swap buffers by re-pointing the LIVE chain's tail at the other chain's head. GDMA reads
 // desc->next when it finishes a descriptor, so the switch happens at a block boundary and
 // never mid-row. Then wait one frame, so the caller cannot start drawing into a buffer the

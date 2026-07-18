@@ -38,6 +38,16 @@ module registry. See **New in 1.10**.)
 
 ---
 
+## New in 1.19
+
+- **Read the panel back — `GET /api/canvas/frame`.** A screenshot of whatever is on screen (wall,
+  effect, canvas, animation, ticker), reconstructed from the framebuffer as raw pixels — `rgb888`, or
+  `?fmt=rgb565`. The colours come back **quantised to the panel's real bit depth**, so it's what is
+  physically lit, not the intended image (brightness, an OE duty cycle, isn't in the framebuffer, so
+  it isn't reflected). Read-only — it never parks or disturbs the running mode — so a UI can poll it
+  for a live preview. `X-Canvas-Width/Height/Format` headers describe the body. Verified by round-trip:
+  a solid frame reads back bit-exact at every pixel.
+
 ## New in 1.18
 
 - **The canvas does more, over far less WiFi.** Five additions, all Matrix-only (the RS-485 wall has

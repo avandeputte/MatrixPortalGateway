@@ -692,7 +692,7 @@ static void handleApiCapabilities() {
   { char cv[224];
     snprintf(cv, sizeof(cv),
              "\"canvas\":{\"formats\":[\"rgb888\",\"rgb565\",\"qoi\"],\"width\":%u,\"height\":%u,"
-             "\"rect\":true,\"anim\":true,\"ticker\":true},"
+             "\"rect\":true,\"anim\":true,\"ticker\":true,\"readback\":true},"
              "\"effects\":%s,\"effectParams\":[\"hue\",\"density\"],",
              (unsigned)gPanel.panelW, (unsigned)gPanel.panelH, effectListJson());
     capPut(cv); }
@@ -1617,6 +1617,36 @@ static void handleApiCanvasFrame() {
   server.send(200, "application/json", buf);
 }
 
+// GET /api/canvas/frame[?fmt=rgb888|rgb565] -- read the live panel back as raw pixels: a screenshot
+// of whatever is on screen (wall, effect, canvas, animation, ticker), quantised to the panel depth.
+// Reconstructed from the framebuffer into a reused PSRAM buffer, then streamed. Read-only.
+static uint8_t* rbBuf = nullptr; static size_t rbCap = 0;
+static void handleApiCanvasFrameGet() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  if (!gPanel.ready) { sendJsonError(503, "Panel not running"); return; }
+  const bool rgb565 = (server.arg("fmt") == "rgb565");
+  const size_t need = (size_t)gPanel.panelW * gPanel.panelH * (rgb565 ? 2 : 3);
+  if (rbCap < need) {
+    if (rbBuf) free(rbBuf);
+    rbBuf = (uint8_t*)ps_malloc(need);
+    if (!rbBuf) rbBuf = (uint8_t*)malloc(need);
+    rbCap = rbBuf ? need : 0;
+  }
+  if (!rbBuf) { sendJsonError(503, "Out of memory"); return; }
+  panelReadback(rbBuf, rgb565);                    // snapshot fast, then stream at leisure
+  char v[16];
+  snprintf(v, sizeof(v), "%u", (unsigned)gPanel.panelW);  server.sendHeader("X-Canvas-Width", v);
+  snprintf(v, sizeof(v), "%u", (unsigned)gPanel.panelH);  server.sendHeader("X-Canvas-Height", v);
+  server.sendHeader("X-Canvas-Format", rgb565 ? "rgb565" : "rgb888");
+  server.setContentLength(need);
+  server.send(200, "application/octet-stream", "");
+  for (size_t off = 0; off < need; off += 1024) {
+    size_t c = (need - off < 1024) ? (need - off) : 1024;
+    server.sendContent_P((PGM_P)(rbBuf + off), c);   // _P reads RAM fine on ESP32; length-delimited
+    wdgWebMs = millis();                              // feed the web watchdog on a ~48 KB send
+  }
+}
+
 // PUT /api/canvas/rect -- update one rectangle without resending the whole panel. Body: an 8-byte
 // big-endian header [x, y, w, h] (u16 each) then w*h pixels, rgb888 or rgb565 (by remaining length).
 // Drawn ON TOP of what is on screen: the back buffer is synced to the live frame first.
@@ -1903,6 +1933,7 @@ void webInit() {
   server.on("/api/canvas",           HTTP_GET,     handleApiCanvas);
   server.on("/api/canvas",           HTTP_POST,    handleApiCanvas);
   server.on("/api/canvas",           HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/frame",     HTTP_GET,     handleApiCanvasFrameGet);
   server.on("/api/canvas/frame",     HTTP_PUT,     handleApiCanvasFrame, handleApiCanvasFrameRaw);
   server.on("/api/canvas/frame",     HTTP_OPTIONS, handleOptions);
   server.on("/api/canvas/rect",      HTTP_PUT,     handleApiCanvasRect,  handleApiCanvasRectRaw);

@@ -51,6 +51,11 @@ void panelShow();
 // partial region, then panelShow(). No-op if the panel is down.
 void panelCloneToBack();
 
+// Read the live frame (whatever is on screen, any mode) back into `out` as raw pixels, row-major,
+// top-left: W*H*3 rgb888, or W*H*2 big-endian rgb565 if rgb565. Colours are quantised to the panel
+// bit depth (a true screenshot); brightness is not reflected. Read-only. out must hold W*H*(2 or 3).
+void panelReadback(uint8_t* out, bool rgb565);
+
 // Halt output. Used before writing flash: the instruction cache goes away on both cores
 // and a half-driven HUB75 latches garbage. panelResume() undoes it.
 void panelStop();
