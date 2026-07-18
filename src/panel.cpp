@@ -284,33 +284,50 @@ bool panelBegin(uint16_t width, uint16_t height, uint8_t depth) {
   info = {false, width, height, depth, 0, 0};
   if (depth < 1 || depth > 8) depth = DEFAULT_BIT_DEPTH;
 
-  W = width; H = height; DEPTH = depth;
+  W = width; H = height;
   ROWS = (uint8_t)(height / 2);                       // row PAIRS
   ADDR_BITS = (height == 64) ? 5 : (height == 32 ? 4 : 3);
   // GDMA moves bytes, and in 16-bit LCD mode a descriptor's length must be a whole number
   // of 32-bit words. Every real panel width is even, but pad rather than trust that.
   BLOCK = (uint32_t)W + TAIL_WORDS;
   if (BLOCK & 1) BLOCK++;
-  info.depth = DEPTH;
 
-  const size_t fbBytes   = (size_t)ROWS * DEPTH * BLOCK * sizeof(word_t);
-  const size_t descBytes = sizeof(dma_descriptor_t) * (size_t)ROWS * ((1u << DEPTH) - 1);
-  const size_t want      = fbBytes * 2 + descBytes * 2;
-
-  // dispInit() runs BEFORE WiFi.begin() so the panel gets first claim on internal
-  // SRAM -- which means an over-large geometry silently starves the WiFi/lwIP pool
-  // that is allocated from the same heap moments later. The symptom is not a panel
-  // fault: it is TCP connects failing and loop()'s heap floor rebooting the board.
-  // Refuse the config instead, and leave the caller to run headless with the RAM
-  // intact. PANEL_RAM_BUDGET is what we are willing to spend before WiFi exists.
-  const size_t freeNow = heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  // Internal DMA RAM the two framebuffers + two descriptor chains cost at a given bit depth. The
+  // framebuffer MUST be internal (PSRAM is far too slow to feed the panel), and dispInit() runs
+  // BEFORE WiFi.begin() -- so an over-deep panel would starve the WiFi/lwIP pool allocated moments
+  // later, and the symptom is not a panel fault but TCP connects failing and loop()'s heap floor
+  // rebooting the board. PANEL_RAM_BUDGET caps what we spend before WiFi exists; PANEL_RAM_RESERVE
+  // is what must stay free for WiFi afterwards.
+  auto wantFor = [&](uint8_t d) -> size_t {
+    size_t fb   = (size_t)ROWS * d * BLOCK * sizeof(word_t);
+    size_t desc = sizeof(dma_descriptor_t) * (size_t)ROWS * ((1u << d) - 1);
+    return fb * 2 + desc * 2;
+  };
+  // Rather than refuse an over-deep panel outright and run headless -- a silent blank screen, the
+  // exact trap a 256x64 @ depth 4 falls into (144 KB > budget) -- step the depth DOWN to the
+  // deepest that fits both the budget and the live free-RAM reserve. Fewer bitplanes is fewer
+  // brightness levels, but a lit panel beats a dark one. Give up only if even one plane won't fit.
+  const size_t freeNow   = heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  const uint8_t reqDepth = depth;
+  while (depth > 1 && (wantFor(depth) > PANEL_RAM_BUDGET ||
+                       wantFor(depth) + PANEL_RAM_RESERVE > freeNow))
+    depth--;
+  const size_t want = wantFor(depth);
   if (want > PANEL_RAM_BUDGET || want + PANEL_RAM_RESERVE > freeNow) {
-    printf("[PANEL] %ux%u depth %u needs %u B of internal DMA RAM "
+    printf("[PANEL] %ux%u even at depth 1 needs %u B of internal DMA RAM "
            "(budget %u, free %u, reserve %u for WiFi) -- refusing\n",
-           (unsigned)W, (unsigned)H, (unsigned)DEPTH, (unsigned)want,
+           (unsigned)W, (unsigned)H, (unsigned)want,
            (unsigned)PANEL_RAM_BUDGET, (unsigned)freeNow, (unsigned)PANEL_RAM_RESERVE);
     return false;
   }
+  if (depth != reqDepth)
+    printf("[PANEL] %ux%u depth %u wants %u B of internal DMA RAM (budget %u, free %u) -- "
+           "clamped to depth %u so the panel still lights\n",
+           (unsigned)W, (unsigned)H, (unsigned)reqDepth, (unsigned)wantFor(reqDepth),
+           (unsigned)PANEL_RAM_BUDGET, (unsigned)freeNow, (unsigned)depth);
+  DEPTH = depth;
+  info.depth = DEPTH;
+  const size_t fbBytes = (size_t)ROWS * DEPTH * BLOCK * sizeof(word_t);
 
   for (int b = 0; b < 2; b++) {
     // MALLOC_CAP_DMA is internal by definition -- GDMA cannot read this board's quad

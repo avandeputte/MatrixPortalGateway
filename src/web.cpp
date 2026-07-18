@@ -726,7 +726,7 @@ static void handleApiStatus() {
     "\"heap\":%u,\"minheap\":%u,\"mqtt\":%s,\"modules\":%d,"
     "\"stk\":{\"rs485\":%u,\"web\":%u,\"net\":%u,\"ota\":%u,\"rtc\":%u,\"disp\":%u},"
     "\"panel\":{\"ok\":%s,\"w\":%u,\"h\":%u,\"cols\":%u,\"rows\":%u,"
-    "\"cellW\":%u,\"cellH\":%u,\"font\":\"%s\",\"vmods\":%d,\"drop\":%lu},"
+    "\"cellW\":%u,\"cellH\":%u,\"depth\":%u,\"font\":\"%s\",\"vmods\":%d,\"drop\":%lu},"
     "\"time\":\"%s\",\"ntpSynced\":%s,\"maint\":%s,\"quiet\":%s,"
     "\"companion\":{\"url\":\"%s\",\"status\":\"%s\",\"age\":%ld}}",
     millis()/1000, rxCount, txCount,
@@ -738,7 +738,7 @@ static void handleApiStatus() {
     vmCount,
     stk485, stkWeb, stkNet, stkOta, stkRtc, stkDsp,
     gPanel.ready?"true":"false", gPanel.panelW, gPanel.panelH,
-    gPanel.cols, gPanel.rows, gPanel.cellW, gPanel.cellH,
+    gPanel.cols, gPanel.rows, gPanel.cellW, gPanel.cellH, (unsigned)panelInfo().depth,
     dispFontName(), vmCount, vbusDropped,
     rtcBuf,
     ntpSynced?"true":"false",
