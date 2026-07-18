@@ -4,7 +4,7 @@
 #define SFGW_MQTT_H
 
 #include "common.h"
-#include "bus.h"
+#include "frames.h"
 
 struct MqttQItem { char topic[48]; char payload[MQTT_BUF_SIZE]; size_t len; };
 
@@ -22,7 +22,7 @@ extern unsigned long lastDispPubMs;
 extern unsigned long mqttRetryMs;
 extern unsigned long mqttRetryDelayMs;   // current backoff, 30s..300s
 
-void mqttPublishMsg(const BusMsg& m);
+void mqttPublishMsg(const FrameMsg& m);
 void mqttPublishStatus();
 bool mqttPublishDisplayState();   // false if it did not publish (not connected / lock busy)
 void mqttPublishStateTopics();

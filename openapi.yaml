@@ -10,7 +10,7 @@ info:
     **The `version` above is the gateway API level (3.1), not the firmware's version.** That is
     deliberate: the companion app gates its features on reading `>= 3.1` from `GET /api/config`,
     so this firmware answers `3.1.0` there and reports its own firmware version (currently
-    `1.20.0`) in `fwVersion`, next to `product`. See ARCHITECTURE.md → "Firmware identity vs
+    `1.22.0`) in `fwVersion`, next to `product`. See ARCHITECTURE.md → "Firmware identity vs
     API level".
 
     Endpoints for calibration and provisioning are absent by design — this product's modules are
@@ -35,8 +35,8 @@ servers:
         description: Gateway IP address
 
 tags:
-  - name: Bus
-    description: Raw protocol-frame access to the emulated bus (there is no physical wire)
+  - name: Frames
+    description: Raw protocol-frame access to the virtual modules
   - name: Modules
     description: Split-flap module display control
   - name: Display
@@ -56,15 +56,15 @@ tags:
 
 paths:
 
-  # ── Emulated bus ────────────────────────────────────────────────
+  # ── Protocol frames ─────────────────────────────────────────────
 
   /api/log:
     get:
-      tags: [Bus]
+      tags: [Frames]
       summary: Drain the command log
       description: >-
         Returns the commands received (REST and MQTT) since the last call, up to 64, then
-        advances the cursor. On this firmware there is no physical bus, so this is a log of
+        advances the cursor. On this firmware there is no physical wire, so this is a log of
         commands the gateway acted on, not an RX/TX wire trace. Each call drains what is new.
       responses:
         "200":
@@ -76,14 +76,14 @@ paths:
                 items:
                   $ref: "#/components/schemas/LogEntry"
 
-  /api/bus/send:
+  /api/frames/send:
     post:
-      tags: [Bus]
+      tags: [Frames]
       summary: Send a raw ASCII protocol frame to the virtual modules
       description: >-
-        The canonical path since v1.20.0. `/api/rs485/send` remains as a compatibility
-        alias (same handler) because the companion app — whose splitflap-os side is
-        frozen — still POSTs to the physical gateway's path.
+        The only send path since v1.22.0: the physical gateway's `/api/rs485/send`
+        (kept as a compatibility alias through v1.21) and the interim `/api/bus/send`
+        were removed in v1.22.0 and now 404.
       requestBody:
         required: true
         content:
@@ -119,17 +119,17 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
 
-  /api/bus/batch:
+  /api/frames/batch:
     post:
-      tags: [Bus]
+      tags: [Frames]
       summary: Send many raw frames in one request (v3.0)
       description: >
-        Sends each frame in `frames`, normalized like `/api/bus/send`, so a host can draw a
+        Sends each frame in `frames`, normalized like `/api/frames/send`, so a host can draw a
         whole animated page in one HTTP call instead of one request per module. Capped at 512
         frames. An optional `step_ms` paces the cascade: the request returns immediately and the
-        frames are delivered on a schedule by the bus task (so a paced batch never blocks the web
-        server). `step_ms` 0 sends everything at once. The canonical path since v1.20.0;
-        `/api/rs485/batch` remains as a compatibility alias for the companion.
+        frames are delivered on a schedule by the frames task (so a paced batch never blocks the
+        web server). `step_ms` 0 sends everything at once. The only batch path since v1.22.0:
+        `/api/rs485/batch` and the interim `/api/bus/batch` were removed in v1.22.0 and now 404.
       requestBody:
         required: true
         content:
@@ -159,13 +159,6 @@ paths:
                   sent: { type: integer, example: 45 }
         "400":
           $ref: "#/components/responses/BadRequest"
-
-  # Compatibility aliases: the companion app still POSTs to the physical
-  # gateway's /api/rs485/* paths. Same handlers, same behaviour.
-  /api/rs485/send:
-    $ref: "#/paths/~1api~1bus~1send"
-  /api/rs485/batch:
-    $ref: "#/paths/~1api~1bus~1batch"
 
   # ── Module display control ──────────────────────────────────────
 
@@ -890,7 +883,7 @@ paths:
                 type: object
                 properties:
                   product:  { type: string, example: "Matrix Portal Gateway" }
-                  fw:       { type: string, example: "1.20.0" }
+                  fw:       { type: string, example: "1.22.0" }
                   api:      { type: string, example: "3.1.0" }
                   grid:
                     type: object
@@ -1558,9 +1551,10 @@ components:
           type: object
           description: >-
             Per-task minimum-ever free stack in bytes (stack high-water marks).
-            The `rs485` key of earlier firmware was renamed `bus` in v1.20.0.
+            The first key was `rs485` (to v1.19), then `bus` (v1.20–v1.21); it is
+            `frames` since v1.22.0.
           properties:
-            bus:  { type: integer, example: 3100 }
+            frames: { type: integer, example: 3100 }
             web:  { type: integer, example: 5200 }
             net:  { type: integer, example: 2900 }
             ota:  { type: integer, example: 2400 }
@@ -1580,7 +1574,7 @@ components:
             depth: { type: integer, description: "Effective colour bit depth (may be auto-clamped to fit RAM)", example: 4 }
             font:  { type: string,  description: "The face the wall is rendered with", example: "6x10" }
             vmods: { type: integer, description: "Virtual modules on the wall", example: 45 }
-            drop:  { type: integer, description: "Virtual-bus frames dropped since boot", example: 0 }
+            drop:  { type: integer, description: "Reply frames the virtual link has dropped since boot (queue full)", example: 0 }
         companion:
           type: object
           description: "The registered companion app (v3.0)"
@@ -1594,7 +1588,7 @@ components:
       properties:
         version:      { type: string,  example: "3.1.0", description: "The gateway API level, NOT this firmware's version — the companion parses MAJOR.MINOR out of it and gates its features on >= 3.1. `product` and `fwVersion` are what tell the firmwares apart. Absent on pre-3.1 gateways" }
         product:      { type: string,  example: "Matrix Portal Gateway" }
-        fwVersion:    { type: string,  example: "1.20.0", description: "This firmware's own version" }
+        fwVersion:    { type: string,  example: "1.22.0", description: "This firmware's own version" }
         wSSID:        { type: string,  example: "MyNetwork" }
         mqHost:       { type: string,  example: "192.168.1.50" }
         mqPort:       { type: integer, example: 1883 }

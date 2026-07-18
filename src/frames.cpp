@@ -1,17 +1,17 @@
 #include "gateway.h"
 #include "vmodule.h"   // vmFlapIndexOf: Quiet Time resolves captured frames to flap indices
 
-// bus.cpp -- the protocol layer.
-// Owns the single send choke point (busSend: strips/re-frames every outbound
-// command, enforces the bus-quiet guard and Quiet Time, and mirrors the frame
-// to MQTT) and the PSRAM-backed command log the web Monitor reads.
-// Frame-classification helpers here are file-private. busSend is serialized by
+// frames.cpp -- the protocol frame layer.
+// Owns the single send choke point (frameSend: strips/re-frames every outbound
+// command, enforces the reply-quiet guard and Quiet Time, and mirrors the frame
+// to MQTT) and the PSRAM-backed command log.
+// Frame-classification helpers here are file-private. frameSend is serialized by
 // txMutex across tasks.
 //
-// The wire protocol is unchanged from the physical RS-485 gateway -- framing,
+// The wire protocol is unchanged from the physical Split-Flap Gateway -- framing,
 // sanitization, the MQTT mirror are all identical, which is exactly why the
 // companion app cannot tell. The only difference is the last few inches: where
-// the physical gateway wrote bytes to a UART, this hands them to vbusDeliver()
+// the physical gateway wrote bytes to a UART, this hands them to vlinkDeliver()
 // and the virtual modules parse them.
 // ---- file-private forward declarations ----
 static bool sfFrameIsDisplayMotion(const uint8_t* data, size_t len);
@@ -49,9 +49,9 @@ void psramAllocInit() {
 }
 
 // Enqueue one frame for paced delivery at dueMs. SPSC ring: taskWeb is the only
-// producer, taskBus the only consumer, guarded by txQMutex (never held across the
-// actual busSend, which takes txMutex -- lock order txMutex is never nested under it).
-bool busSendScheduled(const uint8_t* data, size_t len, uint32_t dueMs) {
+// producer, taskFrames the only consumer, guarded by txQMutex (never held across the
+// actual frameSend, which takes txMutex -- lock order txMutex is never nested under it).
+bool frameSendScheduled(const uint8_t* data, size_t len, uint32_t dueMs) {
   if (!txQueue || !txQMutex) return false;
   if (len == 0 || len > TXQ_FRAME_MAX) return false;   // too long -> caller sends inline
   bool ok = false;
@@ -70,9 +70,9 @@ bool busSendScheduled(const uint8_t* data, size_t len, uint32_t dueMs) {
 
 // Drain every frame whose due time has arrived, oldest first. Due times within a batch
 // are monotonic, so checking the tail is enough. The frame is copied out UNDER the lock
-// and sent AFTER releasing it: busSend takes txMutex, and holding txQMutex across it
+// and sent AFTER releasing it: frameSend takes txMutex, and holding txQMutex across it
 // would stall the producer (taskWeb) for the whole send.
-void busPollScheduled(uint32_t now) {
+void framePollScheduled(uint32_t now) {
   if (!txQueue || !txQMutex) return;
   for (;;) {
     uint8_t buf[TXQ_FRAME_MAX];
@@ -85,7 +85,7 @@ void busPollScheduled(uint32_t now) {
     }
     xSemaphoreGive(txQMutex);
     if (!len) return;                                    // nothing due
-    busSend(buf, len, false);
+    frameSend(buf, len, false);
   }
 }
 
@@ -141,13 +141,6 @@ void logDrainTo(void (*sink)(const char* frag)) {
   sink("]");
   logPollCursor = head;
 }
-// The emulated bus needs no bring-up: there is no UART and no transceiver. Kept as
-// a boot-log marker at the same call site the physical gateway's serial init had.
-void busBegin() {
-  DBG("[BUS] emulated bus -- frames are delivered in-process to the virtual modules\n");
-}
-
-
 // Parse the address + command of an outbound frame for Quiet Time. Returns the
 // command char (or 0 if not a normal addressed display frame) and sets *outAddr
 // to the module id, or -1 for broadcast ('*'). Used only to classify display-motion
@@ -236,10 +229,10 @@ static void sfQuietCapturePending(const uint8_t* data, size_t len) {
 // True iff `data[0..len)` (caller strips trailing CR/LF first) is a DIRECT,
 // numeric-id firmware-version query "m<id>v" with no payload after the 'v'.
 // This is the one frame the gateway transmits WITHOUT a newline terminator: a real
-// module answers a direct version query the instant it parses the 'v', and on a real
-// half-duplex bus the gateway is still driving the line (and deaf) for one more byte-time
-// if a '\n' follows -- so the reply's first bytes are lost. The bus here is emulated and
-// has no such race, but the frame normaliser keeps the wire format faithful. Broadcast "m*v",
+// module answers a direct version query the instant it parses the 'v', and on the
+// physical half-duplex wire the gateway is still driving the line (and deaf) for one
+// more byte-time if a '\n' follows -- so the reply's first bytes are lost. There is
+// no such race here, but the frame normaliser keeps the wire format faithful. Broadcast "m*v",
 // by-serial "mX.." frames, and anything with bytes after the 'v' are NOT matched
 // and so keep their terminator.
 static bool sfIsDirectVersionQuery(const uint8_t* data, size_t len) {
@@ -304,7 +297,7 @@ static size_t sfKnownCommandLen(const uint8_t* data, size_t len) {
   }
 }
 
-void busSend(const uint8_t* data, size_t len, bool raw) {
+void frameSend(const uint8_t* data, size_t len, bool raw) {
   if (!len || len > TX_MAX_BYTES) return;
 
   // --- Wire framing + sanitization (single choke point for every send path) --
@@ -321,7 +314,7 @@ void busSend(const uint8_t* data, size_t len, bool raw) {
   //      module's 50 ms idle-timeout wait).
   // Raw path (raw==true -- the Monitor "Raw" toggle, or {"raw":true} on the
   // REST/MQTT send): transmit the caller's exact bytes verbatim, with no trim and
-  // no terminator change -- a deliberate debugging escape hatch. The bus-quiet
+  // no terminator change -- a deliberate debugging escape hatch. The reply-quiet
   // guard, Quiet Time, tracking, and the MQTT mirror still apply.
   size_t bare;
   bool   appendNL;
@@ -345,33 +338,33 @@ void busSend(const uint8_t* data, size_t len, bool raw) {
     DBG("[QUIET] suppressed display frame (%u bytes)\n", (unsigned)bare);
     return;
   }
-  // Bus-quiet guard: if modules are
-  // mid-response (the reply train after a broadcast m*v), hold off until the bus
-  // has been quiet for TX_BUS_GUARD_MS, bounded by TX_BUS_WAIT_CAP_MS so we
-  // always make progress. On the emulated bus this cannot corrupt a frame
+  // Reply-quiet guard: if modules are
+  // mid-response (the reply train after a broadcast m*v), hold off until replies
+  // have been quiet for TX_REPLY_GUARD_MS, bounded by TX_REPLY_WAIT_CAP_MS so we
+  // always make progress. Nothing can be corrupted here
   // -- replies are queued, not clocked out -- but it keeps command and reply
   // frames from interleaving in the MQTT mirror, and it keeps this path identical
   // to the one the physical gateway runs.
   //
   // From here through mqttPublishMsg is the critical section: a static scratch
-  // buffer, txCount, and vbusDeliver's writes to the module array. txMutex
-  // serializes it across taskWeb / taskNetwork / taskBus so two senders cannot
+  // buffer, txCount, and vlinkDeliver's writes to the module array. txMutex
+  // serializes it across taskWeb / taskNetwork / taskFrames so two senders cannot
   // interleave. There are no early returns inside, so the mutex is always
   // released. Lock order is txMutex -> {msgMutex, vmMutex}, never inverted: nothing takes
-  // txMutex while holding either of those. vbusDeliver takes vmMutex from in here, which is
-  // exactly why no caller may hold vmMutex across busSend.
+  // txMutex while holding either of those. vlinkDeliver takes vmMutex from in here, which is
+  // exactly why no caller may hold vmMutex across frameSend.
   if (txMutex) xSemaphoreTake(txMutex, portMAX_DELAY);
   {
     unsigned long waitStart = millis();
-    while (millis() - gLastRxMs < TX_BUS_GUARD_MS &&
-           millis() - waitStart < TX_BUS_WAIT_CAP_MS) {
+    while (millis() - gLastRxMs < TX_REPLY_GUARD_MS &&
+           millis() - waitStart < TX_REPLY_WAIT_CAP_MS) {
       vTaskDelay(pdMS_TO_TICKS(2));
     }
   }
   // Deliver the finished frame to the virtual modules. They strip any trailing
   // terminator themselves, so `bare` is handed over as-is and `appendNL` only
   // affects what the MQTT mirror records as the on-wire bytes.
-  vbusDeliver(data, bare);
+  vlinkDeliver(data, bare);
   txCount = txCount + 1;
   gDisplayDirty = true;   // HA display sensor refresh (network task, rate-limited)
   // Mirror the frame to MQTT (<prefix>/tx) -- that surface is about the wire
@@ -379,7 +372,7 @@ void busSend(const uint8_t* data, size_t len, bool raw) {
   // Monitor: 45 identical 'm00-' rows per page are noise, and there is no wire
   // for them to be "transmitted" on. The command that produced them is logged
   // once, by logCommand().
-  BusMsg m;
+  FrameMsg m;
   m.timestamp = millis();
   m.dir = 'T';
   size_t ringLen = (bare > MSG_MAX_BYTES) ? MSG_MAX_BYTES : bare;
@@ -391,7 +384,7 @@ void busSend(const uint8_t* data, size_t len, bool raw) {
   if (txMutex) xSemaphoreGive(txMutex);
 }
 
-// Send a null-terminated ASCII command string through busSend.
-void busSendStr(const char* s) {
-  busSend((const uint8_t*)s, strlen(s));
+// Send a null-terminated ASCII command string through frameSend.
+void frameSendStr(const char* s) {
+  frameSend((const uint8_t*)s, strlen(s));
 }

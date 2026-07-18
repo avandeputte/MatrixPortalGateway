@@ -13,7 +13,7 @@
 // costs no colour levels to dim the wall, because brightness is the OE duty cycle
 // rather than a multiply into every colour.
 //
-// THE DATA WORD (16-bit bus, one word per PCLK)
+// THE DATA WORD (16-bit parallel output, one word per PCLK)
 // ---------------------------------------------
 //   bit  0..5   R1 G1 B1 R2 G2 B2   pixel data for the row pair
 //   bit  6      LAT                 latch the shift register into the output register
@@ -216,7 +216,7 @@ static void lcdInit() {
   LCD_CAM.lcd_data_dout_mode.val      = 0;   // no per-line data delays
   LCD_CAM.lcd_user.lcd_8bits_order    = 0;
   LCD_CAM.lcd_user.lcd_bit_order      = 0;
-  LCD_CAM.lcd_user.lcd_2byte_en       = 1;   // 16-bit bus: all 13 signals per word
+  LCD_CAM.lcd_user.lcd_2byte_en       = 1;   // 16-bit output: all 13 signals per word
   LCD_CAM.lcd_user.lcd_cmd            = 0;
   LCD_CAM.lcd_user.lcd_dummy          = 0;   // no dummy phases: the chain never restarts
   LCD_CAM.lcd_user.lcd_always_out_en  = 1;   // keep clocking as long as DMA feeds us

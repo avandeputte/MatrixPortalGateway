@@ -2,7 +2,7 @@
 
 // rtc.cpp -- wall-clock time from the ESP32's internal RTC, synced by NTP.
 //
-// The RS-485 gateway reads a battery-backed PCF85063 over I2C. This board has no
+// The physical Split-Flap Gateway reads a battery-backed PCF85063 over I2C. This board has no
 // RTC chip, so the same API is served from the system clock: rtcNTPSync() calls
 // configTime() (always with a zero offset, so the system clock is UTC and mktime
 // acts as timegm), and rtcRead() snapshots gmtime() into rtcNow once a second.
@@ -16,7 +16,7 @@
 //
 // Local time is derived at format time from the configured POSIX TZ string. TZ is
 // set ONCE (loadConfig, and again only when the timezone changes) because
-// repeated setenv() leaks heap on ESP32 newlib -- the bug that caused the RS-485
+// repeated setenv() leaks heap on ESP32 newlib -- the bug that caused the physical
 // gateway's long-standing ~132 bytes/30 s drain. timeMutex serialises the
 // formatting calls: newlib's time functions and the TZ environment are
 // process-wide and not thread-safe.
@@ -90,7 +90,7 @@ bool rtcNTPSync() {
   rtcRead();
   // configTime(0,0,..) resets the TZ env to UTC to keep the system clock in UTC -- but that also
   // clobbers the zone we set from cfg.posixTZ at boot, so every NTP sync silently reverted the
-  // whole gateway (bus log timestamps, the clock effect, HA) to UTC. Restore the configured zone
+  // whole gateway (command-log timestamps, the clock effect, HA) to UTC. Restore the configured zone
   // so rtcFormatTime's localtime_r shows LOCAL time (cfgApplyTZ serialises setenv/tzset).
   cfgApplyTZ();
   char tbuf[32];

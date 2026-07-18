@@ -1,6 +1,6 @@
 {
- "$name": "English (UK)",
- "Color depth (bitplanes, 1-6)": "Colour depth (bitplanes, 1-6)",
- "Grid color": "Grid colour",
- "Width, height and color depth are read once at boot — reboot to apply.": "Width, height and colour depth are read once at boot — reboot to apply."
+  "$name": "English (UK)",
+  "Color depth (bitplanes, 1-6)": "Colour depth (bitplanes, 1-6)",
+  "Grid color": "Grid colour",
+  "Width, height and color depth are read once at boot — reboot to apply.": "Width, height and colour depth are read once at boot — reboot to apply."
 }

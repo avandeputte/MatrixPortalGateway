@@ -40,7 +40,6 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Broker Host / IP` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Broker OK - connected and authenticated` | — | RUNTIME MESSAGE (shown after an action, in testMqtt()) |
 | `Browser default` | — | RUNTIME MESSAGE (shown after an action, in g()) |
-| `Bus` | Status tab (diagnostics) | HEADING |
 | `Changing it creates or destroys modules — reboot to apply.` | Settings tab | EMPHASIS |
 | `Character` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Choose a layout…` | Settings tab | DROPDOWN OPTION |
@@ -131,6 +130,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Port` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Power-cycle the gateway to apply.` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()) |
 | `Protects ArduinoOTA (IDE/command-line) uploads. The web updater above is always accessible.` | Settings tab | HELP TEXT (a full sentence) |
+| `Protocol` | Status tab (diagnostics) | HEADING |
 | `Pub: .../rx   .../tx   .../status   .../display/state` | — | (built at runtime) |
 | `QUIET TIME - the display is blanked and flaps will not move. It is restored when Quiet Time ends` | — | TEXT |
 | `Quiet Time Schedule` | Settings tab | HEADING (card title -- a noun phrase) |
@@ -192,7 +192,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `UTC` | Settings tab | DROPDOWN OPTION |
 | `Upload new firmware directly from your browser — no USB cable or Arduino IDE required.` | Settings tab | HELP TEXT (a full sentence) |
 | `Uptime` | Status tab (diagnostics) | TEXT |
-| `Used for bus monitor timestamps. Takes effect immediately after saving.` | Settings tab | HELP TEXT (a full sentence) |
+| `Used for command log timestamps. Takes effect immediately after saving.` | Settings tab | HELP TEXT (a full sentence) |
 | `Username` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Wall` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()) |
 | `WiFi IP` | Status tab (diagnostics) | TEXT |

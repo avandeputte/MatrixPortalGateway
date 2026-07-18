@@ -19,7 +19,7 @@ Two runtime mechanisms, so two kinds of key:
 
 Wrapping is CONTEXT-AWARE, never a global literal match, because JS strings that look
 like prose are often code: 'nav a' is a querySelector, and 'HOME         ' is a padded
-bus-monitor decode label whose width keeps the log columns aligned. Wrapping either
+protocol decode label whose width keeps its columns aligned. Wrapping either
 would break the page. Only literals inside a .textContent assignment, confirm() or
 alert() are touched -- those are user-facing by construction.
 
@@ -116,8 +116,8 @@ def is_key(x):
 
 
 def is_protocol_label(raw):
-    """Padded, upper-case bus-monitor decode labels ('HOME         ') -- the padding
-    keeps the monitor's columns aligned and the words are protocol, not prose."""
+    """Padded, upper-case protocol decode labels ('HOME         ') -- the padding
+    keeps their columns aligned and the words are protocol, not prose."""
     return raw != raw.strip() and raw.strip().isupper() and len(raw.strip()) >= 3
 
 

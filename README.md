@@ -9,24 +9,24 @@
 A split-flap display with no split flaps.
 
 This is the [Split-Flap Gateway](../../SplitFlapGateway/3.1) v3.1 firmware, ported to an
-**Adafruit MatrixPortal ESP32-S3** driving a HUB75 RGB LED matrix. The RS-485 transceiver is
-gone. In its place is a software bus and a wall of *virtual* split-flap modules, each one
-emulating the real module firmware's wire protocol byte for byte and rendering itself as a
-flapping character cell on the panel.
+**Adafruit MatrixPortal ESP32-S3** driving a HUB75 RGB LED matrix. The physical gateway's
+serial transceiver is gone. In its place is a virtual link and a wall of *virtual* split-flap
+modules, each one emulating the real module firmware's wire protocol byte for byte and
+rendering itself as a flapping character cell on the panel.
 
 Everything above the protocol seam is unchanged: the web UI, the REST API, MQTT and Home
 Assistant discovery, OTA, the command log. The
 [companion app](../../SplitFlapGatewayCompanion) drives it without modification and cannot
-tell the difference. (One thing above the bus is *gone* rather than unchanged — the sticky
+tell the difference. (One thing above the seam is *gone* rather than unchanged — the sticky
 module registry. See **New in 1.10**.)
 
 ```
      ┌──────────────────────────────────────────────┐
      │  web UI · REST API · MQTT · OTA · command log     │   unchanged from Gateway 3.1
      ├──────────────────────────────────────────────┤
-     │  busSend()    framing · sanitization · Quiet  │   unchanged
+     │  frameSend()  framing · sanitization · Quiet  │   unchanged
      ├──────────────────────────────────────────────┤
-     │  vbus         deliver frames · queue replies  │   new
+     │  vlink        deliver frames · queue replies  │   new
      ├──────────────────────────────────────────────┤
      │  vmodule      45 virtual split-flap modules   │   new
      ├──────────────────────────────────────────────┤
@@ -37,6 +37,13 @@ module registry. See **New in 1.10**.)
 ```
 
 ---
+
+## New in 1.22
+
+- **BREAKING: the send endpoints are `POST /api/frames/send` and `POST /api/frames/batch` —
+  nothing else answers.** The physical gateway's `/api/rs485/*` paths, kept as compatibility
+  aliases through v1.21, and the interim `/api/bus/*` paths were both removed in v1.22.0 and
+  now 404. Every client — the companion app included — must POST to `/api/frames/*`.
 
 ## New in 1.20
 
@@ -587,10 +594,10 @@ and backup commands are ignored rather than faked — no reply, no state. `h` si
 0, and the `A` reply reports the nominal `homeOffset=2832` / `totalSteps=4096` with an empty
 flap map.
 
-**The bus is not emulated either.** A real RS-485 bus at 9600 baud is half-duplex and slow; a
-broadcast `m*v` across 45 modules takes four seconds of staggered reply slots. Here replies
-come back promptly, in module-ID order, spaced just enough that a broadcast train stays
-legible in the MQTT wire mirror.
+**The wire is not emulated either.** The physical gateway's half-duplex serial wire at
+9600 baud is slow; a broadcast `m*v` across 45 modules takes four seconds of staggered reply
+slots. Here replies come back promptly, in module-ID order, spaced just enough that a
+broadcast train stays legible in the MQTT wire mirror.
 
 Collisions therefore do not happen. Two modules given the same ID will both obey a command, but
 they answer one after the other rather than on top of each other, so the gateway's duplicate-ID
@@ -658,8 +665,8 @@ until the framebuffer no longer starves WiFi of internal SRAM, refusing outright
 depth 1 will not fit (see [Known limitations](#known-limitations)) — but if you see flicker,
 drop `panelBitDepth` to 3, which buys back refresh at the cost of colour depth.
 
-The ceiling on the emulated wall is **`VM_MAX_MODULES` = 192** (`src/vmodule.h`), and the bus's
-reply queue is sized to match, so a 32 × 5 = 160-module wall on a 256px chain still has room to spare. A grid that
+The ceiling on the emulated wall is **`VM_MAX_MODULES` = 192** (`src/vmodule.h`), and the
+virtual link's reply queue is sized to match, so a 32 × 5 = 160-module wall on a 256px chain still has room to spare. A grid that
 exceeds the ceiling is quietly reduced, and the boot log says so.
 
 ### If every colour is wrong
@@ -817,19 +824,20 @@ Stable across reboots, unique per board, and never mistakable for a real ATtiny 
 The companion app talks to the gateway over exactly seven HTTP endpoints and models *nothing*
 about a module — not the flap count, not the character set, not serial numbers. The
 reel and the `FA5E…` serials are invisible to it. Those seven are
-`GET /api/config`, `GET /api/status`, `POST /api/rs485/send`, `POST /api/rs485/batch`,
-`POST /api/companion`, and `GET`/`PUT /api/companion/settings`. (The `/api/rs485/*` pair are
-compatibility aliases — the canonical paths are `/api/bus/send` and `/api/bus/batch`, but the
-companion is frozen on the physical gateway's names and both reach the same handlers.)
+`GET /api/config`, `GET /api/status`, `POST /api/frames/send`, `POST /api/frames/batch`,
+`POST /api/companion`, and `GET`/`PUT /api/companion/settings`. (Since v1.22.0 the
+`/api/frames/*` pair is the only send surface — the physical gateway's paths it once aliased
+are gone, so the companion must be on a build that POSTs to `/api/frames/*`. See
+**New in 1.22**.)
 
 Two things do matter, and both are handled:
 
 1. **`GET /api/config` must report `version >= 3.1`.** The companion parses `MAJOR.MINOR` out of
    it and gates its gateway-stored settings on `>= (3,1)`. This firmware implements that surface
    exactly, so it answers `3.1.0` and puts its own version in `fwVersion`.
-2. **`POST /api/rs485/send` and `/api/rs485/batch` must forward frame bytes verbatim.** The
+2. **`POST /api/frames/send` and `/api/frames/batch` must forward frame bytes verbatim.** The
    companion sends `m00-A\n` style frames as `windows-1252`, one byte per glyph. They are not
-   transcoded — on either path, alias or canonical.
+   transcoded.
 
 The gateway's own MQTT surface, Home Assistant discovery and the `/api/companion/settings` gzip
 blob store are carried over untouched.
@@ -849,9 +857,9 @@ src/reel.h          the 237-flap reel and its two resolvers — Arduino-free, so
                     tools/reel_test.cpp compiles the same code
 src/font1252.*      GENERATED bitmap glyphs: the 216 printable CP1252 flaps + 14 pictographs
 src/aafont.h        GENERATED by tools/genaafont.py — Orbitron faces for the clock effect
-src/bus.*           frame sanitization, the command log, the busSend() choke point,
+src/frames.*        frame sanitization, the command log, the frameSend() choke point,
                     scheduled batch pacing
-src/vbus.*          the emulated bus: frame delivery + the reply queue
+src/vlink.*         the virtual link: frame delivery + the reply queue
 src/vmodule.*       the virtual split-flap modules: protocol dispatch, the shared reel,
                     the synthesized replies
 src/display.*       flap-wall geometry and the flap renderer (calls panel.*)
@@ -890,7 +898,7 @@ openapi.yaml        REST API reference
 `modules.*` is the gateway's side of the module protocol — how a character, an index or a home
 becomes a frame. `vmodule.*` is what answers those frames. They talk only through protocol
 frames, which is exactly why the port works. (Upstream, `modules.*` also holds a *registry* of
-whatever is out on the bus. That has no meaning on a drawn wall and was removed in 1.10.)
+whatever is out on its serial wire. That has no meaning on a drawn wall and was removed in 1.10.)
 
 ---
 

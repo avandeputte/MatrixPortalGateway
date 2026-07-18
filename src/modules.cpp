@@ -1,7 +1,7 @@
 // modules.cpp -- the module protocol: how a character, an index or a home becomes a frame.
 //
 // There is no module REGISTRY here any more, and that absence is the point. A registry is
-// how the physical gateway learns what is out on a real bus, where modules can be added,
+// how the physical gateway learns what is out on its wire, where modules can be added,
 // removed, renumbered or simply fail to answer. On this board the wall is DRAWN: vmods[] is
 // created whole by vmInit() from rows x cols, every module exists, none can vanish, and
 // vmods[i].curIndex is the flap on show -- not a report about it. A second copy of that
@@ -34,7 +34,7 @@ void sfSendChar(int addr, char c) {
   char buf[24];
   if (addr < 0) snprintf(buf, sizeof(buf), "m*-%c\n", b);
   else          snprintf(buf, sizeof(buf), "m%d-%c\n", addr, b);
-  busSendStr(buf);
+  frameSendStr(buf);
 }
 
 // Display by flap index. addr=-1 = broadcast. The only way to reach a lowercase or
@@ -43,7 +43,7 @@ void sfSendIndex(int addr, int idx) {
   char buf[24];
   if (addr < 0) snprintf(buf, sizeof(buf), "m*+%d\n", idx);
   else          snprintf(buf, sizeof(buf), "m%d+%d\n", addr, idx);
-  busSendStr(buf);
+  frameSendStr(buf);
 }
 
 // Home one module or all (addr=-1) -- flap 0, which is blank.
@@ -51,7 +51,7 @@ void sfHome(int addr) {
   char buf[16];
   if (addr < 0) snprintf(buf, sizeof(buf), "m*h\n");
   else          snprintf(buf, sizeof(buf), "m%dh\n", addr);
-  busSendStr(buf);
+  frameSendStr(buf);
 }
 
 // Send a text string across a sequence of module IDs starting at startAddr.
@@ -64,7 +64,7 @@ void sfSendText(int startAddr, const char* text) {
   char enc[SF_MAX_TEXT + 1];
   size_t len = utf8ToFlap(text, enc, sizeof(enc));
   // No pacing here. The physical gateway spaced these frames on the wire; on the
-  // emulated bus a send is a function call, and a delay() would block the CALLING
+  // frame link a send is a function call, and a delay() would block the CALLING
   // task (taskWeb or taskNetwork) for 10 ms x strlen -- up to 2.5 s of frozen
   // HTTP/MQTT per text. The cascade the eye sees is the flip animation's job.
   for (size_t i = 0; i < len; i++) sfSendChar((int)(startAddr + i), enc[i]);
@@ -77,7 +77,7 @@ void sfSendText(int startAddr, const char* text) {
 // same operation as the Home All button. The snapshot is what makes the blanking safe to
 // undo: the falling edge replays it.
 //
-// ORDER MATTERS. The home must go out BEFORE gQuietTime is raised: busSend suppresses
+// ORDER MATTERS. The home must go out BEFORE gQuietTime is raised: frameSend suppresses
 // display motion ('-', '+' and 'h') while quiet is on, so blanking after the flag would
 // suppress the very frame that does the blanking.
 //
@@ -91,7 +91,7 @@ void sfSendText(int startAddr, const char* text) {
 // pictograph, which has no byte at all, did not come back at all. A byte cannot name a flap
 // on a 237-flap reel. An index can.
 //
-// Safe to call from any task. vmMutex is NEVER held across busSend: vbusDeliver re-takes
+// Safe to call from any task. vmMutex is NEVER held across frameSend: vlinkDeliver re-takes
 // it and would self-deadlock. Snapshot under the lock, send outside it.
 void sfSetQuietTime(bool on) {
   const bool was = gQuietTime;

@@ -10,7 +10,7 @@ RTC_NOINIT_ATTR static uint32_t sfPanicBoots;
 
 // main.cpp -- boot sequence and supervisor.
 // setup() brings the system up in dependency order (mutexes, config, clock,
-// filesystem, virtual modules, panel, emulated bus, WiFi, servers, then tasks).
+// filesystem, virtual modules, panel, frame link, WiFi, servers, then tasks).
 // loop() is the watchdog supervisor: it logs periodic telemetry and reboots if a
 // task stalls or the heap runs critically low.
 //
@@ -19,7 +19,7 @@ RTC_NOINIT_ATTR static uint32_t sfPanicBoots;
 //   * dispPlan() must precede vmInit(): the plan says how many modules exist,
 //     because a cell too small to hold a glyph is not a module.
 //   * sfFsInit() must precede vmInit(), which restores /vmods.dat.
-//   * vmInit() must precede dispInit() and vbusBegin(), both of which read vmCount.
+//   * vmInit() must precede dispInit() and vlinkBegin(), both of which read vmCount.
 //   * dispInit() runs before WiFi so the panel driver gets first claim on the
 //     internal SRAM its DMA framebuffer needs (quad PSRAM is far too slow).
 
@@ -116,9 +116,8 @@ void setup() {
   dispInit();
   dispMarkDirty();
 
-  // 7. The emulated bus
-  busBegin();
-  vbusBegin();
+  // 7. The frame link to the virtual modules
+  vlinkBegin();
 
   // 8. WiFi -- MUST be initialised here, on the main Arduino task.
   // The SoftAP is a FALLBACK only: start in station mode and connect to the
@@ -155,10 +154,10 @@ void setup() {
   webInit();
 
   // 10. Tasks. Display sits on core 1 with the network stack, leaving core 0 for
-  //    the bus, the web server and the clock -- the same split the physical
+  //    frames, the web server and the clock -- the same split the physical
   //    gateway uses, with the panel taking the slot the OTA task shares.
   xTaskCreatePinnedToCore(taskRTC,     "RTC",     2048, NULL, 2, &hTaskRTC,   0);
-  xTaskCreatePinnedToCore(taskBus,     "Bus",     6144, NULL, 3, &hTaskBus,   0);
+  xTaskCreatePinnedToCore(taskFrames,  "Frames",  6144, NULL, 3, &hTaskFrames, 0);
   xTaskCreatePinnedToCore(taskOTA,     "OTA",     4096, NULL, 1, &hTaskOTA,   1);
   xTaskCreatePinnedToCore(taskWeb,     "Web",     8192, NULL, 2, &hTaskWeb,   0);
   xTaskCreatePinnedToCore(taskNetwork, "Network", 8192, NULL, 1, &hTaskNet,   1);
@@ -192,11 +191,11 @@ void loop() {
     // (fragmentation: a big gap between freeHeap and maxAlloc is a common
     // pre-crash signature). Per-task stack high-water marks catch the
     // canary-overflow class before it fires. rx/tx/drop counters surface
-    // bus health.
+    // frame traffic.
     unsigned freeHeap = (unsigned)ESP.getFreeHeap();
     unsigned minHeap  = (unsigned)ESP.getMinFreeHeap();
     unsigned maxBlk   = ESP.getMaxAllocHeap();
-    unsigned sBus = hTaskBus   ? uxTaskGetStackHighWaterMark(hTaskBus)   : 0;
+    unsigned sFrm = hTaskFrames   ? uxTaskGetStackHighWaterMark(hTaskFrames)   : 0;
     unsigned sWeb = hTaskWeb   ? uxTaskGetStackHighWaterMark(hTaskWeb)   : 0;
     unsigned sNet = hTaskNet   ? uxTaskGetStackHighWaterMark(hTaskNet)   : 0;
     unsigned sOta = hTaskOTA   ? uxTaskGetStackHighWaterMark(hTaskOTA)   : 0;
@@ -205,12 +204,12 @@ void loop() {
     static unsigned minBlkEver = 0xFFFFFFFFu;
     if (maxBlk < minBlkEver) minBlkEver = maxBlk;
     printf("[WDG] up=%lus heap=%u min=%u maxblk=%u minblk=%u "
-           "stk(bus/web/net/ota/rtc/disp)=%u/%u/%u/%u/%u/%u "
+           "stk(frames/web/net/ota/rtc/disp)=%u/%u/%u/%u/%u/%u "
            "rx=%lu tx=%lu drop=%lu psram=%u panel=%d "
            "wifi=%d ap=%d rssi=%d mqtt=%d mods=%d\n",
            now/1000, freeHeap, minHeap, maxBlk, minBlkEver,
-           sBus, sWeb, sNet, sOta, sRtc, sDsp,
-           rxCount, txCount, vbusDropped,
+           sFrm, sWeb, sNet, sOta, sRtc, sDsp,
+           rxCount, txCount, vlinkDropped,
            (unsigned)ESP.getFreePsram(), (int)gPanel.ready,
            (int)(WiFi.status()==WL_CONNECTED),
            (int)gApActive,
@@ -224,13 +223,13 @@ void loop() {
       // A heartbeat in the future (wdg > now) can only come from transient boot
       // skew -- treat it as healthy rather than letting the unsigned subtraction
       // underflow into a 49-day "stall".
-      bool okBus  = (wdgBusMs == 0 || wdgBusMs > now || now - wdgBusMs < 30000UL);
+      bool okFrm  = (wdgFramesMs == 0 || wdgFramesMs > now || now - wdgFramesMs < 30000UL);
       bool okWeb  = (wdgWebMs   == 0 || wdgWebMs   > now || now - wdgWebMs  < 120000UL);
       bool okNet  = (wdgNetMs   == 0 || wdgNetMs   > now || now - wdgNetMs  < 30000UL);
       bool okDisp = (wdgDispMs  == 0 || wdgDispMs  > now || now - wdgDispMs < 30000UL);
-      if (!okBus || !okWeb || !okNet || !okDisp) {
-        printf("[WDG] STALL: Bus=%d Web=%d Net=%d Disp=%d (heap=%u) -- rebooting\n",
-               okBus, okWeb, okNet, okDisp, (unsigned)ESP.getFreeHeap());
+      if (!okFrm || !okWeb || !okNet || !okDisp) {
+        printf("[WDG] STALL: Frames=%d Web=%d Net=%d Disp=%d (heap=%u) -- rebooting\n",
+               okFrm, okWeb, okNet, okDisp, (unsigned)ESP.getFreeHeap());
         delay(200);
         ESP.restart();
       }

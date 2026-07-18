@@ -1,7 +1,7 @@
 // vmodule.h -- the emulated split-flap module.
 //
 // One VModule stands in for one ATtiny1616 module that would otherwise hang off
-// the RS-485 bus. It speaks the whole wire protocol, byte for byte.
+// the physical gateway's serial wire. It speaks the whole protocol, byte for byte.
 //
 // The MECHANISM is not emulated. There is no stepper, no Hall sensor and no
 // EEPROM, and nothing that can be out of tune. Every module is a flawless,
@@ -119,9 +119,9 @@ extern StaticSemaphore_t vmMutexBuf;
 // Call after sfFsInit() (it deletes the legacy /vmods.dat if one exists).
 void vmInit(int count);
 
-// Feed one complete frame from the emulated bus to every module. Called by
-// vbusDeliver on the sender's task, so it must not block. Replies are queued (see
-// vbus.h), never sent inline.
+// Feed one complete frame to every module. Called by vlinkDeliver on the
+// sender's task, so it must not block. Replies are queued (see vlink.h), never
+// sent inline.
 void vmDispatch(const uint8_t* frame, size_t len, uint32_t now);
 
 // Advance every reel by at most one half-flap, and queue advertisements from any

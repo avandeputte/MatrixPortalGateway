@@ -12,15 +12,15 @@ settings blob are all inherited verbatim and are still true.
 
 ## The emulation seam is the UART, not the API
 
-The single most important structural decision. `busSend()` (`src/bus.*` — the physical
-gateway's `rs485Send()`, renamed in 1.20 because there is no RS-485 here) — which strips
+The single most important structural decision. `frameSend()` (`src/frames.*` — the physical
+gateway's send choke point, renamed because there is no serial transceiver here) — which strips
 terminators, trims anything past a complete well-formed command, re-frames, enforces Quiet
-Time and mirrors to MQTT — is otherwise untouched. Its last three lines call `vbusDeliver()`
+Time and mirrors to MQTT — is otherwise untouched. Its last three lines call `vlinkDeliver()`
 instead of writing the frame to a UART.
 
 Everything above that line is the gateway, unmodified. Everything below is new. The virtual
 modules receive the same bytes a real module would have received, and reply with frames that go
-back up through the *same* byte accumulator the UART fed (`taskBus`) and out through the same
+back up through the *same* byte accumulator the UART fed (`taskFrames`) and out through the same
 MQTT wire mirror, `mqttPublishMsg`.
 
 The alternative — short-circuiting at the API layer, so `POST /api/flap/char` directly sets a
@@ -48,7 +48,7 @@ would have meant a 64-entry `uint16_t` map per module.
 
 Even with the empty map, the frames are what size the buffers:
 
-| | RS-485 gateway (64 flaps, real map) | here (237 flaps, empty map) |
+| | physical gateway (64 flaps, real map) | here (237 flaps, empty map) |
 |---|---|---|
 | worst-case `A` reply | ~570 B | **~225 B** |
 | `TX_MAX_BYTES` | 768 | **512** |
@@ -59,7 +59,7 @@ The `A` reply carries no flap map but does carry the 163-byte legacy `flapChars`
 which dominates its ~225 B worst case — `tools/reel_test.cpp` measures it. A real module's is
 ~570 B because it also serialises the 64-entry position map. `TX_MAX_BYTES` (512) is
 kept generous for raw frame sends, and `MSG_MAX_BYTES` (320) is large enough that a whole `A`
-reply lands in one `BusMsg` untruncated, which is the frame you most want to read.
+reply lands in one `FrameMsg` untruncated, which is the frame you most want to read.
 
 `MSG_MAX_BYTES` also sizes `mqttPublishMsg`'s stack buffer (`MSG_MAX_BYTES * 3 + 80`, since a
 flap byte can expand to a 3-byte UTF-8 glyph). Raise one, check the other.
@@ -119,19 +119,19 @@ all of it — the section bases, the colour-first resolution, every folding trap
 printable CP1252 character resolves to a flap, and that the `A` reply is byte-clean and fits
 `TX_MAX_BYTES`.
 
-## Why the bus timing is *not* faithful
+## Why the wire timing is *not* faithful
 
-The emulated bus is deliberately **not** metered at a serial baud rate, held half-duplex, or
+The virtual link is deliberately **not** metered at a serial baud rate, held half-duplex, or
 staggered at the protocol's 100 ms / 700 ms reply slots.
 
 At 9600 baud even a short reply takes tens of milliseconds to clock out, and a broadcast `m*v`
 across 45 modules would stagger over several seconds of reply slots — faithful, and pure cost.
-Nothing is learned by making a virtual bus slow.
+Nothing is learned by making a virtual wire slow.
 
 What remains is the ordering, not the pacing: replies are queued as *intents* (not text), and
-`vbusPoll()` renders the earliest-due one into a single shared buffer. A broadcast still produces
-one frame per module in module-ID order, `VBUS_SLOT_MS` apart, and ranged batch queries
-(`m*v0-49`) are still honoured. `busSend()`'s bus-quiet guard still runs — it can no longer
+`vlinkPoll()` renders the earliest-due one into a single shared buffer. A broadcast still produces
+one frame per module in module-ID order, `VLINK_SLOT_MS` apart, and ranged batch queries
+(`m*v0-49`) are still honoured. `frameSend()`'s reply-quiet guard still runs — it can no longer
 prevent a corruption that cannot happen, but it keeps command and reply frames from interleaving
 in the MQTT mirror, and it keeps the code path identical to the one upstream runs.
 
@@ -147,22 +147,22 @@ duplicate ID is reproduced.
 
 Six mutexes exist. Four are inherited (`msgMutex`, `timeMutex`, `mqttQMutex`, `txMutex`); two
 are this product's: **`vmMutex`**, guarding the virtual-module array and the reply queue, and
-**`txQMutex`**, guarding the scheduled-TX ring that paces `/api/bus/batch` off the web task.
+**`txQMutex`**, guarding the scheduled-TX ring that paces `/api/frames/batch` off the web task.
 (`sfMutex` went with the module registry in 1.10.)
 
 Lock order is `txMutex → vmMutex`, never inverted. Nothing takes `txMutex`
-while holding any of the others, which is what makes `vbusDeliver()` safe to wait on `vmMutex`
+while holding any of the others, which is what makes `vlinkDeliver()` safe to wait on `vmMutex`
 with `portMAX_DELAY` — and it must wait, because timing out there would drop a command off the
 wall with no error anywhere.
 
 One consequence worth remembering:
 
 - **`dispRender()` snapshots under the lock and draws outside it.** The drawing loop touches
-  thousands of pixels and must not sit on the bus path. The snapshot is one `{char, colour}` pair
+  thousands of pixels and must not sit on the frame path. The snapshot is one `{char, colour}` pair
   per cell for the current and incoming flap.
 
 `vmDispatch()` has a `TX_MAX_BYTES` static scratch buffer with a single writer, because
-`busSend()` serialises every send through `txMutex` and that is the only path that reaches it.
+`frameSend()` serialises every send through `txMutex` and that is the only path that reaches it.
 A 512-byte frame will not fit on the 6–8 KB task stacks that call it.
 
 ## The panel
@@ -211,7 +211,7 @@ wall. None of the PSRAM structures is on a hot path, in an ISR, or fed by DMA.
 
 If `panelBegin()` still fails — a geometry too big even at depth 1 — the firmware logs why and
 **runs headless**. The web UI, MQTT and the
-whole emulated bus still work; refusing to boot over a display fault would be worse.
+whole protocol emulation still work; refusing to boot over a display fault would be worse.
 
 ### Geometry falls out of the grid
 

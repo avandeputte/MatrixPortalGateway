@@ -150,7 +150,7 @@
   "US Mountain AZ (UTC-7 no DST)": "VS Mountain AZ (UTC-7 geen zomertijd)",
   "US Pacific (UTC-8/-7)": "VS Pacific (UTC-8/-7)",
   "Upload new firmware directly from your browser — no USB cable or Arduino IDE required.": "Upload nieuwe firmware rechtstreeks vanuit je browser — geen USB-kabel of Arduino IDE nodig.",
-  "Used for bus monitor timestamps. Takes effect immediately after saving.": "Wordt gebruikt voor de tijdstempels in de Bus Monitor. Direct actief na opslaan.",
+  "Used for command log timestamps. Takes effect immediately after saving.": "Wordt gebruikt voor de tijdstempels in het commandolog. Direct actief na opslaan.",
   "Username": "Gebruikersnaam",
   "Wall": "Wand",
   "WiFi IP": "WiFi-IP",

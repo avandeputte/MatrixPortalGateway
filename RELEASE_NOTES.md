@@ -1,5 +1,34 @@
 # Matrix Portal Gateway — Release Notes
 
+## v1.22.0 — 2026-07-18
+
+The last of the bus. This product has no RS-485 transceiver and no bus of any kind, and
+after this release it no longer talks as if it did.
+
+### Breaking
+
+- **`POST /api/frames/send` and `POST /api/frames/batch` are the send endpoints.** The
+  `/api/rs485/*` compatibility aliases (kept through v1.21) and the short-lived
+  `/api/bus/*` paths are **gone** and return 404. **The companion app must be updated**
+  to POST to `/api/frames/*` (two URLs in its REST transport).
+- **`/api/status` renames `stk.bus` to `stk.frames`**; the MQTT status JSON renames
+  `stkbus` to `stkframes`, and the HA diagnostic sensor follows ("Stack Frames"). The
+  retained discovery configs for both earlier ids (`stk485`, `stkbus`) are deleted on
+  connect, so no dead sensors linger in HA.
+
+### Changed
+
+- **Internal naming**: `src/bus.*` → `src/frames.*` (`frameSend`, `taskFrames`,
+  `FrameMsg`); `src/vbus.*` → `src/vlink.*` — the delivery/reply-queue seam between the
+  gateway and its virtual modules (`vlinkDeliver`, `vlinkPoll`, `vlinkQueue`). The
+  bus-quiet guard is now the reply-quiet guard (`TX_REPLY_GUARD_MS`). The FreeRTOS task
+  and watchdog line say `Frames`.
+- **Wording**: the dashboard's Status card heading is "Protocol", the timezone help
+  says "command log", and every remaining comment or doc that described this product in
+  terms of a bus now speaks of the frame link, the virtual modules, or — when referring
+  to the other product — "the physical Split-Flap Gateway" and its serial wire. The
+  stale NVS-migration comment naming the ancient `rs485gw` namespace is gone too.
+
 ## v1.21.1 — 2026-07-18
 
 ### Fixed

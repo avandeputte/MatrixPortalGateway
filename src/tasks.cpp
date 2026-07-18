@@ -3,7 +3,7 @@
 
 
 // tasks.cpp -- the long-lived FreeRTOS task loops.
-// taskBus (core 0): drains the emulated bus, frames replies, mirrors them to MQTT.
+// taskFrames (core 0): drains the virtual modules' replies and mirrors them to MQTT.
 // taskRTC  (core 0): refreshes the wall clock once a second.
 // taskWeb  (core 0): services the HTTP server.
 // taskNetwork (core 1): WiFi/MQTT reconnect, status publishing, virtual-module and
@@ -14,54 +14,54 @@
    FreeRTOS tasks
 ---------------------------------------------------------- */
 
-// Bus receive (Core 0)
+// Reply receive (Core 0)
 //
 // The split-flap protocol uses newline-terminated ASCII messages that always
-// start with 'm'. Replies arrive from vbusPoll() as whole frames, but they are
+// start with 'm'. Replies arrive from vlinkPoll() as whole frames, but they are
 // still fed through the same byte accumulator the UART fed: it is the accumulator
 // that guarantees every frame handed to the MQTT mirror is exactly one complete
-// protocol message, and running the emulated bus down the identical path is what
-// keeps the gateway above it honest.
+// protocol message, and running the synthesized replies down the identical path
+// is what keeps the gateway above it honest.
 
-// Frame accumulator. Written only by taskBus, hence file-static rather than a
+// Frame accumulator. Written only by taskFrames, hence file-static rather than a
 // parameter. A frame from a virtual module is at most an 'A' reply (~225 bytes
 // with the 163-flap legacy tail); MSG_MAX_BYTES (320) is sized so it fits in one
-// BusMsg untruncated.
-static uint8_t busLineBuf[TX_MAX_BYTES];
-static size_t  busLineLen = 0;
+// FrameMsg untruncated.
+static uint8_t frameLineBuf[TX_MAX_BYTES];
+static size_t  frameLineLen = 0;
 
 // Feed one received byte to the accumulator; a completed frame is mirrored to MQTT.
-static void busIngestByte(uint8_t c) {
-  // Touch the watchdog per byte: a sustained burst of bus traffic (each completed
+static void frameIngestByte(uint8_t c) {
+  // Touch the watchdog per byte: a sustained burst of reply traffic (each completed
   // frame triggers rtcFormatTime + MQTT) could otherwise keep us in this
-  // loop past the 30 s bus-watchdog threshold and trigger a false stall reboot.
-  wdgBusMs  = millis();
-  gLastRxMs = wdgBusMs;   // bus activity marker for the TX quiet guard
+  // loop past the 30 s frame-task watchdog threshold and trigger a false stall reboot.
+  wdgFramesMs  = millis();
+  gLastRxMs = wdgFramesMs;   // reply-activity marker for the TX reply-quiet guard
 
   // If we see an 'm' and the buffer already holds something that doesn't start
   // with 'm', discard the stale partial frame and start fresh.
-  if (c == 'm' && busLineLen > 0 && busLineBuf[0] != 'm') busLineLen = 0;
+  if (c == 'm' && frameLineLen > 0 && frameLineBuf[0] != 'm') frameLineLen = 0;
 
   // Start accumulating only once we've seen the leading 'm'.
-  if (busLineLen == 0 && c != 'm') return;
+  if (frameLineLen == 0 && c != 'm') return;
 
-  if (busLineLen < TX_MAX_BYTES - 1) {
-    busLineBuf[busLineLen++] = c;
+  if (frameLineLen < TX_MAX_BYTES - 1) {
+    frameLineBuf[frameLineLen++] = c;
   } else {
-    busLineLen = 0;   // full without a terminator -- oversized frame, discard
+    frameLineLen = 0;   // full without a terminator -- oversized frame, discard
     return;
   }
   if (c != '\n') return;
 
   // Newline = end of message. Mirror it to MQTT.
   rxCount = rxCount + 1;
-  BusMsg m;
+  FrameMsg m;
   m.timestamp = millis();
   m.dir       = 'R';
-  // The BusMsg is fixed-size; store at most MSG_MAX_BYTES.
-  size_t ringLen = (busLineLen > MSG_MAX_BYTES) ? MSG_MAX_BYTES : busLineLen;
+  // The FrameMsg is fixed-size; store at most MSG_MAX_BYTES.
+  size_t ringLen = (frameLineLen > MSG_MAX_BYTES) ? MSG_MAX_BYTES : frameLineLen;
   m.len = ringLen;
-  memcpy(m.data, busLineBuf, ringLen);
+  memcpy(m.data, frameLineBuf, ringLen);
   rtcFormatTime(m.wallTime, sizeof(m.wallTime));
   // Mirrored to MQTT (<prefix>/rx) but NOT to the web Monitor and NOT parsed:
   // these replies were synthesized by the virtual modules a microsecond ago, in
@@ -69,10 +69,10 @@ static void busIngestByte(uint8_t c) {
   // registry the parse used to feed is gone. The MQTT wire mirror is the only
   // consumer left.
   mqttPublishMsg(m);
-  busLineLen = 0;
+  frameLineLen = 0;
 }
 
-void taskBus(void* pv) {
+void taskFrames(void* pv) {
   static uint8_t rxFrame[TX_MAX_BYTES];   // one polled reply; this task is its only reader
 
   // No startup discovery. There is nothing to discover: the wall IS the modules, all of them
@@ -81,25 +81,25 @@ void taskBus(void* pv) {
   // gone with the registry.
 
   while (true) {
-    // Stand down while a firmware image is streaming: no bus traffic, no flash
+    // Stand down while a firmware image is streaming: no frame traffic, no flash
     // contention. Feed the watchdog so the stall check stays happy.
-    if (gOtaInProgress) { wdgBusMs = millis(); vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+    if (gOtaInProgress) { wdgFramesMs = millis(); vTaskDelay(pdMS_TO_TICKS(100)); continue; }
 
-    // Send any scheduled batch frames now due. This is where /api/bus/batch's
+    // Send any scheduled batch frames now due. This is where /api/frames/batch's
     // cascade pacing actually happens -- moved off taskWeb so the HTTP server never
-    // blocks on delay() (see bus.h). At most one 5 ms tick of latency per frame.
-    busPollScheduled(millis());
+    // blocks on delay() (see frames.h). At most one 5 ms tick of latency per frame.
+    framePollScheduled(millis());
 
     // Drain what the modules have queued, bounded per iteration so a long
     // broadcast reply train cannot monopolise the task -- the rest arrives on the
     // next 5 ms tick.
     for (int frames = 0; frames < 8; frames++) {
       size_t rxLen = 0;
-      if (!vbusPoll(millis(), rxFrame, sizeof(rxFrame), &rxLen)) break;
-      for (size_t i = 0; i < rxLen; i++) busIngestByte(rxFrame[i]);
+      if (!vlinkPoll(millis(), rxFrame, sizeof(rxFrame), &rxLen)) break;
+      for (size_t i = 0; i < rxLen; i++) frameIngestByte(rxFrame[i]);
     }
 
-    wdgBusMs = millis();
+    wdgFramesMs = millis();
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }

@@ -194,7 +194,9 @@ static void handleApiMessages() {
   server.sendContent("");   // terminate the chunked response
 }
 
-// POST /api/bus/send  (alias: /api/rs485/send -- the path the companion still POSTs to)
+// POST /api/frames/send -- send one raw protocol frame to the virtual modules.
+// (The physical gateway's /api/rs485/* paths, kept as aliases through v1.21, were
+// dropped in v1.22; the companion must use /api/frames/*.)
 static void handleApiSend() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   JsonDocument doc;
@@ -206,15 +208,15 @@ static void handleApiSend() {
   memcpy(outBuf, d, outLen);
   if (!outLen) { sendJsonError(400, "Empty data"); return; }
   { char cd[LOG_TEXT_MAX]; snprintf(cd, sizeof(cd), "send %s", d); logCommand('R', cd); }
-  busSend(outBuf, outLen, raw);
+  frameSend(outBuf, outLen, raw);
   char resp[64];
   snprintf(resp, sizeof(resp), "{\"ok\":true,\"bytes\":%zu,\"raw\":%s}", outLen, raw ? "true" : "false");
   server.send(200, "application/json", resp);
 }
 
-// POST /api/bus/batch  (v3.0; alias: /api/rs485/batch, which the companion POSTs to)
+// POST /api/frames/batch -- send many frames in one request.
 // Body: {"frames":["m00-A\n","m01-B\n",...], "step_ms":15}. Each frame is sent
-// normalized (like /api/bus/send); an optional step_ms paces the cascade
+// normalized (like /api/frames/send); an optional step_ms paces the cascade
 // device-side. Lets the companion draw a whole animated page in ONE HTTP call
 // instead of one request per module. Caps keep the request bounded and the web
 // watchdog fed.
@@ -242,12 +244,12 @@ static void handleApiSendBatch() {
     memcpy(outBuf, f, outLen);
     // Pace by SCHEDULING, never by delay(): this handler runs on taskWeb, and blocking
     // it freezes the one-connection HTTP server and piles up concurrent sockets (their
-    // TCP window buffers stack in internal RAM). taskBus sends each frame when due.
+    // TCP window buffers stack in internal RAM). taskFrames sends each frame when due.
     // step==0 or a frame too long / a full queue falls back to an immediate send.
-    if (step > 0 && busSendScheduled(outBuf, outLen, due)) {
+    if (step > 0 && frameSendScheduled(outBuf, outLen, due)) {
       due += (uint32_t)step;
     } else {
-      busSend(outBuf, outLen, false);
+      frameSend(outBuf, outLen, false);
     }
     sent++;
     wdgWebMs = millis();             // this loop is now fast, but stay watchdog-safe
@@ -361,10 +363,10 @@ static void handleApiDisplayCells() {
     if (flap[i] < 0) continue;                       // skip: leave the module as it is
     char f[16];
     int len = snprintf(f, sizeof(f), "m%d+%d\n", start + i, (int)flap[i]);
-    if (step > 0 && busSendScheduled((const uint8_t*)f, (size_t)len, due)) {
+    if (step > 0 && frameSendScheduled((const uint8_t*)f, (size_t)len, due)) {
       due += (uint32_t)step;
     } else {
-      busSend((const uint8_t*)f, (size_t)len, false);
+      frameSend((const uint8_t*)f, (size_t)len, false);
     }
     sent++;
     wdgWebMs = millis();
@@ -383,7 +385,7 @@ static void handleApiDisplayCells() {
  *
  * (There used to be a shadow copy: a sticky SFModule registry, persisted to FATFS, with a
  * stale-probe pruner and a duplicate-ID heuristic. It existed to track modules that appear
- * and disappear on a real bus. Nothing here appears or disappears.)
+ * and disappear on a physical wire. Nothing here appears or disappears.)
  */
 static void handleApiModules() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -574,13 +576,13 @@ static void handleApiHome() {
    GET /api/capabilities -- what this wall can actually show
    ----------------------------------------------------------
    One call, made once when a client connects, that answers "what characters can this display
-   show?" without the client having to know what kind of gateway it is talking to. The RS-485
+   show?" without the client having to know what kind of gateway it is talking to. The physical
    gateway answers the same question at the same URL, with the same shape -- which is the whole
    point of it: a client asks the wall, not the hardware.
 
    On THIS board the answer is short, because the wall is drawn: every module renders from one
    shared reel (reel.h), so there is exactly one flap set and `uniform` is true by construction.
-   On the RS-485 gateway every module owns its own reel and they need not agree, so the same
+   On the physical gateway every module owns its own reel and they need not agree, so the same
    response can carry several sets -- and there, `union` and `common` genuinely differ.
 
    `sets` reports each DISTINCT reel once, with the ids that use it, rather than one entry per
@@ -664,7 +666,7 @@ static void handleApiCapabilities() {
 
   // union == common == the reel, and uniform is true: one reel, drawn once per cell. All three
   // fields are still present, because a client must not have to care which gateway it is
-  // talking to -- the RS-485 gateway answers this same URL, where they genuinely differ.
+  // talking to -- the physical gateway answers this same URL, where they genuinely differ.
   capPut("\"charset\":{\"uniform\":true,\"assumed\":[],\"unknown\":[],\"union\":\"");
   capPutReel();
   capPut("\",\"common\":\"");
@@ -686,7 +688,7 @@ static void handleApiCapabilities() {
   // retarget it mid-flip, nothing queues, so sub-second updates (a ticking seconds field)
   // are honest here. settleMs is the worst-case flip ANIMATION (flapMs x flapMax, both
   // live-configurable) — cosmetic pacing, not a physical constraint; it is advisory, for a
-  // client pacing full-wall animations. The RS-485 gateway answers the same key with kind
+  // client pacing full-wall animations. The physical gateway answers the same key with kind
   // "mechanical", where the number IS a physical constraint. Stated directly, so a client
   // never has to infer motion from which endpoints exist.
   { char motion[64];
@@ -694,7 +696,7 @@ static void handleApiCapabilities() {
              (unsigned long)cfg.flapMs * (unsigned long)cfg.flapMax);
     capPut(motion); }
 
-  // Raw canvas and on-device effects are Matrix-only -- the RS-485 wall has no framebuffer to
+  // Raw canvas and on-device effects are Matrix-only -- the physical wall has no framebuffer to
   // hand out, and answers this URL without these keys. Stated here so the companion lights up
   // canvas/effect controls from capabilities, not from a firmware-version sniff: `canvas` is the
   // framebuffer a client would push frames to, `effects` the on-device animation set.
@@ -722,7 +724,7 @@ static void handleApiStatus() {
   IPAddress lip = WiFi.localIP(), aip = WiFi.softAPIP();
   // Per-task minimum-ever free stack (bytes). A value trending toward 0 is an
   // early warning of the stack-canary crash class.
-  unsigned stkBus = hTaskBus ? uxTaskGetStackHighWaterMark(hTaskBus) : 0;
+  unsigned stkFrm = hTaskFrames ? uxTaskGetStackHighWaterMark(hTaskFrames) : 0;
   unsigned stkWeb = hTaskWeb   ? uxTaskGetStackHighWaterMark(hTaskWeb)   : 0;
   unsigned stkNet = hTaskNet   ? uxTaskGetStackHighWaterMark(hTaskNet)   : 0;
   unsigned stkOta = hTaskOTA   ? uxTaskGetStackHighWaterMark(hTaskOTA)   : 0;
@@ -735,7 +737,7 @@ static void handleApiStatus() {
     "{\"uptime\":%lu,\"rx\":%lu,\"tx\":%lu,"
     "\"wifi\":%s,\"ip\":\"%d.%d.%d.%d\",\"apip\":\"%d.%d.%d.%d\","
     "\"heap\":%u,\"minheap\":%u,\"mqtt\":%s,\"modules\":%d,"
-    "\"stk\":{\"bus\":%u,\"web\":%u,\"net\":%u,\"ota\":%u,\"rtc\":%u,\"disp\":%u},"
+    "\"stk\":{\"frames\":%u,\"web\":%u,\"net\":%u,\"ota\":%u,\"rtc\":%u,\"disp\":%u},"
     "\"panel\":{\"ok\":%s,\"w\":%u,\"h\":%u,\"cols\":%u,\"rows\":%u,"
     "\"cellW\":%u,\"cellH\":%u,\"depth\":%u,\"font\":\"%s\",\"vmods\":%d,\"drop\":%lu},"
     "\"time\":\"%s\",\"ntpSynced\":%s,\"quiet\":%s,"
@@ -747,10 +749,10 @@ static void handleApiStatus() {
     (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
     mqtt.connected()?"true":"false",
     vmCount,
-    stkBus, stkWeb, stkNet, stkOta, stkRtc, stkDsp,
+    stkFrm, stkWeb, stkNet, stkOta, stkRtc, stkDsp,
     gPanel.ready?"true":"false", gPanel.panelW, gPanel.panelH,
     gPanel.cols, gPanel.rows, gPanel.cellW, gPanel.cellH, (unsigned)panelInfo().depth,
-    dispFontName(), vmCount, vbusDropped,
+    dispFontName(), vmCount, vlinkDropped,
     rtcBuf,
     ntpSynced?"true":"false",
     gQuietTime?"true":"false",
@@ -908,7 +910,7 @@ static void handleApiConfigSettings() {
     if (gr > 64)  gr = 64;
     if (gc < 1)   gc = 1;
     if (gc > 64)  gc = 64;
-    // Unlike the RS-485 gateway, this grid is the PHYSICAL wall: every cell is a
+    // Unlike the physical gateway, this grid is the REAL wall here: every cell is a
     // virtual module that has to exist. Bound the product, not just each side.
     // Shrink the taller dimension first so a wide wall stays wide.
     while (gr * gc > VM_MAX_MODULES) { if (gr > gc) gr--; else gc--; }
@@ -1357,7 +1359,7 @@ static void handleApiCompanionSettingsGet() {
 }
 
 /* ----------------------------------------------------------
-   Raw canvas  (Matrix gateway only; the RS-485 gateway has no framebuffer to expose)
+   Raw canvas  (Matrix gateway only; the physical gateway has no framebuffer to expose)
    ----------------------------------------------------------
    Direct pixel control of the HUB75 panel, bypassing the split-flap wall. While a canvas is
    active gCanvasMode makes taskDisplay stand down -- exactly as it does during an OTA -- so the
@@ -1858,16 +1860,10 @@ void webInit() {
   server.on("/ota",                  HTTP_GET,     handleOTAPage);
   server.on("/api/ota/upload",       HTTP_POST,    sendOTAUploadResult, handleOTAUpload);
   server.on("/api/log",              HTTP_GET,     handleApiMessages);
-  server.on("/api/bus/send",         HTTP_POST,    handleApiSend);
-  server.on("/api/bus/send",         HTTP_OPTIONS, handleOptions);
-  server.on("/api/bus/batch",        HTTP_POST,    handleApiSendBatch);
-  server.on("/api/bus/batch",        HTTP_OPTIONS, handleOptions);
-  // Compatibility aliases: the companion app (splitflap-os side is frozen) still
-  // POSTs to the physical gateway's /api/rs485/* paths. Same handlers.
-  server.on("/api/rs485/send",       HTTP_POST,    handleApiSend);
-  server.on("/api/rs485/send",       HTTP_OPTIONS, handleOptions);
-  server.on("/api/rs485/batch",      HTTP_POST,    handleApiSendBatch);
-  server.on("/api/rs485/batch",      HTTP_OPTIONS, handleOptions);
+  server.on("/api/frames/send",      HTTP_POST,    handleApiSend);
+  server.on("/api/frames/send",      HTTP_OPTIONS, handleOptions);
+  server.on("/api/frames/batch",     HTTP_POST,    handleApiSendBatch);
+  server.on("/api/frames/batch",     HTTP_OPTIONS, handleOptions);
   server.on("/api/flap/modules",     HTTP_GET,     handleApiModules);
   server.on("/api/display/state",    HTTP_GET,     handleApiDisplayState);
   server.on("/api/display/cells",    HTTP_POST,    handleApiDisplayCells);

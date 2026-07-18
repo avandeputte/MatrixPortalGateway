@@ -4,7 +4,7 @@
 // `-<char>` command is a byte, and the reel's glyph section is a byte array). Browsers and JSON, however, speak UTF-8, where a euro sign is 3
 // bytes and accented letters are 2. To let people use euro signs and accented
 // characters on the flaps, the gateway bridges the two: it maps each UTF-8 code
-// point to a single flap byte on the way to the bus, and maps each stored flap
+// point to a single flap byte on the way to the modules, and maps each stored flap
 // byte back to UTF-8 on the way to the browser/MQTT.
 //
 // The single-byte flap encoding is **Windows-1252 (CP1252)**: a superset of

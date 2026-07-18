@@ -7,15 +7,15 @@
  *
  * A port of the Split-Flap Gateway (v3.1) that keeps the entire gateway -- web UI,
  * REST API, MQTT/Home Assistant, OTA, command monitor -- and replaces
- * the RS-485 transceiver with a software bus and a panel full of *virtual*
- * split-flap modules. Nothing is wired to a real reel: every module the gateway
+ * the physical gateway's serial transceiver with an in-process frame link and
+ * a panel full of *virtual* split-flap modules. Nothing is wired to a real reel: every module the gateway
  * drives is emulated in firmware and drawn as a flap cell on the LED matrix.
  *
  * The emulation is at the PROTOCOL level, not the API level. Commands are framed,
  * sanitized and "transmitted" exactly as before; the virtual modules parse those
- * bytes and reply with real protocol frames, staggered on a simulated half-duplex
- * bus. The gateway cannot tell the difference, so the companion app and any MQTT
- * client keep working unchanged.
+ * bytes and reply with real protocol frames, staggered the way the physical
+ * modules' replies would be. The gateway cannot tell the difference, so the
+ * companion app and any MQTT client keep working unchanged.
  *
  * Copyright (c) 2026 Alex Van de Putte
  *
@@ -138,7 +138,7 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
    "RTC not valid yet" path the frame timestamps handle. */
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "1.21.1"   // this product's version (UI + boot log)
+#define FW_VERSION           "1.22.0"   // this product's version (UI + boot log)
 // The gateway REST/MQTT surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it
@@ -258,15 +258,15 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define DEFAULT_FLAP_MAX     64     // flips drawn for one character change
 #define FLAP_ANIM_MAX        64     // hard ceiling on flapMax
 
-/* ---- Bus timing ----
-   Carried over from the physical gateway. The emulated bus is not metered at
-   a baud rate -- replies come back promptly (see vbus.*), staggered only by
-   VBUS_SLOT_MS so a broadcast stays legible in the MQTT mirror. What remains is
-   the bus-quiet guard: busSend still waits for the bus to fall quiet before it
-   transmits, which keeps command and reply frames from interleaving and keeps the
-   gateway's collision-avoidance code path identical to the one upstream runs. */
-#define TX_BUS_GUARD_MS      12
-#define TX_BUS_WAIT_CAP_MS   400
+/* ---- Reply timing ----
+   Carried over from the physical gateway. The frame link is not metered at
+   a baud rate -- replies come back promptly (see vlink.*), staggered only by
+   VLINK_SLOT_MS so a broadcast stays legible in the MQTT mirror. What remains is
+   the reply-quiet guard: frameSend still waits until no replies are in flight
+   before it transmits, which keeps command and reply frames from interleaving and
+   keeps the gateway's collision-avoidance code path identical to upstream's. */
+#define TX_REPLY_GUARD_MS      12
+#define TX_REPLY_WAIT_CAP_MS   400
 
 /* ---- Flap set sizing ----
    A physical reel has 64 leaves because it is a physical object. These modules are DRAWN,
@@ -303,13 +303,13 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
    frame sends -- comfortably more than any reply needs.
 
    MSG_MAX_BYTES is 320 rather than the physical gateway's 256 so a full 'A'
-   reply fits in one BusMsg untruncated -- it is the frame you most want to
+   reply fits in one FrameMsg untruncated -- it is the frame you most want to
    read. It also sizes mqttPublishMsg's stack buffer (MSG_MAX_BYTES*3 + 80, since
    a flap byte can expand to a 3-byte UTF-8 glyph), which MQTT_BUF_SIZE must be
    able to hold. */
 #define MSG_RING_SIZE        64    // command log: number of entries retained
 #define MSG_MAX_BYTES        320   // MQTT wire mirror: bytes stored per frame
-#define TX_MAX_BYTES         512   // max bytes busSend will transmit in one frame
+#define TX_MAX_BYTES         512   // max bytes frameSend will transmit in one frame
 #define MQTT_BUF_SIZE        1280  // MQTT packet buffer + queue slot: >= the worst-case
                                    // rx/tx monitor JSON (320 wire bytes -> 3-byte UTF-8
                                    // glyphs = ~960B + prefix) and any dump payload
@@ -378,12 +378,12 @@ extern volatile bool gOtaRebootPending;
 extern bool gApActive;
 extern SemaphoreHandle_t timeMutex;
 extern StaticSemaphore_t timeMutexBuf;
-extern volatile unsigned long wdgBusMs;
+extern volatile unsigned long wdgFramesMs;
 extern volatile unsigned long gLastRxMs;
 extern volatile unsigned long wdgNetMs;
 extern volatile unsigned long wdgWebMs;
 extern volatile unsigned long wdgDispMs;
-extern TaskHandle_t hTaskRTC, hTaskBus, hTaskOTA, hTaskWeb, hTaskNet, hTaskDisp;
+extern TaskHandle_t hTaskRTC, hTaskFrames, hTaskOTA, hTaskWeb, hTaskNet, hTaskDisp;
 extern bool ntpSynced;
 extern unsigned long staDownSince;
 

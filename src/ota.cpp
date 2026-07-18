@@ -25,7 +25,7 @@ void otaInit() {
   ArduinoOTA.onStart([]() {
     String type = (ArduinoOTA.getCommand() == U_FLASH) ? "firmware" : "filesystem";
     printf("[OTA] Starting %s update\n", type.c_str());
-    gOtaInProgress = true;   // display + bus tasks stand down
+    gOtaInProgress = true;   // display + frame tasks stand down
     dispBlank();
   });
   ArduinoOTA.onEnd([]() {
@@ -48,7 +48,7 @@ void otaInit() {
     else if (error == OTA_RECEIVE_ERROR) msg = "Receive failed";
     else if (error == OTA_END_ERROR)     msg = "End failed";
     printf("[OTA] Error: %s\n", msg);
-    gOtaInProgress = false;  // let the display + bus tasks resume
+    gOtaInProgress = false;  // let the display + frame tasks resume
     dispResume();
   });
 
@@ -61,7 +61,7 @@ void otaInit() {
 }
 
 // OTA runs in its own task so ArduinoOTA.handle() is called frequently
-// without blocking the web server or bus tasks.
+// without blocking the web server or frame tasks.
 void taskOTA(void* pv) {
   while (true) {
     if (WiFi.status() == WL_CONNECTED) {
@@ -185,7 +185,7 @@ void handleOTAUpload() {
     // status/display/discovery publishes. This addresses mid-upload connection
     // drops seen under heap fragmentation (esp. with Home Assistant enabled).
     gOtaInProgress = true;
-    // Blank the wall and stand the display + bus tasks down. The DMA engine keeps
+    // Blank the wall and stand the display + frame tasks down. The DMA engine keeps
     // clocking a black frame with no CPU help, so the panel stays quiet even while
     // Update.write() has the instruction cache disabled on both cores.
     dispBlank();

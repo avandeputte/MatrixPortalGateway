@@ -41,7 +41,7 @@ HEADER = """#ifndef MPGW_WEB_UI_H
 //
 // Dashboard page markup (HTML + CSS + JS), served verbatim by handleRoot().
 // Streamed byte-for-byte; the page pulls all runtime values (config, modules,
-// bus) via the REST API. Included only by web.cpp, so the arrays have one home.
+// wall state) via the REST API. Included only by web.cpp, so the arrays have one home.
 //
 // UI_LANGS[] holds one gzipped JSON dictionary per language, served by
 // handleLang() at GET /lang/<code>. English is not in the table: it is the text

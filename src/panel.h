@@ -57,7 +57,7 @@ void panelCloneToBack();
 void panelReadback(uint8_t* out, bool rgb565);
 
 // Halt output (dark panel). Used during OTA flash writes -- not because the GDMA
-// refresh needs the CPU (it does not), but for the panel-current and bus headroom
+// refresh needs the CPU (it does not), but for the panel-current and memory-bandwidth headroom
 // while the upload runs. panelResume() undoes it.
 void panelStop();
 void panelResume();

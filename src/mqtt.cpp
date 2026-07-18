@@ -32,7 +32,7 @@ static void mqttEnqueue(const char* topic, const char* payload, size_t len) {
   xSemaphoreGive(mqttQMutex);
 }
 
-void mqttPublishMsg(const BusMsg& m) {
+void mqttPublishMsg(const FrameMsg& m) {
   if (!mqtt.connected()) return;
   // Build the JSON with snprintf + a direct transcode -- no JsonDocument heap
   // allocation in this hot path. One worst-case buffer holds the whole message
@@ -40,7 +40,7 @@ void mqttPublishMsg(const BusMsg& m) {
   // is at most MSG_MAX_BYTES*3 (every flap byte -> a 3-byte UTF-8 glyph), and
   // the "} suffix is 2 -- all inside MSG_MAX_BYTES*3 + 80. A single buffer (vs a
   // separate transcode scratch) keeps stack use modest: mqttPublishMsg runs on
-  // taskBus (6 KB stack) and taskNetwork (8 KB).
+  // taskFrames (6 KB stack) and taskNetwork (8 KB).
   char buf[MSG_MAX_BYTES * 3 + 80];
   int pre = snprintf(buf, sizeof(buf),
     "{\"ts\":%lu,\"wt\":\"%s\",\"command\":\"", m.timestamp, m.wallTime);
@@ -74,7 +74,7 @@ void mqttPublishStatus() {
   unsigned freeHeap = ESP.getFreeHeap();
   unsigned minHeap  = ESP.getMinFreeHeap();
   unsigned maxBlk   = ESP.getMaxAllocHeap();
-  unsigned sBus = hTaskBus   ? uxTaskGetStackHighWaterMark(hTaskBus)   : 0;
+  unsigned sFrm = hTaskFrames   ? uxTaskGetStackHighWaterMark(hTaskFrames)   : 0;
   unsigned sWeb = hTaskWeb   ? uxTaskGetStackHighWaterMark(hTaskWeb)   : 0;
   unsigned sNet = hTaskNet   ? uxTaskGetStackHighWaterMark(hTaskNet)   : 0;
   unsigned sOta = hTaskOTA   ? uxTaskGetStackHighWaterMark(hTaskOTA)   : 0;
@@ -85,13 +85,13 @@ void mqttPublishStatus() {
     "{\"uptime\":%lu,\"rx\":%lu,\"tx\":%lu,\"modules\":%d,"
     "\"time\":\"%s\",\"ntpSynced\":%s,\"heap\":%u,\"minheap\":%u,"
     "\"maxblk\":%u,\"psram\":%u,\"rssi\":%d,\"wifi\":%s,"
-    "\"stkbus\":%u,\"stkweb\":%u,\"stknet\":%u,\"stkota\":%u,\"stkrtc\":%u,\"stkdisp\":%u,"
+    "\"stkframes\":%u,\"stkweb\":%u,\"stknet\":%u,\"stkota\":%u,\"stkrtc\":%u,\"stkdisp\":%u,"
     "\"ip\":\"%s\",\"url\":\"http://%s/\",\"version\":\"%s\","
     "\"quiet\":%s}",
     millis()/1000, rxCount, txCount, vmCount,
     timeBuf, ntpSynced?"true":"false", freeHeap, minHeap,
     maxBlk, (unsigned)ESP.getFreePsram(), rssi, (WiFi.status()==WL_CONNECTED)?"true":"false",
-    sBus, sWeb, sNet, sOta, sRtc, sDsp,
+    sFrm, sWeb, sNet, sOta, sRtc, sDsp,
     ip, ip, FW_VERSION, gQuietTime?"true":"false");
   if (n >= sizeof(buf)) n = sizeof(buf) - 1;
   char _t[80];
@@ -203,7 +203,7 @@ void haPublishDiscovery(bool enable) {
     {"rx",      "Frames Received","rx",      NULL,  NULL,              "mdi:download-network"},
     {"tx",      "Frames Sent",    "tx",      NULL,  NULL,              "mdi:upload-network"},
     {"psram",   "Free PSRAM",     "psram",   "B",   NULL,              "mdi:memory"},
-    {"stkbus",  "Stack Bus",      "stkbus",  "B",   NULL,              "mdi:layers"},
+    {"stkframes","Stack Frames",  "stkframes","B",  NULL,              "mdi:layers"},
     {"stkweb",  "Stack Web",      "stkweb",  "B",   NULL,              "mdi:layers"},
     {"stknet",  "Stack Network",  "stknet",  "B",   NULL,              "mdi:layers"},
     {"stkota",  "Stack OTA",      "stkota",  "B",   NULL,              "mdi:layers"},
@@ -229,11 +229,13 @@ void haPublishDiscovery(bool enable) {
     } else mqttEnqueue(topic, "", 0);
   }
 
-  // Retained-config cleanup for entities earlier firmware advertised: the bus
-  // task's stack sensor moved from "stk485" to "stkbus" (v1.20), and the
-  // Maintenance Mode switch was removed outright (v1.21 -- it was the physical
-  // gateway's service mode, and there is nothing to service here).
+  // Retained-config cleanup for entities earlier firmware advertised: the frame
+  // task's stack sensor was "stk485" (to v1.19) then "stkbus" (v1.20-v1.21), and
+  // the Maintenance Mode switch was removed outright (v1.21 -- it was the
+  // physical gateway's service mode, and there is nothing to service here).
   snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/stk485/config", node);
+  mqttEnqueue(topic, "", 0);
+  snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/stkbus/config", node);
   mqttEnqueue(topic, "", 0);
   snprintf(topic, sizeof(topic), "homeassistant/switch/%s/maintenance/config", node);
   mqttEnqueue(topic, "", 0);
@@ -274,8 +276,8 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (length >= MQTT_BUF_SIZE) return;
   // static (not stack): mqttCallback is invoked only from mqtt.loop() in
   // taskNetwork (single caller, no reentrancy). Three ~768-byte stack buffers
-  // here plus the busSend/mqttPublishMsg call chain would push the task stack
-  // toward overflow -- the failure mode that once crashed the bus task.
+  // here plus the frameSend/mqttPublishMsg call chain would push the task stack
+  // toward overflow -- the failure mode that once crashed the frame task.
   static char buf[MQTT_BUF_SIZE + 1];
   memcpy(buf, payload, length);
   buf[length] = 0;
@@ -328,7 +330,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
       memcpy(outBuf, d, outLen);
       // Bounded on purpose: a monitor row, not the payload.
       { char cd[LOG_TEXT_MAX]; snprintf(cd, sizeof(cd), "send %.*s", (int)sizeof(cd) - 8, d); logCommand('M', cd); }
-      busSend(outBuf, outLen, raw);
+      frameSend(outBuf, outLen, raw);
     }
     return;
   }

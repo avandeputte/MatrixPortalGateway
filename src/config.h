@@ -8,7 +8,7 @@
 // Runtime configuration; the single instance is the global `cfg`. Defaults are
 // set in cfgSetDefaults(); loadConfig()/saveConfig() persist it to the
 // "splitflap" NVS namespace (config.cpp). The namespace and key names are
-// unchanged from the RS-485 gateway, so a settings backup moves between them.
+// unchanged from the physical Split-Flap Gateway, so a settings backup moves between them.
 struct GwConfig {
   char          wifiSSID[64];
   char          wifiPass[64];
@@ -23,7 +23,7 @@ struct GwConfig {
   bool          haEnabled;     // publish Home Assistant MQTT discovery + entity state
   char          otaPassword[32]; // OTA update password (blank = no auth)
   char          hostname[HOSTNAME_MAX]; // blank = derive from the MAC; see cfgHostname()
-  // The module grid. On the RS-485 gateway this only laid out the web UI's
+  // The module grid. On the physical gateway this only laid out the web UI's
   // display wall; here it is also the PHYSICAL wall -- one virtual split-flap
   // module per cell, IDs row-major from 0 -- so changing it changes how many
   // modules exist. Applied on reboot.

@@ -10,8 +10,8 @@
 //   rtc.*       wall-clock time: the ESP32's internal RTC + NTP
 //   charset.*   UTF-8 <-> Windows-1252 flap-byte transcoding
 //   font1252.*  GENERATED bitmap glyphs for the 216 printable CP1252 flaps
-//   bus.*       frame sanitization, TX choke point, command log
-//   vbus.*      the emulated bus underneath busSend: delivery + reply queue
+//   frames.*    frame sanitization, TX choke point, command log
+//   vlink.*     the seam underneath frameSend: delivery + reply queue
 //   vmodule.*   the virtual split-flap modules: protocol, reel, persistence
 //   display.*   HUB75 panel geometry and the flap renderer
 //   panel.*     the HUB75 driver itself (LCD_CAM + GDMA)
@@ -19,7 +19,7 @@
 //   mqtt.*      MQTT client, outbound publish queue, Home Assistant discovery
 //   web.*       HTTP server: dashboard page (web_ui.h) + REST API handlers
 //   ota.*       firmware update: ArduinoOTA + browser upload
-//   tasks.*     the FreeRTOS task loops (Bus / RTC / Web / Network / Display)
+//   tasks.*     the FreeRTOS task loops (Frames / RTC / Web / Network / Display)
 //   main.cpp    setup() boot sequence + loop() watchdog supervisor
 //
 // Note the two "module" layers: modules.* is the gateway side (it builds and
@@ -34,8 +34,8 @@
 #include "charset.h"
 #include "font1252.h"
 #include "rtc.h"
-#include "bus.h"
-#include "vbus.h"
+#include "frames.h"
+#include "vlink.h"
 #include "vmodule.h"
 #include "display.h"
 #include "modules.h"

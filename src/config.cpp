@@ -38,8 +38,6 @@ void cfgSetDefaults() {
   cfg.quietDays = 0x7F;  // all days
   cfg.quietTzOffsetMin = 0;   // captured from the browser on Save Schedule
 }
-// Migrate settings from old NVS namespace "rs485gw" to "splitflap".
-// Runs once after firmware update; no-op on subsequent boots.
 void loadConfig() {
   prefs.begin("splitflap", true);
   // The compile-time credentials are the default ONLY for a key that has never

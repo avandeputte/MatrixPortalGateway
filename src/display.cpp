@@ -100,7 +100,7 @@ void dispInit() {
 #if PANEL_DISABLE
   /* Diagnostic A/B: bring the whole gateway up with the panel never started -- no
      framebuffer, no GDMA, no LCD_CAM clock, no panel current draw. Everything else
-     (WiFi, web, MQTT, the emulated bus, the 45 virtual modules) runs exactly as
+     (WiFi, web, MQTT, the frame link, the 45 virtual modules) runs exactly as
      normal; the wall is simply not driven.
 
      This exists to answer one question: is the radio's misbehaviour caused by the
@@ -125,7 +125,7 @@ void dispInit() {
   gPanel.ready = panelBegin(gPanel.panelW, gPanel.panelH, depth);
   panelSetColourOrder(cfg.panelBGR);   // the panel's own wiring, not something we can detect
   if (!gPanel.ready) {
-    // Headless is a legitimate state: the web UI, MQTT and the whole emulated bus still
+    // Headless is a legitimate state: the web UI, MQTT and all the virtual modules still
     // work, so report the fault and carry on rather than refusing to boot.
     printf("[PANEL] no output -- running headless\n");
     return;
@@ -351,7 +351,7 @@ bool dispRender() {
   if (!gPanel.ready || !vmods) return false;
 
   // Snapshot under the lock; draw outside it. Drawing touches thousands of
-  // pixels and must not stall vmDispatch on the bus path.
+  // pixels and must not stall vmDispatch on the dispatch path.
   if (vmMutex && xSemaphoreTake(vmMutex, pdMS_TO_TICKS(20)) != pdTRUE) return false;
   // Clear the flag BEFORE reading state, not after drawing: a dispMarkDirty() that
   // lands mid-repaint (a brightness change from the web task) must survive to force

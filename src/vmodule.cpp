@@ -6,7 +6,7 @@
 // layout and for what is deliberately NOT emulated (everything mechanical).
 //
 // Three concerns: (1) building the reel and the bogus serial numbers;
-// (2) vmDispatch, which parses a bus frame and applies it to every addressed
+// (2) vmDispatch, which parses a protocol frame and applies it to every addressed
 // module; (3) vmRenderReply, which turns a queued reply intent back into
 // protocol bytes.
 //
@@ -17,8 +17,8 @@
 // a leftover file from older firmware.
 //
 // Concurrency: everything here runs under vmMutex, taken by the caller
-// (vbusDeliver, vbusPoll) or by vmTick itself. vmDispatch is reached
-// only from busSend, which holds txMutex, so its static scratch buffer has a
+// (vlinkDeliver, vlinkPoll) or by vmTick itself. vmDispatch is reached
+// only from frameSend, which holds txMutex, so its static scratch buffer has a
 // single writer.
 
 // ---- file-private forward declarations ----
@@ -189,7 +189,7 @@ static void vmDispatchBySerial(const char* p, size_t len, uint32_t now) {
     VModule& m = vmods[i];
     if (strncmp(sn, m.sn, VM_SN_CHARS) != 0) continue;
     switch (cmd) {
-      case 'A': vbusQueue((uint8_t)i, VR_ALL, now + VBUS_REPLY_MS); return;
+      case 'A': vlinkQueue((uint8_t)i, VR_ALL, now + VLINK_REPLY_MS); return;
       // 'N' (set the flap set) is gone: the reel is shared, complete and fixed.
       default: return;
     }
@@ -199,7 +199,7 @@ static void vmDispatchBySerial(const char* p, size_t len, uint32_t now) {
 void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
   if (!vmods || len < 2 || frame[0] != 'm') return;
 
-  // Single writer: busSend serialises every send through txMutex, and that is
+  // Single writer: frameSend serialises every send through txMutex, and that is
   // the only path here.
   static char buf[TX_MAX_BYTES + 1];
   size_t n = (len < TX_MAX_BYTES) ? len : TX_MAX_BYTES;
@@ -233,7 +233,7 @@ void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
   if (cmd == '-' || cmd == '+' || cmd == 'h') dispReturnToWall();
 
   // 'v' and 'A' accept an optional "<lo>-<hi>" id range on a broadcast, so a
-  // controller can poll a large bus in retryable batches.
+  // controller can poll a large wall in retryable batches.
   int lo = 0, hi = 254;
   if (bcast && (cmd == 'v' || cmd == 'A') && isdigit((unsigned char)*payload)) {
     char* e;
@@ -267,17 +267,17 @@ void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
 
       // ---- queries ----
       // 'v' and 'A' answer a broadcast too. Each module gets its own slot so the
-      // train stays in ID order; the slots are milliseconds, not the hundreds a
-      // real half-duplex bus needs to dodge collisions.
+      // train stays in ID order; the slots are milliseconds, not the hundreds the
+      // physical half-duplex wire needs to dodge collisions.
       case 'v':
         if (bcast && (m.id < lo || m.id > hi)) break;
-        vbusQueue((uint8_t)i, VR_VER,
-                  now + VBUS_REPLY_MS + (bcast ? (uint32_t)(m.id - lo) * VBUS_SLOT_MS : 0));
+        vlinkQueue((uint8_t)i, VR_VER,
+                  now + VLINK_REPLY_MS + (bcast ? (uint32_t)(m.id - lo) * VLINK_SLOT_MS : 0));
         break;
       case 'A':
         if (bcast && (m.id < lo || m.id > hi)) break;
-        vbusQueue((uint8_t)i, VR_ALL,
-                  now + VBUS_REPLY_MS + (bcast ? (uint32_t)(m.id - lo) * VBUS_SLOT_MS : 0));
+        vlinkQueue((uint8_t)i, VR_ALL,
+                  now + VLINK_REPLY_MS + (bcast ? (uint32_t)(m.id - lo) * VLINK_SLOT_MS : 0));
         break;
       default: break;                    // unknown command: silently ignored
     }
