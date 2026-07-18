@@ -36,7 +36,7 @@ servers:
 
 tags:
   - name: Bus
-    description: Raw RS-485 bus access
+    description: Raw protocol-frame access to the emulated bus (there is no physical wire)
   - name: Modules
     description: Split-flap module display control
   - name: Display
@@ -56,7 +56,7 @@ tags:
 
 paths:
 
-  # ── RS-485 Bus ──────────────────────────────────────────────────
+  # ── Emulated bus ────────────────────────────────────────────────
 
   /api/log:
     get:
@@ -79,7 +79,7 @@ paths:
   /api/bus/send:
     post:
       tags: [Bus]
-      summary: Send a raw ASCII frame to the bus
+      summary: Send a raw ASCII protocol frame to the virtual modules
       description: >-
         The canonical path since v1.20.0. `/api/rs485/send` remains as a compatibility
         alias (same handler) because the companion app — whose splitflap-os side is
@@ -878,8 +878,9 @@ paths:
         On the Split-Flap Gateway a module only reports its reel from firmware v31. `assumed`
         lists modules too old to report one, whose reel is taken to be the firmware's built-in
         default; `unknown` lists modules whose reel is genuinely not known yet (the background
-        fill has not reached them, or they are off the bus) and which are excluded from both
-        character sets. Both are empty on the Matrix Portal.
+        fill has not reached them, or they are unreachable) and which are excluded from both
+        character sets. Both are always empty on the Matrix Portal -- its modules are drawn
+        and share one reel.
       responses:
         "200":
           description: Wall capabilities

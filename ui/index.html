@@ -49,7 +49,7 @@ button.sec:hover{background:var(--ha-hover)}
 
    Two mechanisms, because a DOM walk alone cannot cover both cases:
      - a walk + MutationObserver translates TEXT NODES, so it covers the static page AND
-       the markup the JS builds later (the flap wall, monitor rows, quiet-day checkboxes);
+       the markup the JS builds later (the flap wall, quiet-day checkboxes);
      - t("...") translates messages the JS COMPOSES ("Error: " + e), which the walk only
        ever sees as the finished string.
    Re-running the walk is safe: a translated node is no longer a key, so it is a no-op.
@@ -89,9 +89,6 @@ function _walk(root){
   todo.forEach(function(n){
     var p=n.parentNode;
     if(!n.nodeValue||!p||p.tagName==="SCRIPT"||p.tagName==="STYLE")return;
-    /* Never touch the bus monitor. It shows RS-485 frames and their decode -- protocol,
-       not UI chrome. Its decode labels are padded to keep the monospace columns aligned,
-       so translating them would both mistranslate the protocol and break the layout. */
     if(!/[A-Za-z]{2}/.test(n.nodeValue))return;   /* must match is_key(): 2+ letters */
     var v=_tr(n.nodeValue);
     if(v!==null&&v!==n.nodeValue)n.nodeValue=v;

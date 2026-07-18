@@ -203,7 +203,7 @@ descriptor fetches) starved the WiFi MAC, which shares that SRAM — association
 refresh at the default geometry, well above flicker. Do not raise `LCD_CLK_HZ`; if a long chain
 ghosts, lower it.
 
-Conversely, the monitor ring, the MQTT queue and the scheduled-TX ring
+Conversely, the command log, the MQTT queue and the scheduled-TX ring
 are in PSRAM (`gwPsramAlloc`), precisely to leave that internal SRAM free.
 The virtual-module array is the exception — it is pinned to internal RAM, because `taskDisplay`
 walks it 100×/s on the core the refresh runs on, and a quad-PSRAM cache miss there shimmers the
@@ -328,9 +328,6 @@ Two mechanisms, because neither covers both cases:
   the observer sees them when they are inserted.
 - **`t("...")`** wraps messages the JS *composes* (`"Error: " + e`). A walk only ever sees the
   finished string, which is not a key.
-
-The bus monitor (`#log`) is explicitly skipped by the walk. It renders protocol — the raw command
-text and the channel it arrived on — not chrome.
 
 Two traps are worth knowing about, because both fail *silently* (the string simply stays English
 and nothing reports it):

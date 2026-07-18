@@ -14,15 +14,15 @@ gone. In its place is a software bus and a wall of *virtual* split-flap modules,
 emulating the real module firmware's wire protocol byte for byte and rendering itself as a
 flapping character cell on the panel.
 
-Everything above the bus is unchanged: the web UI, the REST API, MQTT and Home Assistant
-discovery, OTA, the bus monitor. The
+Everything above the protocol seam is unchanged: the web UI, the REST API, MQTT and Home
+Assistant discovery, OTA, the command log. The
 [companion app](../../SplitFlapGatewayCompanion) drives it without modification and cannot
 tell the difference. (One thing above the bus is *gone* rather than unchanged — the sticky
 module registry. See **New in 1.10**.)
 
 ```
      ┌──────────────────────────────────────────────┐
-     │  web UI · REST API · MQTT · OTA · monitor     │   unchanged from Gateway 3.1
+     │  web UI · REST API · MQTT · OTA · command log     │   unchanged from Gateway 3.1
      ├──────────────────────────────────────────────┤
      │  busSend()    framing · sanitization · Quiet  │   unchanged
      ├──────────────────────────────────────────────┤
@@ -131,7 +131,7 @@ module registry. See **New in 1.10**.)
 
 - **The clock shows the right time — a timezone bug is fixed.** Every NTP sync called
   `configTime(0, 0, …)`, which resets the `TZ` environment to UTC and so silently clobbered the
-  zone set on the Settings page — the bus-log timestamps, Home Assistant discovery and the new
+  zone set on the Settings page — the command-log timestamps, Home Assistant discovery and the new
   clock all reverted to UTC after the first sync. `rtcNTPSync()` now re-applies the configured
   zone right after each sync, so local time sticks across syncs and reboots.
 
@@ -354,7 +354,7 @@ module registry. See **New in 1.10**.)
 - **Companion tab advertisement — the whole feature was missing.** `/api/companion` accepted
   the companion's `tabs` and *silently discarded them*, and never advertised the gateway's own
   `gwTabs`. So neither app could link to the other's screens. Both directions now work. The
-  gateway advertises **Modules, Display, Monitor, Settings, Status** — deliberately *not*
+  gateway advertises **Display, Settings, Status** — deliberately *not*
   Provision or Calibration, which the split-flap gateway has and this product cannot.
 
 ---
@@ -437,8 +437,8 @@ array of them *is* the state of the wall. They still answer `m*v` with a firmwar
 serial number — the protocol is emulated faithfully — but nobody has to ask.
 
 From then on, everything works. Send `m5-A` and module 5's reel flips forward until it lands
-on `A`. Send text from the Display tab and it cascades across the wall. The Monitor logs
-every command the gateway receives.
+on `A`. Send text from the Display tab and it cascades across the wall. Every command the
+gateway receives is recorded in the command log (`GET /api/log`).
 
 The difference is that nothing is moving. The modules are software, and the panel is where
 they live.
@@ -792,10 +792,9 @@ Never edit `src/web_ui.h` by hand — the next `build_ui.py` overwrites it.
 
 Strings are keyed by their **English text**, so the markup needs no `data-i18n` tagging: a DOM
 walk plus a `MutationObserver` translates the static page *and* whatever the JS builds later
-(the flap wall, the monitor rows, the quiet-day checkboxes). Messages the JS *composes*
+(the flap wall, the quiet-day checkboxes). Messages the JS *composes*
 (`"Error: " + e`) are wrapped in
-`t()`, because a walk only ever sees the finished string. The bus monitor is deliberately
-skipped — it shows protocol, not chrome.
+`t()`, because a walk only ever sees the finished string.
 
 ---
 
@@ -940,7 +939,7 @@ c++ -std=c++17 -Isrc tools/reel_test.cpp src/charset.cpp src/font1252.cpp \
   together, and `panelBegin()` clamps the bit depth down until the framebuffer stops starving
   WiFi of that pool — refusing only a geometry that will not fit even at depth 1. The
   virtual-module array is pinned to internal RAM too — `taskDisplay` walks it 100×/s on the core
-  the refresh runs on, and quad PSRAM there causes a shimmer. (The monitor ring, the MQTT queue
+  the refresh runs on, and quad PSRAM there causes a shimmer. (The command log, the MQTT queue
   and the scheduled-TX ring *are* in PSRAM; nothing in the refresh path touches them.)
 - **No battery-backed RTC.** Wall-clock time is invalid from power-on until the first NTP sync.
   Every caller already handles that state; frame timestamps show `HH:MM:SS` uptime until then.

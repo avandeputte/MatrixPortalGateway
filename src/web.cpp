@@ -1139,8 +1139,8 @@ static void handleApiQuietSchedule() {
    the companion reads it to learn the wall.) Advertising a tab that does not exist would
    send the companion linking into thin air. The id is the public one used in the URL hash ("status", not the pane id
    "statusp"); keep it in step with the <nav> in ui/index.html and the M map beside it. */
-static const char* const GW_TAB_ID[]  = {"display", "monitor", "settings", "status"};
-static const char* const GW_TAB_LBL[] = {"Display", "Monitor", "Settings", "Status"};
+static const char* const GW_TAB_ID[]  = {"display", "settings", "status"};
+static const char* const GW_TAB_LBL[] = {"Display", "Settings", "Status"};
 static const size_t GW_TAB_N = sizeof(GW_TAB_ID) / sizeof(GW_TAB_ID[0]);
 
 // Store the tab list a companion advertised, re-serialised into gCompanionTabs.

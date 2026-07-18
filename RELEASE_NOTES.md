@@ -1,5 +1,18 @@
 # Matrix Portal Gateway — Release Notes
 
+## v1.21.1 — 2026-07-18
+
+### Fixed
+
+- **The gateway no longer advertises a Monitor tab to the companion.** `gwTabs` (the tab
+  list the companion uses to deep-link this dashboard) still carried `monitor` after
+  v1.21.0 removed the tab, so the companion's nav could link into thin air. It now
+  advertises Display, Settings, Status.
+- **Wording sweep for the bus that isn't there**: the OpenAPI "Bus" tag no longer says
+  "Raw RS-485 bus access" (it is raw protocol-frame access to the emulated bus), and the
+  last "bus monitor" references in the README/ARCHITECTURE/UI comments now say command
+  log — or are gone, where they described the removed tab.
+
 ## v1.21.0 — 2026-07-18
 
 ### Removed
