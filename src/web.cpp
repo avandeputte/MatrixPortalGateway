@@ -1725,6 +1725,7 @@ static void handleApiCanvasQoiRaw() {
     case RAW_START: {
       qoiErr = 0; qoiLen = 0;
       if (!gPanel.ready) { qoiErr = 503; break; }
+      if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) { qoiErr = 507; break; }   // stressed: back off
       size_t need = (size_t)server.clientContentLength();
       size_t cap  = (size_t)gPanel.panelW * gPanel.panelH * 4 + 1024;   // QOI worst case + header
       if (need < 14 || need > cap) { qoiErr = 400; break; }
@@ -1743,7 +1744,10 @@ static void handleApiCanvasQoiRaw() {
       if (qoiLen + raw.currentSize <= qoiCap) { memcpy(qoiBuf + qoiLen, raw.buf, raw.currentSize); qoiLen += raw.currentSize; }
       break;
     case RAW_END:
-      if (!qoiErr && gPanel.ready) { if (qoiDecodeToPanel(qoiBuf, qoiLen)) panelShow(); else qoiErr = 400; }
+      if (!qoiErr && gPanel.ready) {
+        if (qoiDecodeToPanel(qoiBuf, qoiLen)) panelShow();
+        else { qoiErr = 400; dispReturnToWall(); }    // bad image: don't leave the panel parked
+      }
       break;
     case RAW_ABORTED:
       qoiErr = 400;
@@ -1755,6 +1759,7 @@ static void handleApiCanvasQoi() {
   int e = qoiErr; qoiErr = 0;
   if (e == 400) { sendJsonError(400, "Not a QOI image matching the panel size"); return; }
   if (e == 503) { sendJsonError(503, "Panel not running or out of memory"); return; }
+  if (e == 507) { sendJsonError(507, "Low on memory -- try again in a moment"); return; }
   char buf[96];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"width\":%u,\"height\":%u}", (unsigned)gPanel.panelW, (unsigned)gPanel.panelH);
   server.send(200, "application/json", buf);
@@ -1772,6 +1777,7 @@ static void handleApiCanvasAnimRaw() {
     case RAW_START:
       animErr = 0; animHdrN = 0; animBegun = false;
       if (!gPanel.ready) { animErr = 503; break; }
+      if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) { animErr = 507; break; }   // stressed: back off
       canvasStandDown();                              // park the render task while the store refills
       break;
     case RAW_WRITE: {
@@ -1806,6 +1812,7 @@ static void handleApiCanvasAnim() {
   if (e == 400) { sendJsonError(400, "Bad MPGA header or truncated upload"); return; }
   if (e == 413) { sendJsonError(413, "Animation exceeds the PSRAM budget"); return; }
   if (e == 503) { sendJsonError(503, "Panel not running or out of memory"); return; }
+  if (e == 507) { sendJsonError(507, "Low on memory -- try again in a moment"); return; }
   char buf[64];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"frames\":%u}", (unsigned)canvasAnimCount());
   server.send(200, "application/json", buf);

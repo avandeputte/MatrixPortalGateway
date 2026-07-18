@@ -136,7 +136,7 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
    "RTC not valid yet" path the frame timestamps handle. */
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "1.18.0"   // this product's version (UI + boot log)
+#define FW_VERSION           "1.18.1"   // this product's version (UI + boot log)
 // The gateway REST/MQTT surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it
@@ -234,6 +234,12 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
    The 128x32 depth-4 default costs ~38.6 KB, so there is room to grow. */
 #define PANEL_RAM_BUDGET     (120u * 1024u)   // most the panel may ever claim
 #define PANEL_RAM_RESERVE    (100u * 1024u)   // must remain free for WiFi + lwIP
+
+// Circuit breaker for the large canvas uploads (animation, QOI). If free internal heap is already
+// below this when one arrives, refuse it with 507 rather than pile a takeover + PSRAM alloc onto a
+// stressed heap and risk loop()'s 20 KB reboot floor. 2x the floor: a genuinely-low signal, not a
+// normal dip. A big panel (256x64) sits near this under companion load; a small one never does.
+#define CANVAS_MIN_UPLOAD_HEAP  (40u * 1024u)
 
 #define PANEL_MAX_W          256   // panel height is validated by the enumerated 16/32/64 set
 
