@@ -3,6 +3,7 @@
 #include "effects.h"
 #include "canvas.h"
 #include "web_ui.h"
+#include <mbedtls/base64.h>   // the canvas "image" op decodes a base64 sprite
 
 
 
@@ -698,10 +699,12 @@ static void handleApiCapabilities() {
   // hand out, and answers this URL without these keys. Stated here so the companion lights up
   // canvas/effect controls from capabilities, not from a firmware-version sniff: `canvas` is the
   // framebuffer a client would push frames to, `effects` the on-device animation set.
-  { char cv[224];
+  { char cv[480];
     snprintf(cv, sizeof(cv),
              "\"canvas\":{\"formats\":[\"rgb888\",\"rgb565\",\"qoi\"],\"width\":%u,\"height\":%u,"
-             "\"rect\":true,\"anim\":true,\"ticker\":true,\"readback\":true},"
+             "\"rect\":true,\"anim\":true,\"ticker\":true,\"readback\":true,"
+             "\"ops\":[\"clear\",\"pixel\",\"hline\",\"vline\",\"line\",\"rect\",\"circle\",\"ellipse\","
+             "\"triangle\",\"roundrect\",\"gradient\",\"polyline\",\"text\",\"image\",\"scroll\",\"show\"]},"
              "\"effects\":%s,\"effectParams\":[\"hue\",\"density\"],",
              (unsigned)gPanel.panelW, (unsigned)gPanel.panelH, effectListJson());
     capPut(cv); }
@@ -1475,9 +1478,65 @@ static void handleApiCanvasEffect() {
   server.send(200, "application/json", buf);
 }
 
-// POST /api/canvas/ops -- a JSON array of draw commands, applied in order then presented.
-// Ops: clear | pixel | hline | vline | rect(+fill) | text | show. Colours are [r,g,b], default
-// white (black for clear). Auto-takes-over the panel.
+// A base64 sprite op: {op:"image", x, y, w, h, fmt:"rgb888"|"rgb565", data:"<base64>"}. Decoded into
+// PSRAM (bounded by CANVAS_OPS_IMG_MAX) and blitted at (x,y); silently skipped if oversized or bad.
+// For a full-panel picture use PUT /api/canvas/frame -- this op is for small sprites in an ops batch.
+#define CANVAS_OPS_IMG_MAX  8192
+static void canvasOpImage(JsonVariantConst op, int x, int y, int w, int h) {
+  const char* data = op["data"] | "";
+  size_t b64len = strlen(data);
+  const bool rgb565 = !strcmp(op["fmt"] | "rgb888", "rgb565");
+  const int  bpp    = rgb565 ? 2 : 3;
+  const long need   = (long)w * h * bpp;
+  if (w <= 0 || h <= 0 || need <= 0 || need > CANVAS_OPS_IMG_MAX || b64len < 4 || b64len > 16384) return;
+  size_t cap = (b64len / 4) * 3 + 4;
+  uint8_t* pix = (uint8_t*)ps_malloc(cap);
+  if (!pix) pix = (uint8_t*)malloc(cap);
+  if (!pix) return;
+  size_t olen = 0;
+  if (mbedtls_base64_decode(pix, cap, &olen, (const uint8_t*)data, b64len) == 0 && (long)olen >= need) {
+    for (int row = 0; row < h; row++)
+      for (int col = 0; col < w; col++) {
+        const uint8_t* px = pix + ((size_t)row * w + col) * bpp;
+        uint8_t rr, gg, bb;
+        if (rgb565) { uint16_t v = ((uint16_t)px[0] << 8) | px[1];
+                      rr = (uint8_t)(((v >> 11) & 0x1F) << 3); gg = (uint8_t)(((v >> 5) & 0x3F) << 2); bb = (uint8_t)((v & 0x1F) << 3); }
+        else { rr = px[0]; gg = px[1]; bb = px[2]; }
+        panelPixel(x + col, y + row, rr, gg, bb);
+      }
+  }
+  free(pix);
+}
+
+// Fill (x,y,w,h) with a linear gradient from `from` to `to`, vertical unless horizontal.
+static void canvasOpGradient(int x, int y, int w, int h, JsonVariantConst from, JsonVariantConst to, bool vertical) {
+  if (w <= 0 || h <= 0) return;
+  uint8_t r0 = 0, g0 = 0, b0 = 0, r1 = 0, g1 = 0, b1 = 0;
+  canvasColor(from, r0, g0, b0); canvasColor(to, r1, g1, b1);
+  const int n = vertical ? h : w, den = (n > 1) ? (n - 1) : 1;
+  for (int i = 0; i < n; i++) {
+    uint8_t r = (uint8_t)((int)r0 + ((int)r1 - (int)r0) * i / den);
+    uint8_t g = (uint8_t)((int)g0 + ((int)g1 - (int)g0) * i / den);
+    uint8_t b = (uint8_t)((int)b0 + ((int)b1 - (int)b0) * i / den);
+    if (vertical) panelHLine(x, y + i, w, r, g, b);
+    else          panelVLine(x + i, y, h, r, g, b);
+  }
+}
+
+// A polyline: connect consecutive [x,y] points with straight lines.
+static void canvasOpPolyline(JsonVariantConst pts, uint8_t r, uint8_t g, uint8_t b) {
+  int px = 0, py = 0; bool have = false;
+  for (JsonVariantConst pt : pts.as<JsonArrayConst>()) {
+    int x = pt[0] | 0, y = pt[1] | 0;
+    if (have) panelLine(px, py, x, y, r, g, b);
+    px = x; py = y; have = true;
+  }
+}
+
+// POST /api/canvas/ops -- a JSON array of draw commands, applied in order then presented. Ops: clear
+// | pixel | hline | vline | line | rect(+fill) | circle(+fill) | ellipse(+fill) | triangle(+fill) |
+// roundrect(+fill) | gradient | polyline | text(+align) | image | scroll | show. Colours are [r,g,b],
+// default white (black for clear). Auto-takes-over the panel.
 static void handleApiCanvasOps() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   if (!gPanel.ready) { sendJsonError(503, "Panel not running"); return; }
@@ -1507,9 +1566,40 @@ static void handleApiCanvasOps() {
       if (op["fill"] | false) panelFillRect(x, y, w, h, r, g, b);
       else { panelHLine(x, y, w, r, g, b); panelHLine(x, y + h - 1, w, r, g, b);
              panelVLine(x, y, h, r, g, b); panelVLine(x + w - 1, y, h, r, g, b); }
+    } else if (!strcmp(k, "line")) {
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      panelLine(x, y, op["x1"] | 0, op["y1"] | 0, r, g, b);
+    } else if (!strcmp(k, "circle")) {
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      panelCircle(x, y, op["r"] | 0, op["fill"] | false, r, g, b);
+    } else if (!strcmp(k, "image")) {
+      canvasOpImage(op, x, y, w, h);
+    } else if (!strcmp(k, "scroll")) {
+      uint8_t r = 0, g = 0, b = 0; canvasColor(op["color"], r, g, b);   // vacated pixels: black default
+      panelScroll(op["dx"] | 0, op["dy"] | 0, r, g, b);
+    } else if (!strcmp(k, "triangle")) {
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      panelTriangle(x, y, op["x1"] | 0, op["y1"] | 0, op["x2"] | 0, op["y2"] | 0, op["fill"] | false, r, g, b);
+    } else if (!strcmp(k, "roundrect")) {
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      panelRoundRect(x, y, w, h, op["r"] | 0, op["fill"] | false, r, g, b);
+    } else if (!strcmp(k, "ellipse")) {
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      panelEllipse(x, y, op["rx"] | 0, op["ry"] | 0, op["fill"] | false, r, g, b);
+    } else if (!strcmp(k, "gradient")) {
+      canvasOpGradient(x, y, w, h, op["from"], op["to"], strcmp(op["dir"] | "v", "h") != 0);
+    } else if (!strcmp(k, "polyline")) {
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      canvasOpPolyline(op["points"], r, g, b);
     } else if (!strcmp(k, "text")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
-      canvasText(x, y, op["s"] | "", r, g, b, canvasFace(op["size"] | 10));
+      const char* s = op["s"] | "";
+      const Font1252* f = canvasFace(op["size"] | 10);
+      const char* al = op["align"] | "left";
+      int tx = x, tw = (int)strlen(s) * f->width;
+      if      (!strcmp(al, "center")) tx = x - tw / 2;
+      else if (!strcmp(al, "right"))  tx = x - tw;
+      canvasText(tx, y, s, r, g, b, f);
     } else if (!strcmp(k, "show")) {
       panelShow(); shown = true; continue;
     } else continue;                      // unknown op: skip, do not count

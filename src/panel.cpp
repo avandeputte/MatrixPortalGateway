@@ -56,6 +56,7 @@
 // at the latch and nothing moves.
 
 #include "panel.h"
+#include <math.h>          // sqrtf, for the ellipse scanlines
 
 #include <Arduino.h>
 #include <driver/gpio.h>
@@ -444,6 +445,160 @@ void panelFillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b) 
   for (int j = 0; j < h; j++) panelHLine(x, y + j, w, r, g, b);
 }
 
+// Bresenham line from (x0,y0) to (x1,y1). panelPixel clamps, so off-panel endpoints are fine.
+void panelLine(int x0, int y0, int x1, int y1, uint8_t r, uint8_t g, uint8_t b) {
+  if (!info.ok) return;
+  int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+  int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+  int err = dx + dy;
+  for (;;) {
+    panelPixel(x0, y0, r, g, b);
+    if (x0 == x1 && y0 == y1) break;
+    int e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
+
+// Midpoint circle centred (cx,cy), radius rad -- an outline, or a filled disc.
+void panelCircle(int cx, int cy, int rad, bool fill, uint8_t r, uint8_t g, uint8_t b) {
+  if (!info.ok || rad < 0) return;
+  int x = rad, y = 0, err = 1 - rad;
+  while (x >= y) {
+    if (fill) {
+      panelHLine(cx - x, cy + y, 2 * x + 1, r, g, b);
+      panelHLine(cx - x, cy - y, 2 * x + 1, r, g, b);
+      panelHLine(cx - y, cy + x, 2 * y + 1, r, g, b);
+      panelHLine(cx - y, cy - x, 2 * y + 1, r, g, b);
+    } else {
+      panelPixel(cx + x, cy + y, r, g, b); panelPixel(cx - x, cy + y, r, g, b);
+      panelPixel(cx + x, cy - y, r, g, b); panelPixel(cx - x, cy - y, r, g, b);
+      panelPixel(cx + y, cy + x, r, g, b); panelPixel(cx - y, cy + x, r, g, b);
+      panelPixel(cx + y, cy - x, r, g, b); panelPixel(cx - y, cy - x, r, g, b);
+    }
+    y++;
+    if (err < 0) err += 2 * y + 1;
+    else { x--; err += 2 * (y - x) + 1; }
+  }
+}
+
+static inline void iswap(int& a, int& b) { int t = a; a = b; b = t; }
+
+// Quarter-arc helpers (Adafruit-GFX corner bitmask: 1=TL 2=TR 4=BR 8=BL) -- used by round rects.
+static void drawCircleHelper(int cx, int cy, int rad, uint8_t corner, uint8_t r, uint8_t g, uint8_t b) {
+  int f = 1 - rad, ddx = 1, ddy = -2 * rad, x = 0, y = rad;
+  while (x < y) {
+    if (f >= 0) { y--; ddy += 2; f += ddy; }
+    x++; ddx += 2; f += ddx;
+    if (corner & 0x4) { panelPixel(cx + x, cy + y, r, g, b); panelPixel(cx + y, cy + x, r, g, b); }
+    if (corner & 0x2) { panelPixel(cx + x, cy - y, r, g, b); panelPixel(cx + y, cy - x, r, g, b); }
+    if (corner & 0x8) { panelPixel(cx - y, cy + x, r, g, b); panelPixel(cx - x, cy + y, r, g, b); }
+    if (corner & 0x1) { panelPixel(cx - y, cy - x, r, g, b); panelPixel(cx - x, cy - y, r, g, b); }
+  }
+}
+static void fillCircleHelper(int cx, int cy, int rad, uint8_t corner, int delta, uint8_t r, uint8_t g, uint8_t b) {
+  int f = 1 - rad, ddx = 1, ddy = -2 * rad, x = 0, y = rad, px = 0, py = rad;
+  delta++;
+  while (x < y) {
+    if (f >= 0) { y--; ddy += 2; f += ddy; }
+    x++; ddx += 2; f += ddx;
+    if (x < y + 1) {
+      if (corner & 1) panelVLine(cx + x, cy - y, 2 * y + delta, r, g, b);
+      if (corner & 2) panelVLine(cx - x, cy - y, 2 * y + delta, r, g, b);
+    }
+    if (y != py) {
+      if (corner & 1) panelVLine(cx + py, cy - px, 2 * px + delta, r, g, b);
+      if (corner & 2) panelVLine(cx - py, cy - px, 2 * px + delta, r, g, b);
+      py = y;
+    }
+    px = x;
+  }
+}
+
+// Triangle (x0,y0)-(x1,y1)-(x2,y2); outline (three lines) or filled (Adafruit scanline algorithm).
+void panelTriangle(int x0, int y0, int x1, int y1, int x2, int y2, bool fill, uint8_t r, uint8_t g, uint8_t b) {
+  if (!info.ok) return;
+  if (!fill) {
+    panelLine(x0, y0, x1, y1, r, g, b); panelLine(x1, y1, x2, y2, r, g, b); panelLine(x2, y2, x0, y0, r, g, b);
+    return;
+  }
+  if (y0 > y1) { iswap(y0, y1); iswap(x0, x1); }
+  if (y1 > y2) { iswap(y2, y1); iswap(x2, x1); }
+  if (y0 > y1) { iswap(y0, y1); iswap(x0, x1); }
+  if (y0 == y2) {                                  // degenerate: a flat line
+    int a = x0, bb = x0;
+    if (x1 < a) a = x1; else if (x1 > bb) bb = x1;
+    if (x2 < a) a = x2; else if (x2 > bb) bb = x2;
+    panelHLine(a, y0, bb - a + 1, r, g, b); return;
+  }
+  int dx01 = x1 - x0, dy01 = y1 - y0, dx02 = x2 - x0, dy02 = y2 - y0, dx12 = x2 - x1, dy12 = y2 - y1;
+  int sa = 0, sb = 0, y, last = (y1 == y2) ? y1 : y1 - 1;
+  for (y = y0; y <= last; y++) {
+    int a = x0 + sa / dy01, bb = x0 + sb / dy02;
+    sa += dx01; sb += dx02;
+    if (a > bb) iswap(a, bb);
+    panelHLine(a, y, bb - a + 1, r, g, b);
+  }
+  sa = dx12 * (y - y1); sb = dx02 * (y - y0);
+  for (; y <= y2; y++) {
+    int a = x1 + sa / dy12, bb = x0 + sb / dy02;
+    sa += dx12; sb += dx02;
+    if (a > bb) iswap(a, bb);
+    panelHLine(a, y, bb - a + 1, r, g, b);
+  }
+}
+
+// Rounded rectangle, outline or filled (straight edges + four quarter-circle corners).
+void panelRoundRect(int x, int y, int w, int h, int rad, bool fill, uint8_t r, uint8_t g, uint8_t b) {
+  if (!info.ok || w <= 0 || h <= 0) return;
+  int maxr = ((w < h) ? w : h) / 2;
+  if (rad > maxr) rad = maxr;
+  if (rad < 0) rad = 0;
+  if (fill) {
+    panelFillRect(x + rad, y, w - 2 * rad, h, r, g, b);
+    fillCircleHelper(x + w - rad - 1, y + rad, rad, 1, h - 2 * rad - 1, r, g, b);
+    fillCircleHelper(x + rad,         y + rad, rad, 2, h - 2 * rad - 1, r, g, b);
+  } else {
+    panelHLine(x + rad, y,         w - 2 * rad, r, g, b);
+    panelHLine(x + rad, y + h - 1, w - 2 * rad, r, g, b);
+    panelVLine(x,         y + rad, h - 2 * rad, r, g, b);
+    panelVLine(x + w - 1, y + rad, h - 2 * rad, r, g, b);
+    drawCircleHelper(x + rad,         y + rad,         rad, 1, r, g, b);
+    drawCircleHelper(x + w - rad - 1, y + rad,         rad, 2, r, g, b);
+    drawCircleHelper(x + w - rad - 1, y + h - rad - 1, rad, 4, r, g, b);
+    drawCircleHelper(x + rad,         y + h - rad - 1, rad, 8, r, g, b);
+  }
+}
+
+// Axis-aligned ellipse centred (cx,cy) with semi-axes (a,b). Scanline fill; outline sampled both
+// by-row and by-column so the flat top/bottom and sides have no gaps.
+void panelEllipse(int cx, int cy, int a, int b, bool fill, uint8_t r, uint8_t g, uint8_t bc) {
+  if (!info.ok || a < 0 || b < 0) return;
+  if (a == 0) { panelVLine(cx, cy - b, 2 * b + 1, r, g, bc); return; }
+  if (b == 0) { panelHLine(cx - a, cy, 2 * a + 1, r, g, bc); return; }
+  if (fill) {
+    for (int dy = -b; dy <= b; dy++) {
+      float t = 1.0f - (float)(dy * dy) / (float)(b * b);
+      if (t < 0) continue;
+      int dx = (int)(a * sqrtf(t) + 0.5f);
+      panelHLine(cx - dx, cy + dy, 2 * dx + 1, r, g, bc);
+    }
+  } else {
+    for (int dy = -b; dy <= b; dy++) {
+      float t = 1.0f - (float)(dy * dy) / (float)(b * b);
+      if (t < 0) continue;
+      int dx = (int)(a * sqrtf(t) + 0.5f);
+      panelPixel(cx + dx, cy + dy, r, g, bc); panelPixel(cx - dx, cy + dy, r, g, bc);
+    }
+    for (int dx = -a; dx <= a; dx++) {
+      float t = 1.0f - (float)(dx * dx) / (float)(a * a);
+      if (t < 0) continue;
+      int dy = (int)(b * sqrtf(t) + 0.5f);
+      panelPixel(cx + dx, cy + dy, r, g, bc); panelPixel(cx + dx, cy - dy, r, g, bc);
+    }
+  }
+}
+
 // Copy the live buffer into the back buffer, so a PARTIAL draw lands on top of what is currently on
 // screen rather than on the frame from two shows ago (the two buffers otherwise diverge). Both
 // buffers carry the same control-bit skeleton, and pixel writes only touch RGB, so copying whole
@@ -460,35 +615,57 @@ void panelCloneToBack() {
 // not reflected (a dim wall reads back at full value). Read-only: it never parks or swaps, so a
 // frame swap mid-read can tear a live effect slightly -- fine for a preview. Snapshot fast, then the
 // caller streams `out` at leisure. out must hold W*H*(rgb565?2:3) bytes.
+// One pixel of `buf` reconstructed from the bitplanes into 8-bit RGB: quantised to the panel depth,
+// with the BGR swap undone. The quant() round-trip is exact (a read then a panelPixel write is
+// idempotent), which is what lets panelScroll shift a frame repeatedly without the colours drifting.
+static inline void readPixelRGB(uint8_t buf, int x, int y, uint8_t& r, uint8_t& g, uint8_t& b) {
+  const uint16_t maxv = (uint16_t)((1u << DEPTH) - 1);
+  const bool lower = (y >= ROWS);
+  const int  row   = lower ? (y - ROWS) : y;
+  const word_t rmask = lower ? BIT_R2 : BIT_R1;
+  const word_t gmask = lower ? BIT_G2 : BIT_G1;
+  const word_t bmask = lower ? BIT_B2 : BIT_B1;
+  uint16_t qr = 0, qg = 0, qb = 0;
+  for (int p = 0; p < DEPTH; p++) {
+    word_t w = blockPtr(buf, row, p)[x];
+    if (w & rmask) qr |= (uint16_t)(1u << p);
+    if (w & gmask) qg |= (uint16_t)(1u << p);
+    if (w & bmask) qb |= (uint16_t)(1u << p);
+  }
+  r = (uint8_t)((qr * 255 + maxv / 2) / maxv);
+  g = (uint8_t)((qg * 255 + maxv / 2) / maxv);
+  b = (uint8_t)((qb * 255 + maxv / 2) / maxv);
+  if (bgrOrder) { uint8_t t = r; r = b; b = t; }
+}
+
 void panelReadback(uint8_t* out, bool rgb565) {
   if (!info.ok || !out) return;
-  const uint16_t maxv = (uint16_t)((1u << DEPTH) - 1);
   const uint8_t buf = liveBuf;                     // the displayed buffer (single-byte, atomic read)
   size_t o = 0;
-  for (int y = 0; y < H; y++) {
-    const bool lower = (y >= ROWS);
-    const int  row   = lower ? (y - ROWS) : y;
-    const word_t rmask = lower ? BIT_R2 : BIT_R1;
-    const word_t gmask = lower ? BIT_G2 : BIT_G1;
-    const word_t bmask = lower ? BIT_B2 : BIT_B1;
+  for (int y = 0; y < H; y++)
     for (int x = 0; x < W; x++) {
-      uint16_t qr = 0, qg = 0, qb = 0;
-      for (int p = 0; p < DEPTH; p++) {
-        word_t w = blockPtr(buf, row, p)[x];
-        if (w & rmask) qr |= (uint16_t)(1u << p);
-        if (w & gmask) qg |= (uint16_t)(1u << p);
-        if (w & bmask) qb |= (uint16_t)(1u << p);
-      }
-      uint8_t r = (uint8_t)((qr * 255 + maxv / 2) / maxv);   // undo quant() back to 8-bit
-      uint8_t g = (uint8_t)((qg * 255 + maxv / 2) / maxv);
-      uint8_t b = (uint8_t)((qb * 255 + maxv / 2) / maxv);
-      if (bgrOrder) { uint8_t t = r; r = b; b = t; }          // undo the BGR swap on the way out
+      uint8_t r, g, b; readPixelRGB(buf, x, y, r, g, b);
       if (rgb565) {
         uint16_t v = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
         out[o++] = (uint8_t)(v >> 8); out[o++] = (uint8_t)(v & 0xFF);
       } else { out[o++] = r; out[o++] = g; out[o++] = b; }
     }
-  }
+}
+
+// Shift the live frame into the back buffer by (dx,dy); pixels shifted in from off-frame get the
+// (fr,fg,fb) fill. Reads liveBuf, writes drawBuf -- separate buffers, so no temp is needed. Because
+// the read/write round-trips exactly, a client can scroll repeatedly (a marquee) with no drift.
+void panelScroll(int dx, int dy, uint8_t fr, uint8_t fg, uint8_t fb) {
+  if (!info.ok) return;
+  const uint8_t src = liveBuf;
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++) {
+      int sx = x - dx, sy = y - dy;
+      if (sx >= 0 && sx < W && sy >= 0 && sy < H) {
+        uint8_t r, g, b; readPixelRGB(src, sx, sy, r, g, b);
+        panelPixel(x, y, r, g, b);
+      } else panelPixel(x, y, fr, fg, fb);
+    }
 }
 
 // Swap buffers by re-pointing the LIVE chain's tail at the other chain's head. GDMA reads

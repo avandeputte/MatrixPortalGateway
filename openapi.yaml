@@ -611,20 +611,33 @@ paths:
   /api/canvas/ops:
     post:
       tags: [Canvas]
-      summary: Draw commands — pixels, lines, rects, text (v1.13)
+      summary: Draw commands — shapes, gradients, sprites, text, scroll (v1.13; 11 ops added v1.25)
       description: |
         A JSON **array** of drawing ops, applied in order, then the frame is presented. Handy for
         shapes and labels without composing a whole frame client-side. Auto-takes-over the panel.
-        Colours are `[r, g, b]` (0–255), defaulting to white — black for `clear`. Off-panel
-        pixels are dropped.
+        Colours are `[r, g, b]` (0–255), defaulting to white — black for `clear`. Off-panel pixels
+        are dropped. Unknown ops are skipped. The advertised op list is `capabilities.canvas.ops`.
 
-        Ops:
+        Ops (everything marked *(v1.25)* was added then):
         * `{"op":"clear"}` or `{"op":"clear","color":[r,g,b]}` — fill the whole panel
         * `{"op":"pixel","x":,"y":,"color":[…]}`
         * `{"op":"hline","x":,"y":,"w":,"color":[…]}` / `{"op":"vline","x":,"y":,"h":,"color":[…]}`
+        * `{"op":"line","x":,"y":,"x1":,"y1":,"color":[…]}` — an arbitrary (Bresenham) line *(v1.25)*
         * `{"op":"rect","x":,"y":,"w":,"h":,"color":[…],"fill":true|false}`
-        * `{"op":"text","x":,"y":,"s":"HELLO","color":[…],"size":10}` — built-in CP1252 font;
-          `size` picks a bundled face height (8, 9, 10, 13, 18, 20), default 10
+        * `{"op":"circle","x":cx,"y":cy,"r":radius,"color":[…],"fill":true|false}` — outline or disc *(v1.25)*
+        * `{"op":"ellipse","x":cx,"y":cy,"rx":,"ry":,"color":[…],"fill":true|false}` — axis-aligned ellipse *(v1.25)*
+        * `{"op":"triangle","x":,"y":,"x1":,"y1":,"x2":,"y2":,"color":[…],"fill":true|false}` — three vertices *(v1.25)*
+        * `{"op":"roundrect","x":,"y":,"w":,"h":,"r":radius,"color":[…],"fill":true|false}` — rounded rect *(v1.25)*
+        * `{"op":"gradient","x":,"y":,"w":,"h":,"from":[…],"to":[…],"dir":"v"|"h"}` — a linear-gradient fill (`dir` default `v`) *(v1.25)*
+        * `{"op":"polyline","points":[[x,y],…],"color":[…]}` — connect the points with lines *(v1.25)*
+        * `{"op":"text","x":,"y":,"s":"HELLO","color":[…],"size":10,"align":"left"|"center"|"right"}` —
+          built-in CP1252 font; `size` picks a bundled face height (8, 9, 10, 13, 18, 20), default 10;
+          `align` places the string relative to `x` (default `left`) *(align v1.25)*
+        * `{"op":"image","x":,"y":,"w":,"h":,"fmt":"rgb888"|"rgb565","data":"<base64>"}` — blit a small
+          base64 sprite (≤ 8 KB decoded; use `PUT /api/canvas/frame` for a full panel) *(v1.25)*
+        * `{"op":"scroll","dx":,"dy":,"color":[…]}` — shift the current frame by (dx, dy), filling the
+          vacated pixels with `color` (black by default). Make it the batch's first op, then draw the
+          newly-revealed edge — a marquee without resending the whole panel *(v1.25)*
         * `{"op":"show"}` — present mid-batch (otherwise presented once at the end)
       requestBody:
         required: true

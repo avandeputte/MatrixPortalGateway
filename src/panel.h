@@ -41,6 +41,14 @@ void panelPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b);
 void panelHLine(int x, int y, int w, uint8_t r, uint8_t g, uint8_t b);
 void panelVLine(int x, int y, int h, uint8_t r, uint8_t g, uint8_t b);
 void panelFillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b);
+void panelLine(int x0, int y0, int x1, int y1, uint8_t r, uint8_t g, uint8_t b);   // Bresenham
+void panelCircle(int cx, int cy, int rad, bool fill, uint8_t r, uint8_t g, uint8_t b);  // outline/disc
+void panelTriangle(int x0, int y0, int x1, int y1, int x2, int y2, bool fill, uint8_t r, uint8_t g, uint8_t b);
+void panelRoundRect(int x, int y, int w, int h, int rad, bool fill, uint8_t r, uint8_t g, uint8_t b);
+void panelEllipse(int cx, int cy, int a, int b, bool fill, uint8_t r, uint8_t g, uint8_t bc);  // semi-axes a,b
+// Shift the live frame into the back buffer by (dx,dy); vacated pixels get the fill colour. For a
+// marquee: scroll, draw the newly-revealed edge, then panelShow(). Does not drift on repeat.
+void panelScroll(int dx, int dy, uint8_t fr, uint8_t fg, uint8_t fb);
 
 // Present the back buffer: re-point the live descriptor chain's tail at the other chain,
 // then wait one frame so the caller cannot draw into a buffer GDMA is still reading.
