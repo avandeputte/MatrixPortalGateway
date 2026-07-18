@@ -30,6 +30,7 @@ void cfgSetDefaults() {
   strlcpy(gPosixTZ,    "UTC0", sizeof(gPosixTZ));
   // v3.0 defaults
   strlcpy(cfg.companionUrl, "", sizeof(cfg.companionUrl));
+  strlcpy(cfg.bootAnim, "", sizeof(cfg.bootAnim));
   cfg.quietSchedEnabled = false;
   strlcpy(cfg.quietStart, "22:00", sizeof(cfg.quietStart));
   strlcpy(cfg.quietEnd,   "07:00", sizeof(cfg.quietEnd));
@@ -74,6 +75,7 @@ void loadConfig() {
   strlcpy(cfg.otaPassword, prefs.getString("otaPass", "").c_str(), sizeof(cfg.otaPassword));
   // v3.0
   strlcpy(cfg.companionUrl, prefs.getString("compUrl", "").c_str(), sizeof(cfg.companionUrl));
+  strlcpy(cfg.bootAnim, prefs.getString("bAnim", "").c_str(), sizeof(cfg.bootAnim));
   cfg.quietSchedEnabled = prefs.getBool("qsEn", false);
   strlcpy(cfg.quietStart, prefs.getString("qsStart", "22:00").c_str(), sizeof(cfg.quietStart));
   strlcpy(cfg.quietEnd,   prefs.getString("qsEnd",   "07:00").c_str(), sizeof(cfg.quietEnd));
@@ -102,6 +104,7 @@ void saveConfig() {
   prefs.putString("otaPass",   cfg.otaPassword);
   // v3.0
   prefs.putString("compUrl",   cfg.companionUrl);
+  prefs.putString("bAnim",     cfg.bootAnim);
   prefs.putBool  ("qsEn",      cfg.quietSchedEnabled);
   prefs.putString("qsStart",   cfg.quietStart);
   prefs.putString("qsEnd",     cfg.quietEnd);

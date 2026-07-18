@@ -10,6 +10,7 @@
 // pictograph on the wall. See sfSetQuietTime() below.
 
 #include "gateway.h"
+#include "canvas.h"
 
 // Send one flap character. `c` is a single Windows-1252 byte: ASCII 0x20-0x7E, or a high
 // byte (euro/accents/smart punctuation) -- see charset.h. Bytes that aren't a valid flap
@@ -105,6 +106,7 @@ void sfSetQuietTime(bool on) {
     }
     sfHome(-1);          // unlocked, and quiet is still off -- so this is not suppressed
     dispReturnToWall();  // drop any effect/raw-canvas so the blanked wall is what the panel shows
+    canvasTickerStopForce();   // the overlay ticker too: quiet means a DARK panel
     printf("[QUIET] on -- wall blanked (home all)\n");
   }
 

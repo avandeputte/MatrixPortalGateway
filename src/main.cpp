@@ -1,4 +1,5 @@
 #include "gateway.h"
+#include "canvas.h"   // canvasAnimLoadPlay: the boot animation
 #include <esp_ota_ops.h>   // esp_ota_get_running_partition(): which slot are we actually running?
 
 // After this many crash/watchdog reboots in a row, the boot logic reformats FATFS -- a corrupt
@@ -115,6 +116,15 @@ void setup() {
   //    stack is the other big claimant on that pool.
   dispInit();
   dispMarkDirty();
+
+  // 7. Boot animation (v2.1): if a library animation is configured, play it now --
+  //    before WiFi -- so the wall is alive seconds after power-on. The first
+  //    split-flap command (or canvas/effect start) supersedes it, as always.
+  if (cfg.bootAnim[0] && gPanel.ready) {
+    int rc = canvasAnimLoadPlay(cfg.bootAnim);
+    if (rc) printf("[ANIM] boot animation '%s' failed (%d)\n", cfg.bootAnim, rc);
+    else    printf("[ANIM] boot animation '%s' playing\n", cfg.bootAnim);
+  }
 
   // 8. WiFi -- MUST be initialised here, on the main Arduino task.
   // The SoftAP is a FALLBACK only: start in station mode and connect to the

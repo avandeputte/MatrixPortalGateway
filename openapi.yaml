@@ -15,8 +15,14 @@ info:
     **The `version` above is the gateway API level (3.1), not the firmware's version.** That is
     deliberate: the companion app gates its features on reading `>= 3.1` from `GET /api/config`,
     so this firmware answers `3.1.0` there and reports its own firmware version (currently
-    `2.0.0`) in `fwVersion`, next to `product`. See ARCHITECTURE.md → "Firmware identity vs
+    `2.1.0`) in `fwVersion`, next to `product`. See ARCHITECTURE.md → "Firmware identity vs
     API level".
+
+    **Firmware 2.1 grows the canvas surface** — an animation library persisted to FATFS (plus a
+    `bootAnim` config field), an overlay ticker, full-frame transitions, a sprite atlas for the
+    ops path, on-device GIF import and uploadable fonts. All additive: every pre-2.1 client
+    keeps working unchanged, and the new features are visible in `GET /api/capabilities`
+    (the `sprite` op) and `GET /api/canvas` (the `atlas` field).
 
     Endpoints for calibration and provisioning are absent by design — this product's modules are
     *drawn*, not driven, so there is nothing to calibrate.
@@ -25,9 +31,9 @@ info:
     (shown on the Status page), or use `http://192.168.4.1` when connected to
     the AP fallback network.
 
-    JSON endpoints accept and return `application/json`. The canvas frame/rect/qoi/anim
-    uploads, the companion settings blob and the OTA upload carry binary bodies instead.
-    All endpoints include `Access-Control-Allow-Origin: *`.
+    JSON endpoints accept and return `application/json`. The canvas
+    frame/rect/qoi/anim/atlas/gif/font uploads, the companion settings blob and the OTA upload
+    carry binary bodies instead. All endpoints include `Access-Control-Allow-Origin: *`.
 
 servers:
   - url: http://192.168.4.1
@@ -312,8 +318,9 @@ paths:
         is persisted — a reboot returns to the wall.
 
         This GET reports whether a canvas is active, the panel dimensions (so a client can size
-        the frames it pushes), which on-device `effect` (if any) is currently running, and
-        whether an uploaded animation (`anim`) or a ticker is playing.
+        the frames it pushes), which on-device `effect` (if any) is currently running, whether
+        an uploaded animation (`anim`) or a ticker is playing, and (v2.1) the shape of the
+        loaded sprite `atlas` — or `null` when none has been uploaded yet.
       responses:
         "200":
           description: OK
@@ -329,6 +336,13 @@ paths:
                   effect:  { type: string, example: none, description: Running on-device effect, or "none". }
                   anim:    { type: boolean, example: false, description: An uploaded animation is playing. }
                   ticker:  { type: boolean, example: false, description: A ticker is scrolling. }
+                  atlas:
+                    type: [object, "null"]
+                    description: "The loaded sprite atlas the ops `sprite` op can blit (v2.1), or null when none is loaded."
+                    properties:
+                      tiles: { type: integer, example: 16 }
+                      w:     { type: integer, example: 16, description: "Tile width in px" }
+                      h:     { type: integer, example: 16, description: "Tile height in px" }
                   effects: { type: array, items: { type: string }, example: [plasma, fire, matrix, fliporama, clock, life] }
     post:
       tags: [Canvas]
@@ -414,6 +428,11 @@ paths:
         firmware (a raw-body handler cannot read URL args); the length is authoritative. Get the
         dimensions from `GET /api/canvas`. rgb565 halves the upload — worth it for animation, and
         the panel's colour depth loses nothing.
+
+        When a transition is configured (`POST /api/canvas/transition`, v2.1), the incoming frame
+        is staged in PSRAM and presented through the configured tween instead of a hard cut.
+        Full-frame PUTs only — rect, qoi and anim are unaffected. If the staging buffers cannot
+        be allocated the frame falls back to a direct present (a hard cut beats a 500).
       parameters:
         - name: fmt
           in: query
@@ -524,7 +543,9 @@ paths:
       description: |
         A short loop of full-panel frames, streamed into PSRAM and played back by the gateway at
         a set fps — the client can disconnect and the animation keeps running until something
-        else takes the panel (or a reboot returns to the wall).
+        else takes the panel (or a reboot returns to the wall). The store holds up to 8 MB
+        (~256 rgb565 frames at 256×64); persist the loaded loop with
+        `POST /api/canvas/anim/save` (v2.1) and it survives reboots as a named library entry.
 
         The body is a **14-byte big-endian header** followed by the frame data:
 
@@ -568,14 +589,434 @@ paths:
           description: Internal heap is low — the upload is refused rather than risking a reboot; retry shortly
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
+  /api/canvas/anim/save:
+    post:
+      tags: [Canvas]
+      summary: Persist the loaded animation to the on-device library (v2.1)
+      description: |
+        Writes the animation currently in the PSRAM store — whether it arrived via
+        `PUT /api/canvas/anim`, `PUT /api/canvas/gif` or a previous `anim/play` — to FATFS as
+        `/anim/<name>.mpg`, byte-identical to the `MPGA` wire format. The write is atomic-ish
+        (temp file, then rename), so an interrupted save never corrupts an existing entry.
+        The 23.9 MB FATFS partition holds several full-size loops.
+
+        Names are 1–24 characters of `a-z 0-9 - _`. Saving over an existing name replaces it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, pattern: "^[a-z0-9_-]{1,24}$", example: "rainbow" }
+            example: { name: "rainbow" }
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          description: Bad name (1–24 chars of a-z 0-9 - _)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: Nothing loaded to save — upload an animation first
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: Filesystem not mounted
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "507":
+          description: Filesystem full or the write failed — nothing replaced
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/canvas/anim/play:
+    post:
+      tags: [Canvas]
+      summary: Load a library animation and play it (v2.1)
+      description: |
+        Loads `/anim/<name>.mpg` into the PSRAM store and starts playback — through the same
+        path an HTTP upload takes, so playback, save and the `bootAnim` config field all behave
+        identically on a library entry and a fresh upload. Takes the panel over like an upload
+        does.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, pattern: "^[a-z0-9_-]{1,24}$", example: "rainbow" }
+            example: { name: "rainbow" }
+      responses:
+        "200":
+          description: Animation loaded and playing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:     { type: boolean, example: true }
+                  frames: { type: integer, example: 96, description: "Frames loaded from the file" }
+        "400":
+          description: Bad name, or the file is corrupt/truncated
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "404":
+          description: No such animation
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: Quiet Time is active — the panel must stay dark
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "413":
+          description: The file exceeds the animation store limit
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: Panel not running, filesystem not mounted, or the store could not be allocated
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/canvas/anim/delete:
+    post:
+      tags: [Canvas]
+      summary: Delete a library animation (v2.1)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, pattern: "^[a-z0-9_-]{1,24}$", example: "rainbow" }
+            example: { name: "rainbow" }
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          description: Bad name (1–24 chars of a-z 0-9 - _)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "404":
+          description: No such animation
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: Filesystem not mounted
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "507":
+          description: The delete failed
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/canvas/anims:
+    get:
+      tags: [Canvas]
+      summary: List the animation library (v2.1)
+      description: >-
+        Every saved animation, with the metadata re-read from each file's header — the list is
+        always the truth on disk. Streamed, so a full library costs no large allocation.
+      responses:
+        "200":
+          description: The library (may be empty)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:   { type: string,  example: "rainbow" }
+                    bytes:  { type: integer, example: 3145742, description: "File size on FATFS" }
+                    frames: { type: integer, example: 96 }
+                    w:      { type: integer, example: 128 }
+                    h:      { type: integer, example: 32 }
+                    fps:    { type: integer, example: 15 }
+                    loop:   { type: boolean, example: true }
+
+  /api/canvas/transition:
+    post:
+      tags: [Canvas]
+      summary: Configure how full-frame canvas PUTs present (v2.1)
+      description: |
+        Sets a transition that subsequent `PUT /api/canvas/frame` uploads present through: the
+        incoming frame is staged in PSRAM, the outgoing frame is captured from the framebuffer,
+        and the tween is rendered on-device. **Sticky until changed, runtime-only** — a reboot
+        returns to hard cuts (`none`). rect, qoi and anim presents are unaffected.
+
+        * `none` — a hard cut (the default).
+        * `crossfade` — blend old → new.
+        * `wipe` — the new frame sweeps in left to right.
+        * `slide` — the new frame pushes the old off to the left.
+
+        `ms` is the tween duration, clamped to 100–2000 (default 400).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: { type: string, enum: [none, crossfade, wipe, slide] }
+                ms:   { type: integer, minimum: 100, maximum: 2000, default: 400 }
+            example: { type: crossfade, ms: 400 }
+      responses:
+        "200":
+          description: Transition configured
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:   { type: boolean, example: true }
+                  type: { type: string, example: crossfade }
+                  ms:   { type: integer, example: 400 }
+        "400":
+          description: type is not one of none|crossfade|wipe|slide
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/canvas/atlas:
+    put:
+      tags: [Canvas]
+      summary: Upload a sprite tile sheet for the ops "sprite" op (v2.1)
+      description: |
+        One tile sheet, streamed into PSRAM, that `POST /api/canvas/ops` blits from with
+        `{"op":"sprite","i":N,"x":X,"y":Y}`. Kept across uses; the next upload replaces it. No
+        panel takeover — it is data, not pixels. `GET /api/canvas` reports the loaded sheet's
+        shape in its `atlas` field.
+
+        The body is a **12-byte big-endian header** followed by the tile pixels:
+
+        | Offset | Size | Field |
+        |---|---|---|
+        | 0 | 4 | Magic `MPTA` |
+        | 4 | 1 | Version, must be `1` |
+        | 5 | 1 | Pixel format: `2` = rgb565 (big-endian), `3` = rgb888 |
+        | 6 | 2 | Tile width |
+        | 8 | 2 | Tile height |
+        | 10 | 2 | Tile count |
+
+        …then `tiles × tileW × tileH × bpp` bytes, tile after tile, row-major. **Magenta is
+        transparent** — `0xF81F` in rgb565, `(255, 0, 255)` in rgb888 — so sprites can carry
+        holes. The sheet is capped at 2 MB.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Atlas stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:    { type: boolean, example: true }
+                  tiles: { type: integer, example: 16 }
+                  w:     { type: integer, example: 16 }
+                  h:     { type: integer, example: 16 }
+        "400":
+          description: Bad MPTA header (magic/version/format/zero dimension) or truncated upload
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "413":
+          description: Atlas exceeds the 2 MB budget
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: The tile-sheet buffer could not be allocated
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "507":
+          description: Internal heap is low — the upload is refused rather than risking a reboot; retry shortly
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/canvas/gif:
+    put:
+      tags: [Canvas]
+      summary: Import a GIF into the animation store (v2.1)
+      description: |
+        Upload an ordinary animated GIF and the gateway decodes it **on-device** into the same
+        animation store `PUT /api/canvas/anim` fills — so it plays immediately, and
+        `POST /api/canvas/anim/save` persists it to the library like any native upload.
+
+        The whole file is buffered in PSRAM (it is compressed), then decoded frame by frame:
+        GIF deltas, transparency and disposal are composited onto a full-panel canvas, a GIF
+        smaller than the panel is **centred on black**, and one larger than the panel is a
+        `400`. Playback fps is derived from the GIF's own frame delays, clamped to 1–30. The
+        upload is capped at 4 MB.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: GIF imported and playing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:     { type: boolean, example: true }
+                  frames: { type: integer, example: 42, description: "Frames decoded into the store" }
+                  fps:    { type: integer, example: 12, description: "Playback rate derived from the GIF's frame delays (1–30)" }
+        "400":
+          description: Not a decodable GIF, larger than the panel, or truncated
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "413":
+          description: GIF exceeds the 4 MB upload budget, or its frames exceed the animation store
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: Panel not running, or a decode buffer could not be allocated
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "507":
+          description: Internal heap is low — the upload is refused rather than risking a reboot; retry shortly
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/canvas/font:
+    put:
+      tags: [Canvas]
+      summary: Upload a custom font into the "custom" slot (v2.1)
+      description: |
+        Installs an `MPFT` font blob — packed from a BDF face by `tools/fontpack.py` — into the
+        gateway's one custom-font slot. On success the face answers to the name **`custom`** in
+        the ticker's `font` field and the ops `text` op; persist it to the on-device library
+        with `POST /api/canvas/font/save`.
+
+        The blob is `"MPFT"(4) ver(1)=1 width(1) height(1) ascent(1)` then **216 CP1252 glyphs**
+        of `height` big-endian uint16 rows each (bit 15 = leftmost column). Faces up to 16 px
+        wide; at most 64 KB.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Font installed as the active custom face
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:     { type: boolean, example: true }
+                  font:   { type: string,  example: "custom" }
+                  w:      { type: integer, example: 8 }
+                  h:      { type: integer, example: 13 }
+                  ascent: { type: integer, example: 11 }
+        "400":
+          description: Bad MPFT header (magic/version/metrics) or a body that is not 8 + 216×height×2 bytes
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "413":
+          description: Font exceeds the 64 KB cap
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: The font table could not be allocated
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/canvas/font/save:
+    post:
+      tags: [Canvas]
+      summary: Persist the custom font to the on-device library (v2.1)
+      description: >-
+        Writes the loaded custom face to FATFS as `/fonts/<name>.fnt` (the raw MPFT blob).
+        Same naming rule as the animation library — 1–24 characters of `a-z 0-9 - _` — and the
+        same atomic-ish temp-file-then-rename write. A saved face is then usable **by name** in
+        the ticker and ops `text` op, no re-upload needed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, pattern: "^[a-z0-9_-]{1,24}$", example: "orbitron8" }
+            example: { name: "orbitron8" }
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          description: Bad name (1–24 chars of a-z 0-9 - _)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: No custom font loaded — upload one first
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: Filesystem not mounted
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "507":
+          description: Filesystem full or the write failed — nothing replaced
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/canvas/font/delete:
+    post:
+      tags: [Canvas]
+      summary: Delete a library font (v2.1)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, pattern: "^[a-z0-9_-]{1,24}$", example: "orbitron8" }
+            example: { name: "orbitron8" }
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "400":
+          description: Bad name (1–24 chars of a-z 0-9 - _)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "404":
+          description: No such font
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: Filesystem not mounted
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "507":
+          description: The delete failed
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/canvas/fonts:
+    get:
+      tags: [Canvas]
+      summary: List the font library (v2.1)
+      description: >-
+        Every saved font, with the metrics re-read from each file's header — the list is always
+        the truth on disk. Streamed, like `/api/canvas/anims`.
+      responses:
+        "200":
+          description: The library (may be empty)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:   { type: string,  example: "orbitron8" }
+                    bytes:  { type: integer, example: 5624, description: "File size on FATFS" }
+                    w:      { type: integer, example: 8 }
+                    h:      { type: integer, example: 13 }
+                    ascent: { type: integer, example: 11 }
+
   /api/canvas/ticker:
     post:
       tags: [Canvas]
-      summary: Scroll one line of text across the panel, rendered on-device (v1.18)
+      summary: Scroll one line of text across the panel, rendered on-device (v1.18; overlay v2.1)
       description: |
-        A right-to-left ticker the gateway renders itself — set it once and disconnect. Takes
-        the panel over like an effect; an **empty `text` stops the ticker** and hands the panel
-        back to the split-flap wall (allowed even during Quiet Time — starting one is not).
+        A right-to-left ticker the gateway renders itself — set it once and disconnect. By
+        default it takes the panel over like an effect; an **empty `text` stops the ticker**
+        (an overlay one included) and hands the panel back to the split-flap wall (allowed even
+        during Quiet Time — starting one is not).
+
+        **`overlay: true` (v2.1) composites instead of taking over**: the ticker is drawn as a
+        lower-third band over **whatever else is presenting** — the flap wall, an effect, an
+        animation, a pushed canvas frame — via a hook on every presented frame. An overlay
+        ticker **survives page and mode changes**; only an explicit stop (`{"text":""}`), Quiet
+        Time, or replacing it with a non-overlay ticker removes it. `band` (default `true`)
+        draws the black band behind the text; `false` scrolls the glyphs straight over the
+        content beneath.
+
+        `font` (v2.1) names a face for the text: `custom` is the uploaded slot
+        (`PUT /api/canvas/font`), any other name loads `/fonts/<name>.fnt` from the library.
+        Absent or unresolvable falls back to the built-in panel-sized face — a missing font
+        scrolls text, it never errors.
       requestBody:
         required: true
         content:
@@ -584,7 +1025,7 @@ paths:
               type: object
               required: [text]
               properties:
-                text:  { type: string, description: "The line to scroll. Empty stops the ticker." }
+                text:  { type: string, description: "The line to scroll. Empty stops the ticker (overlay included)." }
                 color:
                   type: array
                   items: { type: integer, minimum: 0, maximum: 255 }
@@ -592,7 +1033,26 @@ paths:
                   maxItems: 3
                   description: "[r, g, b], default white"
                 speed: { type: integer, minimum: 1, maximum: 20, default: 2 }
-            example: { text: "HELLO WORLD", color: [255, 200, 0], speed: 3 }
+                overlay:
+                  type: boolean
+                  default: false
+                  description: "Composite as a lower-third over whatever is presenting instead of taking the panel over (v2.1)."
+                band:
+                  type: boolean
+                  default: true
+                  description: "Draw the black band behind the text (v2.1). false scrolls the glyphs over the content beneath."
+                font:
+                  type: string
+                  description: "Face for the text (v2.1): \"custom\" or a library name. Unknown names fall back to the built-in face."
+            examples:
+              exclusive:
+                value: { text: "HELLO WORLD", color: [255, 200, 0], speed: 3 }
+              overlay:
+                value: { text: "BREAKING — the flaps keep flapping", color: [255, 255, 255], speed: 2, overlay: true }
+              custom_font:
+                value: { text: "HELLO", font: "orbitron8", speed: 3 }
+              stop:
+                value: { text: "" }
       responses:
         "200":
           description: Ticker started (or stopped, for empty text)
@@ -601,8 +1061,9 @@ paths:
               schema:
                 type: object
                 properties:
-                  ok:     { type: boolean, example: true }
-                  active: { type: boolean, example: true }
+                  ok:      { type: boolean, example: true }
+                  active:  { type: boolean, example: true }
+                  overlay: { type: boolean, example: false, description: "Present when a ticker was started (v2.1)" }
         "400":
           description: Invalid JSON
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
@@ -616,7 +1077,7 @@ paths:
   /api/canvas/ops:
     post:
       tags: [Canvas]
-      summary: Draw commands — shapes, gradients, sprites, text, scroll (v1.13; 11 ops added v1.25)
+      summary: Draw commands — shapes, gradients, sprites, text, scroll (v1.13; 11 ops added v1.25; sprite v2.1)
       description: |
         A JSON **array** of drawing ops, applied in order, then the frame is presented. Handy for
         shapes and labels without composing a whole frame client-side. Auto-takes-over the panel.
@@ -635,11 +1096,17 @@ paths:
         * `{"op":"roundrect","x":,"y":,"w":,"h":,"r":radius,"color":[…],"fill":true|false}` — rounded rect *(v1.25)*
         * `{"op":"gradient","x":,"y":,"w":,"h":,"from":[…],"to":[…],"dir":"v"|"h"}` — a linear-gradient fill (`dir` default `v`) *(v1.25)*
         * `{"op":"polyline","points":[[x,y],…],"color":[…]}` — connect the points with lines *(v1.25)*
-        * `{"op":"text","x":,"y":,"s":"HELLO","color":[…],"size":10,"align":"left"|"center"|"right"}` —
+        * `{"op":"text","x":,"y":,"s":"HELLO","color":[…],"size":10,"align":"left"|"center"|"right","font":"…"}` —
           built-in CP1252 font; `size` picks a bundled face height (8, 9, 10, 13, 18, 20), default 10;
-          `align` places the string relative to `x` (default `left`) *(align v1.25)*
+          `align` places the string relative to `x` (default `left`) *(align v1.25)*. An optional
+          `font` *(v2.1)* names an uploaded face — `"custom"` is the slot filled by
+          `PUT /api/canvas/font`, any other name loads `/fonts/<name>.fnt`; unknown names keep
+          the built-in face, never error
         * `{"op":"image","x":,"y":,"w":,"h":,"fmt":"rgb888"|"rgb565","data":"<base64>"}` — blit a small
           base64 sprite (≤ 8 KB decoded; use `PUT /api/canvas/frame` for a full panel) *(v1.25)*
+        * `{"op":"sprite","i":N,"x":,"y":}` — blit tile `N` of the uploaded atlas
+          (`PUT /api/canvas/atlas`) at (x, y), magenta pixels transparent. With no atlas loaded
+          or `i` out of range the op is skipped and not counted *(v2.1)*
         * `{"op":"scroll","dx":,"dy":,"color":[…]}` — shift the current frame by (dx, dy), filling the
           vacated pixels with `color` (black by default). Make it the batch's first op, then draw the
           newly-revealed edge — a marquee without resending the whole panel *(v1.25)*
@@ -909,7 +1376,7 @@ paths:
                 type: object
                 properties:
                   product:  { type: string, example: "Matrix Portal Gateway" }
-                  fw:       { type: string, example: "2.0.0" }
+                  fw:       { type: string, example: "2.1.0" }
                   api:      { type: string, example: "3.1.0" }
                   grid:
                     type: object
@@ -973,6 +1440,11 @@ paths:
                       anim:     { type: boolean, example: true, description: "`PUT /api/canvas/anim` on-device animation" }
                       ticker:   { type: boolean, example: true, description: "`POST /api/canvas/ticker` scrolling text" }
                       readback: { type: boolean, example: true, description: "`GET /api/canvas/frame` screenshot readback" }
+                      ops:
+                        type: array
+                        description: "The draw ops `POST /api/canvas/ops` honours. `sprite` (atlas tile blit) joined in v2.1."
+                        items: { type: string }
+                        example: [clear, pixel, hline, vline, line, rect, circle, ellipse, triangle, roundrect, gradient, polyline, text, image, sprite, scroll, show]
                   effects:
                     type: array
                     description: >
@@ -1385,6 +1857,7 @@ paths:
                 flapMs:        { type: integer, minimum: 2, maximum: 500, example: 60, description: "ms per flap. Next flap." }
                 flapMax:       { type: integer, minimum: 1, maximum: 64, example: 64, description: "Max flips per change. Next change." }
                 hostname:      { type: string, example: "flapwall", description: "1–31 chars of a-z 0-9 '-' (lowercased for you). Empty string reverts to the MAC-derived name. **Reboot to apply.**" }
+                bootAnim:      { type: string, example: "rainbow", description: "Animation-library name autoplayed at boot, before WiFi (v2.1); superseded by the first display command. Empty string disables. Must match the library naming rule (1–24 chars of a-z 0-9 - _); the entry need not exist yet." }
                 haEnabled:   { type: boolean, example: true, description: "Enable Home Assistant MQTT auto-discovery and entity state topics. Short-circuits: send alone." }
                 serialDebug: { type: boolean, example: true, description: "Short-circuits: send alone." }
                 otaPassword: { type: string, example: "mysecret", description: "Short-circuits: send alone." }
@@ -1611,7 +2084,7 @@ components:
       properties:
         version:      { type: string,  example: "3.1.0", description: "The gateway API level, NOT this firmware's version — the companion parses MAJOR.MINOR out of it and gates its features on >= 3.1. `product` and `fwVersion` are what tell the firmwares apart. Absent on pre-3.1 gateways" }
         product:      { type: string,  example: "Matrix Portal Gateway" }
-        fwVersion:    { type: string,  example: "2.0.0", description: "This firmware's own version" }
+        fwVersion:    { type: string,  example: "2.1.0", description: "This firmware's own version" }
         wSSID:        { type: string,  example: "MyNetwork" }
         mqHost:       { type: string,  example: "192.168.1.50" }
         mqPort:       { type: integer, example: 1883 }
@@ -1634,3 +2107,4 @@ components:
         flapMs:        { type: integer, description: "ms per flap of the flip animation", example: 60 }
         flapMax:       { type: integer, description: "Max flips per character change", example: 64 }
         maxFlaps:      { type: integer, description: "Flaps on the drawn reel: glyphs + colours + lowercase + pictographs", example: 237 }
+        bootAnim:      { type: string,  description: "Animation-library name autoplayed at boot (v2.1); empty when none is set", example: "rainbow" }

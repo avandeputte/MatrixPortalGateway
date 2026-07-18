@@ -64,6 +64,12 @@ void panelCloneToBack();
 // bit depth (a true screenshot); brightness is not reflected. Read-only. out must hold W*H*(2 or 3).
 void panelReadback(uint8_t* out, bool rgb565);
 
+// Overlay hook (v2.1): called at the top of panelShow(), drawing into the frame
+// that is about to be presented. Every presenter -- wall, effect, animation,
+// raw canvas -- gets the overlay without knowing it exists. The hook must only
+// use panelPixel/panelFillRect etc. and must NOT call panelShow. NULL disables.
+void panelSetOverlay(void (*fn)(void));
+
 // Halt output (dark panel). Used during OTA flash writes -- not because the GDMA
 // refresh needs the CPU (it does not), but for the panel-current and memory-bandwidth headroom
 // while the upload runs. panelResume() undoes it.

@@ -1,5 +1,39 @@
 # Matrix Portal Gateway — Release Notes
 
+## v2.1.0 — 2026-07-18
+
+The canvas grows into the new memory. Everything below lives in the 16 MB PSRAM and
+23.9 MB FATFS the v2.0 board brought; all of it is API-first (no dashboard controls yet).
+
+### Added
+
+- **Animation library.** Animations persist as named files on FATFS: `POST
+  /api/canvas/anim/save {"name"}` snapshots the loaded store, `.../anim/play {"name"}`
+  loads and plays, plus list (`GET /api/canvas/anims`) and delete. A configured
+  **`bootAnim`** autoplays at power-on before WiFi, yielding to the first display
+  command.
+- **Overlay ticker.** `POST /api/canvas/ticker {"overlay":true}` composites a
+  lower-third scrolling band over *whatever* is presenting — wall pages, effects,
+  animations, canvas pushes — via a hook inside `panelShow()`. It survives page and
+  effect changes; only an explicit stop or Quiet Time removes it.
+- **Transitions.** `POST /api/canvas/transition {"type":"crossfade|wipe|slide","ms"}` —
+  full-frame canvas PUTs stage in PSRAM and tween from the previous frame on-device
+  instead of hard-cutting.
+- **Sprite atlas.** `PUT /api/canvas/atlas` uploads a tile sheet (2 MB cap, magenta
+  transparency); the ops API gains `{"op":"sprite","i","x","y"}` for low-bandwidth
+  sprite blits.
+- **GIF import.** `PUT /api/canvas/gif` decodes a GIF on-device (AnimatedGIF) straight
+  into the animation store — centered, fps from the GIF's own delays — and plays it;
+  save it to the library like any upload.
+- **Uploadable fonts.** `tools/fontpack.py` packs a BDF into an MPFT blob;
+  `PUT /api/canvas/font` makes it the "custom" face, with a FATFS font library
+  (save/list/delete) and a `"font"` field on the ticker and the ops text op.
+
+### Fixed
+
+- Starting an animation no longer half-stops an overlay ticker (`claimPanel` now
+  preserves the overlay).
+
 ## v2.0.0 — 2026-07-18
 
 **New hardware: the Waveshare ESP32-S3-RGB-Matrix driver board.** A hardware port, not an

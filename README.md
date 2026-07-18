@@ -38,6 +38,71 @@ module registry. See **New in 1.10**.)
 
 ---
 
+## New in 2.1
+
+The canvas learns to keep things. Six additions, all Matrix-only and all additive — every
+pre-2.1 client keeps working unchanged. The dashboard deliberately grows **no controls** for
+any of this yet: the API and the companion are the surface first. (`GET /api/config` now
+reports `fwVersion` `2.1.0`; the API level stays `3.1.0`.)
+
+- **An animation library — uploads that survive the reboot.** The animation store was always
+  volatile; now `POST /api/canvas/anim/save {"name":"x"}` writes whatever is loaded to FATFS
+  (`/anim/<name>.mpg`, byte-identical to the `MPGA` wire format), `POST /api/canvas/anim/play`
+  loads a name back and plays it (`409` during Quiet Time), `POST /api/canvas/anim/delete`
+  removes it, and `GET /api/canvas/anims` lists the library with each file's real header
+  metadata. Names are 1–24 chars of `a-z 0-9 - _`. The 23.9 MB FATFS the 2.0 board brought is
+  what makes a library of multi-MB loops reasonable.
+
+  ```sh
+  curl -X POST http://<gw>/api/canvas/anim/save -d '{"name":"rainbow"}'
+  curl -X POST http://<gw>/api/canvas/anim/play -d '{"name":"rainbow"}'
+  ```
+
+  **And a boot animation:** set `bootAnim` (in `POST /api/config/settings`, reported by
+  `GET /api/config`) to a library name and it autoplays **at boot, before WiFi** — a splash
+  screen from flash — until the first display command supersedes it.
+
+- **The ticker becomes an overlay.** `POST /api/canvas/ticker` gains `"overlay":true`: instead
+  of taking the panel over, the ticker composites as a **lower-third band over whatever else is
+  presenting** — the flap wall, an effect, an animation, a pushed frame — via a hook on every
+  presented frame, so it survives page and mode changes. Only an explicit `{"text":""}` or
+  Quiet Time stops it. `"band":false` drops the black band and scrolls the glyphs straight
+  over the content.
+
+  ```sh
+  curl -X POST http://<gw>/api/canvas/ticker \
+       -d '{"text":"BREAKING — the flaps keep flapping","overlay":true}'
+  ```
+
+- **Transitions between frames.** `POST /api/canvas/transition
+  {"type":"none|crossfade|wipe|slide","ms":100-2000}` — sticky, runtime-only. Subsequent
+  full-frame `PUT /api/canvas/frame` presents stage the incoming frame in PSRAM and tween it
+  on-device instead of hard-cutting. rect/qoi/anim are untouched.
+
+- **A sprite atlas for the ops path.** `PUT /api/canvas/atlas` uploads one tile sheet (a
+  12-byte `MPTA` header — fmt, tileW, tileH, tiles — then the tile pixels, 2 MB cap) and the
+  ops batch gains `{"op":"sprite","i":N,"x":X,"y":Y}`. **Magenta is transparent** (`0xF81F` /
+  `255,0,255`), so sprites carry holes. `GET /api/canvas` reports the loaded sheet in `atlas`,
+  and `capabilities.canvas.ops` now includes `sprite`.
+
+- **GIF import — animations without a packer.** `PUT /api/canvas/gif` takes an ordinary
+  animated GIF (4 MB cap), decodes it **on-device** (AnimatedGIF: deltas, transparency and
+  disposal composited properly, smaller GIFs centred on black, fps from the GIF's own frame
+  delays clamped 1–30) into the same store `PUT /api/canvas/anim` fills — so it plays
+  immediately and `anim/save` persists it. A GIF larger than the panel is a `400`.
+
+- **Uploadable fonts.** `tools/fontpack.py` packs any ≤16px-wide BDF into an `MPFT` blob;
+  `PUT /api/canvas/font` installs it as the face named `custom`, and
+  `POST /api/canvas/font/save|delete` plus `GET /api/canvas/fonts` give fonts the same
+  FATFS library treatment as animations (`/fonts/<name>.fnt`). The ticker and the ops `text`
+  op take a `"font"` field — `custom` or a library name; an unknown name falls back to the
+  built-in face rather than erroring.
+
+  All the new stores — animation frames, the staged transition frames, the atlas, the GIF
+  decode buffer, the font table — live in the 16 MB of PSRAM the 2.0 board brought; none of
+  it touches the internal RAM the panel and WiFi contend for. The large uploads keep the
+  `507` low-heap guard.
+
 ## New in 2.0
 
 - **The gateway moves to the Waveshare ESP32-S3-RGB-Matrix driver board.** Same ESP32-S3, very
@@ -936,7 +1001,8 @@ src/frames.*        frame sanitization, the command log, the frameSend() choke p
                     scheduled batch pacing
 src/vmodule.*       the virtual split-flap modules: protocol dispatch and the shared reel
 src/display.*       flap-wall geometry and the flap renderer (calls panel.*)
-src/canvas.*        raw canvas: frames, rects, QOI decode, draw ops, on-device animation + ticker
+src/canvas.*        raw canvas: frames, rects, QOI decode, draw ops, on-device animation + ticker,
+                    the animation/font libraries, transitions, sprite atlas, GIF import
 src/effects.*       on-device effects: plasma, fire, matrix, flip-o-rama, clock, Life
 src/panel.*         the low-level HUB75 driver: ESP32-S3 LCD_CAM + GDMA, no library
 src/modules.*       high-level protocol send helpers (text/char/home) + FATFS mount
@@ -958,6 +1024,7 @@ tools/i18n_check.py    validates the dictionaries (stale keys, lost product name
 tools/i18n_context.py  builds CONTEXT.md
 tools/i18n_test.js     regression test for language resolution and t()
 tools/genfont.py    regenerates src/font1252.cpp from the vendored BDFs
+tools/fontpack.py   packs a BDF into an MPFT blob for PUT /api/canvas/font
 tools/genaafont.py  regenerates src/aafont.h from Orbitron (the clock effect's faces)
 tools/Orbitron.ttf  vendored Orbitron variable font (SIL Open Font License)
 tools/bdf/          public-domain X11 "misc-fixed" fonts (10x20, 9x18, 8x13, 6x13, 6x10, 6x9, 5x8)

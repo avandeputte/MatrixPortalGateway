@@ -704,7 +704,7 @@ static void handleApiCapabilities() {
              "\"canvas\":{\"formats\":[\"rgb888\",\"rgb565\",\"qoi\"],\"width\":%u,\"height\":%u,"
              "\"rect\":true,\"anim\":true,\"ticker\":true,\"readback\":true,"
              "\"ops\":[\"clear\",\"pixel\",\"hline\",\"vline\",\"line\",\"rect\",\"circle\",\"ellipse\","
-             "\"triangle\",\"roundrect\",\"gradient\",\"polyline\",\"text\",\"image\",\"scroll\",\"show\"]},"
+             "\"triangle\",\"roundrect\",\"gradient\",\"polyline\",\"text\",\"image\",\"sprite\",\"scroll\",\"show\"]},"
              "\"effects\":%s,\"effectParams\":[\"hue\",\"density\"],",
              (unsigned)gPanel.panelW, (unsigned)gPanel.panelH, effectListJson());
     capPut(cv); }
@@ -798,6 +798,7 @@ static void handleApiConfigGet() {
   doc["flapMs"]        = cfg.flapMs;
   doc["flapMax"]       = cfg.flapMax;
   doc["maxFlaps"]      = SF_MAX_FLAPS;   // 237: glyphs + colours + lowercase + pictographs
+  doc["bootAnim"]      = cfg.bootAnim;   // library animation autoplayed at boot ("" = none)
   char out[1280];   // headroom for identity + panel + JSON-escaped SSID/TZ/hostname
   serializeJson(doc, out, sizeof(out));
   server.send(200, "application/json", out);
@@ -943,6 +944,12 @@ static void handleApiConfigSettings() {
     if (v >= 2 && v <= 500) cfg.flapMs = (uint16_t)v; }
   if (doc["flapMax"].is<int>())       { int v = doc["flapMax"];
     if (v >= 1 && v <= FLAP_ANIM_MAX) cfg.flapMax = (uint8_t)v; }
+  // Boot animation (v2.1): a library name, or "" to disable. Validated so a typo
+  // cannot wedge boot; existence is NOT required (the file may be uploaded later).
+  if (doc["bootAnim"].is<const char*>()) {
+    const char* ba = doc["bootAnim"].as<const char*>();
+    if (!*ba || canvasAnimNameOk(ba)) strlcpy(cfg.bootAnim, ba, sizeof(cfg.bootAnim));
+  }
   // Hostname. Lowercase first (DNS labels are case-insensitive but mDNS responders and
   // browsers are not always careful), then validate. An empty string means "go back to
   // deriving it from the MAC" -- that is how you un-pin a name. Takes effect on reboot.
@@ -1434,13 +1441,22 @@ static void handleApiCanvas() {
     server.send(200, "application/json", buf);
     return;
   }
-  char buf[224];
+  // The atlas field says what the "sprite" op can blit right now: the loaded sheet's
+  // shape, or null when none has been uploaded yet.
+  char atlas[48];
+  uint16_t atTiles = 0, atW = 0, atH = 0;
+  if (canvasAtlasInfo(atTiles, atW, atH))
+    snprintf(atlas, sizeof(atlas), "{\"tiles\":%u,\"w\":%u,\"h\":%u}",
+             (unsigned)atTiles, (unsigned)atW, (unsigned)atH);
+  else
+    strlcpy(atlas, "null", sizeof(atlas));
+  char buf[288];
   snprintf(buf, sizeof(buf),
            "{\"active\":%s,\"width\":%u,\"height\":%u,\"formats\":[\"rgb888\",\"rgb565\",\"qoi\"],"
-           "\"effect\":\"%s\",\"anim\":%s,\"ticker\":%s,\"effects\":%s}",
+           "\"effect\":\"%s\",\"anim\":%s,\"ticker\":%s,\"atlas\":%s,\"effects\":%s}",
            gCanvasMode ? "true" : "false", (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
            effectName(gEffect), gAnimActive ? "true" : "false", gTickerActive ? "true" : "false",
-           effectListJson());
+           atlas, effectListJson());
   server.send(200, "application/json", buf);
 }
 
@@ -1533,6 +1549,90 @@ static void canvasOpPolyline(JsonVariantConst pts, uint8_t r, uint8_t g, uint8_t
   }
 }
 
+// POST /api/canvas/transition {"type":"none|crossfade|wipe|slide","ms":100..2000}
+// Configures how subsequent full-frame canvas PUTs present. Sticky until changed;
+// runtime-only (a reboot returns to hard cuts).
+static void handleApiCanvasTransition() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  JsonDocument doc;
+  if (!readJsonBody(doc)) return;
+  const char* t = doc["type"] | "none";
+  uint8_t ty;
+  if      (!strcmp(t, "none"))      ty = 0;
+  else if (!strcmp(t, "crossfade")) ty = 1;
+  else if (!strcmp(t, "wipe"))      ty = 2;
+  else if (!strcmp(t, "slide"))     ty = 3;
+  else { sendJsonError(400, "type must be none|crossfade|wipe|slide"); return; }
+  int ms = doc["ms"] | 400;
+  if (ms < 100) ms = 100;
+  if (ms > 2000) ms = 2000;
+  gTransType = ty; gTransMs = (uint16_t)ms;
+  char resp[64];
+  snprintf(resp, sizeof(resp), "{\"ok\":true,\"type\":\"%s\",\"ms\":%d}", t, ms);
+  server.send(200, "application/json", resp);
+}
+
+// ---- animation library (v2.1) -------------------------------------------------------
+// Map a canvasAnim* return code onto the error surface.
+static void animRcReply(int rc, const char* okBody) {
+  switch (rc) {
+    case 0:   server.send(200, "application/json", okBody); return;
+    case 400: sendJsonError(400, "Bad name (1-24 chars a-z 0-9 - _) or bad/truncated file"); return;
+    case 404: sendJsonError(404, "No such animation"); return;
+    case 409: sendJsonError(409, "Nothing loaded to save -- upload an animation first"); return;
+    case 413: sendJsonError(413, "Animation exceeds the store limit"); return;
+    case 507: sendJsonError(507, "Filesystem full or write failed"); return;
+    default:  sendJsonError(503, "Filesystem or memory unavailable"); return;
+  }
+}
+
+// POST /api/canvas/anim/save {"name":"x"} -- persist the currently loaded store to FATFS.
+static void handleApiAnimSave() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  JsonDocument doc;
+  if (!readJsonBody(doc)) return;
+  const char* name = doc["name"] | "";
+  { char cd[64]; snprintf(cd, sizeof(cd), "anim save '%.24s'", name); logCommand('R', cd); }
+  animRcReply(canvasAnimSave(name), "{\"ok\":true}");
+}
+
+// POST /api/canvas/anim/play {"name":"x"} -- load a library animation and play it.
+static void handleApiAnimPlay() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  if (!gPanel.ready) { sendJsonError(503, "Panel not running"); return; }
+  if (gQuietTime)    { sendJsonError(409, "Quiet Time is active"); return; }
+  JsonDocument doc;
+  if (!readJsonBody(doc)) return;
+  const char* name = doc["name"] | "";
+  { char cd[64]; snprintf(cd, sizeof(cd), "anim play '%.24s'", name); logCommand('R', cd); }
+  char okBody[96];
+  snprintf(okBody, sizeof(okBody), "{\"ok\":true,\"frames\":%u}", (unsigned)canvasAnimCount());
+  int rc = canvasAnimLoadPlay(name);
+  if (rc == 0)
+    snprintf(okBody, sizeof(okBody), "{\"ok\":true,\"frames\":%u}", (unsigned)canvasAnimCount());
+  animRcReply(rc, okBody);
+}
+
+// POST /api/canvas/anim/delete {"name":"x"}
+static void handleApiAnimDelete() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  JsonDocument doc;
+  if (!readJsonBody(doc)) return;
+  const char* name = doc["name"] | "";
+  { char cd[64]; snprintf(cd, sizeof(cd), "anim delete '%.24s'", name); logCommand('R', cd); }
+  animRcReply(canvasAnimDelete(name), "{\"ok\":true}");
+}
+
+// GET /api/canvas/anims -- the library, streamed.
+static void animListSink(const char* frag) { server.sendContent(frag); wdgWebMs = millis(); }
+static void handleApiAnimList() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+  canvasAnimList(animListSink);
+  server.sendContent("");
+}
+
 // POST /api/canvas/ops -- a JSON array of draw commands, applied in order then presented. Ops: clear
 // | pixel | hline | vline | line | rect(+fill) | circle(+fill) | ellipse(+fill) | triangle(+fill) |
 // roundrect(+fill) | gradient | polyline | text(+align) | image | scroll | show. Colours are [r,g,b],
@@ -1574,6 +1674,11 @@ static void handleApiCanvasOps() {
       panelCircle(x, y, op["r"] | 0, op["fill"] | false, r, g, b);
     } else if (!strcmp(k, "image")) {
       canvasOpImage(op, x, y, w, h);
+    } else if (!strcmp(k, "sprite")) {
+      // {"op":"sprite","i":N,"x":X,"y":Y}: blit atlas tile N (PUT /api/canvas/atlas) at (x,y),
+      // transparent pixels skipped. No atlas loaded or i out of range: skip, do not count.
+      const int ti = op["i"] | -1;
+      if (ti < 0 || !canvasAtlasBlit((uint16_t)ti, x, y)) continue;
     } else if (!strcmp(k, "scroll")) {
       uint8_t r = 0, g = 0, b = 0; canvasColor(op["color"], r, g, b);   // vacated pixels: black default
       panelScroll(op["dx"] | 0, op["dy"] | 0, r, g, b);
@@ -1595,6 +1700,12 @@ static void handleApiCanvasOps() {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
       const char* s = op["s"] | "";
       const Font1252* f = canvasFace(op["size"] | 10);
+      // v2.1: an optional uploaded face -- "custom" is the PSRAM slot, any other name loads
+      // /fonts/<name>.fnt into it. Unknown/missing names keep the built-in face, never error.
+      if (op["font"].is<const char*>()) {
+        const Font1252* cf = canvasFontByName(op["font"].as<const char*>());
+        if (cf) f = cf;
+      }
       const char* al = op["align"] | "left";
       int tx = x, tw = (int)strlen(s) * f->width;
       if      (!strcmp(al, "center")) tx = x - tw / 2;
@@ -1621,12 +1732,13 @@ static uint16_t     canvasX = 0, canvasY = 0;   // running write position: no pe
 static uint8_t      canvasCarry[3];     // partial pixel across a chunk boundary
 static uint8_t      canvasCarryN = 0;
 static uint8_t      canvasBpp = 3;
+static bool         canvasStaged = false;
 static void handleApiCanvasFrameRaw() {
   HTTPRaw& raw = server.raw();
   wdgWebMs = millis();                   // a slow client must not trip the web watchdog
   switch (raw.status) {
     case RAW_START: {
-      canvasErr = 0; canvasX = 0; canvasY = 0; canvasCarryN = 0;
+      canvasErr = 0; canvasX = 0; canvasY = 0; canvasCarryN = 0; canvasStaged = false;
       if (!gPanel.ready) { canvasErr = 503; break; }
       // Infer the pixel format from the body length -- a full frame is unambiguously W*H*3
       // (rgb888) or W*H*2 (rgb565). server.arg("fmt") reads empty in a raw handler, so the
@@ -1637,10 +1749,15 @@ static void handleApiCanvasFrameRaw() {
       else if (len == px * 2) canvasBpp = 2;
       else { canvasErr = 400; break; }
       canvasStandDown();                 // stand the wall down and wait for the renderer to park
+      // Transition configured: stage the whole frame in PSRAM and tween on RAW_END,
+      // instead of painting pixels as they stream. Allocation failure falls back to
+      // the direct path -- a hard cut beats a 500.
+      if (gTransType != 0) canvasStaged = canvasStageBegin(canvasBpp);
       break;
     }
     case RAW_WRITE:
       if (canvasErr) break;
+      if (canvasStaged) { canvasStageFeed(raw.buf, raw.currentSize); break; }
       for (size_t i = 0; i < raw.currentSize; i++) {
         canvasCarry[canvasCarryN++] = raw.buf[i];
         if (canvasCarryN < canvasBpp) continue;
@@ -1652,7 +1769,10 @@ static void handleApiCanvasFrameRaw() {
       }
       break;
     case RAW_END:
-      if (!canvasErr && gPanel.ready) panelShow();
+      if (!canvasErr && gPanel.ready) {
+        if (canvasStaged) canvasStagePresent();   // tween old -> new, land on new
+        else              panelShow();
+      }
       break;
     case RAW_ABORTED:
       canvasErr = 400;
@@ -1906,23 +2026,257 @@ static void handleApiCanvasAnim() {
   server.send(200, "application/json", buf);
 }
 
+// PUT /api/canvas/atlas -- upload a sprite tile sheet for the ops path's "sprite" op (v2.1).
+// Header (12 B, big-endian): "MPTA"(4) ver(1)=1 fmt(1: 2=rgb565BE, 3=rgb888) tileW(2) tileH(2)
+// tiles(2), then tiles*tileW*tileH*fmt bytes of tile data. Streamed straight into PSRAM; kept
+// across uses and replaced by the next upload. No panel takeover -- it is data, not pixels.
+static int      atlasErr = 0;
+static uint8_t  atlasHdr[12]; static uint8_t atlasHdrN = 0; static bool atlasBegun = false;
+static void handleApiCanvasAtlasRaw() {
+  HTTPRaw& raw = server.raw();
+  wdgWebMs = millis();
+  switch (raw.status) {
+    case RAW_START:
+      atlasErr = 0; atlasHdrN = 0; atlasBegun = false;
+      if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) { atlasErr = 507; break; }   // stressed: back off
+      break;
+    case RAW_WRITE: {
+      if (atlasErr) break;
+      size_t i = 0;
+      while (atlasHdrN < 12 && i < raw.currentSize) atlasHdr[atlasHdrN++] = raw.buf[i++];
+      if (atlasHdrN < 12) break;
+      if (!atlasBegun) {
+        if (memcmp(atlasHdr, "MPTA", 4) != 0 || atlasHdr[4] != 1) { atlasErr = 400; break; }
+        uint16_t tw = (atlasHdr[6]  << 8) | atlasHdr[7];
+        uint16_t th = (atlasHdr[8]  << 8) | atlasHdr[9];
+        uint16_t tn = (atlasHdr[10] << 8) | atlasHdr[11];
+        int rc = canvasAtlasBegin(atlasHdr[5], tw, th, tn);
+        if (rc) { atlasErr = rc; break; }
+        atlasBegun = true;
+      }
+      if (i < raw.currentSize) canvasAtlasFeed(raw.buf + i, raw.currentSize - i);
+      break;
+    }
+    case RAW_END:
+      if (!atlasErr && !atlasBegun) atlasErr = 400;   // empty body: never reached the header
+      if (!atlasErr) { int rc = canvasAtlasCommit(); if (rc) atlasErr = rc; }
+      break;
+    case RAW_ABORTED:
+      atlasErr = 400;
+      break;
+  }
+}
+static void handleApiCanvasAtlas() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  int e = atlasErr; atlasErr = 0;
+  if (e == 400) { sendJsonError(400, "Bad MPTA header or truncated upload"); return; }
+  if (e == 413) { sendJsonError(413, "Atlas exceeds the 2 MB budget"); return; }
+  if (e == 503) { sendJsonError(503, "Out of memory"); return; }
+  if (e == 507) { sendJsonError(507, "Low on memory -- try again in a moment"); return; }
+  uint16_t tiles = 0, w = 0, h = 0;
+  canvasAtlasInfo(tiles, w, h);
+  char buf[64];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"tiles\":%u,\"w\":%u,\"h\":%u}",
+           (unsigned)tiles, (unsigned)w, (unsigned)h);
+  server.send(200, "application/json", buf);
+}
+
+// PUT /api/canvas/gif -- import a GIF into the animation store (v2.1). The whole file is
+// buffered in PSRAM (it is compressed, like the QOI path), then decoded on RAW_END into the
+// same store PUT /api/canvas/anim fills, so it plays immediately and POST /api/canvas/anim/save
+// persists it. GIFs smaller than the panel are centred on black; larger ones are rejected.
+#define CANVAS_GIF_MAX_BYTES  (4096u * 1024u)
+static uint8_t* gifBuf = nullptr; static size_t gifCap = 0, gifLen = 0;
+static int      gifErr = 0;
+static const char* gifErrMsg = "";
+static uint16_t gifFrames = 0; static uint8_t gifFps = 0;
+static void handleApiCanvasGifRaw() {
+  HTTPRaw& raw = server.raw();
+  wdgWebMs = millis();
+  switch (raw.status) {
+    case RAW_START: {
+      gifErr = 0; gifLen = 0;
+      if (!gPanel.ready) { gifErr = 503; gifErrMsg = "Panel not running"; break; }
+      if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) {   // stressed: back off
+        gifErr = 507; gifErrMsg = "Low on memory -- try again in a moment"; break;
+      }
+      size_t need = (size_t)server.clientContentLength();
+      if (need < 14) { gifErr = 400; gifErrMsg = "Empty or truncated body"; break; }
+      if (need > CANVAS_GIF_MAX_BYTES) {
+        gifErr = 413; gifErrMsg = "GIF exceeds the 4 MB budget"; break;
+      }
+      if (gifCap < need) {                    // a multi-MB file only ever fits PSRAM
+        if (gifBuf) free(gifBuf);
+        gifBuf = (uint8_t*)ps_malloc(need);
+        gifCap = gifBuf ? need : 0;
+      }
+      if (!gifBuf) { gifErr = 503; gifErrMsg = "Out of memory"; break; }
+      break;
+    }
+    case RAW_WRITE:
+      if (gifErr || !gifBuf) break;
+      if (gifLen + raw.currentSize <= gifCap) {
+        memcpy(gifBuf + gifLen, raw.buf, raw.currentSize);
+        gifLen += raw.currentSize;
+      }
+      break;
+    case RAW_END:
+      if (!gifErr) {
+        canvasStandDown();                    // park the render task while the store refills
+        int rc = canvasGifImport(gifBuf, gifLen, &gifFrames, &gifFps, &gifErrMsg);
+        if (rc) { gifErr = rc; dispReturnToWall(); }
+      }
+      // The compressed upload is dead weight once decoded (the frames live in the
+      // animation store) -- free it rather than cache 4 MB against the next import.
+      if (gifBuf) { free(gifBuf); gifBuf = nullptr; gifCap = 0; }
+      break;
+    case RAW_ABORTED:
+      // No dispReturnToWall() here: the panel is only taken over at RAW_END (the decode),
+      // which an aborted upload never reaches -- whatever was showing keeps showing.
+      gifErr = 400; gifErrMsg = "Upload aborted";
+      if (gifBuf) { free(gifBuf); gifBuf = nullptr; gifCap = 0; }
+      break;
+  }
+}
+static void handleApiCanvasGif() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  int e = gifErr; gifErr = 0;
+  if (e) { sendJsonError(e, gifErrMsg[0] ? gifErrMsg : "GIF import failed"); return; }
+  char buf[64];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"frames\":%u,\"fps\":%u}",
+           (unsigned)gifFrames, (unsigned)gifFps);
+  server.send(200, "application/json", buf);
+}
+
+// PUT /api/canvas/font -- upload an MPFT font blob (tools/fontpack.py) into the custom-font
+// slot (v2.1). Small (<= 64 KB), so it is buffered whole and handed to canvasFontInstall on
+// RAW_END -- the same path a library load uses. On success the face answers to the name
+// "custom" in the ticker and the ops text op.
+static uint8_t* fontUpBuf = nullptr; static size_t fontUpCap = 0, fontUpLen = 0;
+static int      fontUpErr = 0;
+static void handleApiCanvasFontRaw() {
+  HTTPRaw& raw = server.raw();
+  wdgWebMs = millis();
+  switch (raw.status) {
+    case RAW_START: {
+      fontUpErr = 0; fontUpLen = 0;
+      size_t need = (size_t)server.clientContentLength();
+      if (need < 8)                     { fontUpErr = 400; break; }
+      if (need > CANVAS_FONT_MAX_BYTES) { fontUpErr = 413; break; }
+      if (fontUpCap < need) {
+        if (fontUpBuf) free(fontUpBuf);
+        fontUpBuf = (uint8_t*)ps_malloc(need);
+        if (!fontUpBuf) fontUpBuf = (uint8_t*)malloc(need);
+        fontUpCap = fontUpBuf ? need : 0;
+      }
+      if (!fontUpBuf) fontUpErr = 503;
+      break;
+    }
+    case RAW_WRITE:
+      if (fontUpErr || !fontUpBuf) break;
+      if (fontUpLen + raw.currentSize <= fontUpCap) {
+        memcpy(fontUpBuf + fontUpLen, raw.buf, raw.currentSize);
+        fontUpLen += raw.currentSize;
+      }
+      break;
+    case RAW_END:
+      if (!fontUpErr) { int rc = canvasFontInstall(fontUpBuf, fontUpLen); if (rc) fontUpErr = rc; }
+      break;
+    case RAW_ABORTED:
+      fontUpErr = 400;
+      break;
+  }
+}
+static void handleApiCanvasFont() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  int e = fontUpErr; fontUpErr = 0;
+  if (e == 400) { sendJsonError(400, "Bad MPFT header or truncated upload"); return; }
+  if (e == 413) { sendJsonError(413, "Font exceeds the 64 KB cap"); return; }
+  if (e)        { sendJsonError(503, "Out of memory"); return; }
+  uint8_t w = 0, h = 0, a = 0;
+  canvasFontInfo(w, h, a);
+  char buf[80];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"font\":\"custom\",\"w\":%u,\"h\":%u,\"ascent\":%u}",
+           (unsigned)w, (unsigned)h, (unsigned)a);
+  server.send(200, "application/json", buf);
+}
+
+// Map a canvasFont* return code onto the error surface (the font twin of animRcReply).
+static void fontRcReply(int rc, const char* okBody) {
+  switch (rc) {
+    case 0:   server.send(200, "application/json", okBody); return;
+    case 400: sendJsonError(400, "Bad name (1-24 chars a-z 0-9 - _) or bad/truncated file"); return;
+    case 404: sendJsonError(404, "No such font"); return;
+    case 409: sendJsonError(409, "No custom font loaded -- upload one first"); return;
+    case 413: sendJsonError(413, "Font exceeds the 64 KB cap"); return;
+    case 507: sendJsonError(507, "Filesystem full or write failed"); return;
+    default:  sendJsonError(503, "Filesystem or memory unavailable"); return;
+  }
+}
+
+// POST /api/canvas/font/save {"name":"x"} -- persist the custom-font slot to FATFS.
+static void handleApiFontSave() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  JsonDocument doc;
+  if (!readJsonBody(doc)) return;
+  const char* name = doc["name"] | "";
+  { char cd[64]; snprintf(cd, sizeof(cd), "font save '%.24s'", name); logCommand('R', cd); }
+  fontRcReply(canvasFontSave(name), "{\"ok\":true}");
+}
+
+// POST /api/canvas/font/delete {"name":"x"}
+static void handleApiFontDelete() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  JsonDocument doc;
+  if (!readJsonBody(doc)) return;
+  const char* name = doc["name"] | "";
+  { char cd[64]; snprintf(cd, sizeof(cd), "font delete '%.24s'", name); logCommand('R', cd); }
+  fontRcReply(canvasFontDelete(name), "{\"ok\":true}");
+}
+
+// GET /api/canvas/fonts -- the font library, streamed (like /api/canvas/anims).
+static void handleApiFontList() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+  canvasFontList(animListSink);
+  server.sendContent("");
+}
+
 // POST /api/canvas/ticker -- one line of text scrolling right-to-left, rendered on-device.
-// {text, color:[r,g,b], speed:1..20}. Empty text hands the panel back to the wall.
+// {text, color:[r,g,b], speed:1..20, overlay:bool, band:bool}. overlay=true (v2.1)
+// composites the ticker as a lower-third over whatever else is presenting -- wall,
+// effect, animation -- and survives page changes. Empty text stops any ticker.
 static void handleApiCanvasTicker() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   if (!gPanel.ready) { sendJsonError(503, "Panel not running"); return; }
   JsonDocument doc;
   if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) { sendJsonError(400, "Invalid JSON"); return; }
   const char* text = doc["text"] | "";
-  if (!text[0]) { dispReturnToWall(); server.send(200, "application/json", "{\"ok\":true,\"active\":false}"); return; }
+  if (!text[0]) {
+    canvasTickerStopForce();           // explicit stop kills an overlay ticker too
+    dispReturnToWall();
+    server.send(200, "application/json", "{\"ok\":true,\"active\":false}");
+    return;
+  }
   if (gQuietTime) { sendJsonError(409, "Quiet Time is active"); return; }
   uint8_t r = 255, g = 255, b = 255;
   if (doc["color"].is<JsonArray>() && doc["color"].size() >= 3) {
     r = (uint8_t)(int)doc["color"][0]; g = (uint8_t)(int)doc["color"][1]; b = (uint8_t)(int)doc["color"][2];
   }
   int speed = doc["speed"] | 2;
-  canvasTickerSet(text, r, g, b, speed);
-  server.send(200, "application/json", "{\"ok\":true,\"active\":true}");
+  bool overlay = doc["overlay"] | false;
+  bool band    = doc["band"]    | true;
+  // v2.1: optional "font" -- "custom" is the uploaded PSRAM face, any other name loads
+  // /fonts/<name>.fnt into the slot. Absent or unresolvable falls back to the built-in
+  // panel-sized face (NULL below); a missing font must scroll text, not 500.
+  const Font1252* face = nullptr;
+  if (doc["font"].is<const char*>()) face = canvasFontByName(doc["font"].as<const char*>());
+  canvasTickerSet(text, r, g, b, speed, overlay, band, face);
+  char resp[64];
+  snprintf(resp, sizeof(resp), "{\"ok\":true,\"active\":true,\"overlay\":%s}",
+           overlay ? "true" : "false");
+  server.send(200, "application/json", resp);
 }
 
 void webInit() {
@@ -1997,6 +2351,26 @@ void webInit() {
   server.on("/api/canvas/qoi",       HTTP_OPTIONS, handleOptions);
   server.on("/api/canvas/anim",      HTTP_PUT,     handleApiCanvasAnim,  handleApiCanvasAnimRaw);
   server.on("/api/canvas/anim",      HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/atlas",     HTTP_PUT,     handleApiCanvasAtlas, handleApiCanvasAtlasRaw);
+  server.on("/api/canvas/atlas",     HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/gif",       HTTP_PUT,     handleApiCanvasGif,   handleApiCanvasGifRaw);
+  server.on("/api/canvas/gif",       HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/font",      HTTP_PUT,     handleApiCanvasFont,  handleApiCanvasFontRaw);
+  server.on("/api/canvas/font",      HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/font/save",   HTTP_POST,    handleApiFontSave);
+  server.on("/api/canvas/font/save",   HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/font/delete", HTTP_POST,    handleApiFontDelete);
+  server.on("/api/canvas/font/delete", HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/fonts",       HTTP_GET,     handleApiFontList);
+  server.on("/api/canvas/anim/save",   HTTP_POST,    handleApiAnimSave);
+  server.on("/api/canvas/anim/save",   HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/anim/play",   HTTP_POST,    handleApiAnimPlay);
+  server.on("/api/canvas/anim/play",   HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/anim/delete", HTTP_POST,    handleApiAnimDelete);
+  server.on("/api/canvas/anim/delete", HTTP_OPTIONS, handleOptions);
+  server.on("/api/canvas/anims",       HTTP_GET,     handleApiAnimList);
+  server.on("/api/canvas/transition",  HTTP_POST,    handleApiCanvasTransition);
+  server.on("/api/canvas/transition",  HTTP_OPTIONS, handleOptions);
   server.on("/api/canvas/ticker",    HTTP_POST,    handleApiCanvasTicker);
   server.on("/api/canvas/ticker",    HTTP_OPTIONS, handleOptions);
   server.on("/api/canvas/ops",       HTTP_POST,    handleApiCanvasOps);

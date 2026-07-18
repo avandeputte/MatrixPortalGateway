@@ -679,7 +679,11 @@ void panelScroll(int dx, int dy, uint8_t fr, uint8_t fg, uint8_t fb) {
 // desc->next when it finishes a descriptor, so the switch happens at a block boundary and
 // never mid-row. Then wait one frame, so the caller cannot start drawing into a buffer the
 // engine is still reading.
+static void (*sOverlay)(void) = nullptr;
+void panelSetOverlay(void (*fn)(void)) { sOverlay = fn; }
+
 void panelShow() {
+  if (sOverlay) sOverlay();   // draw the overlay into the outgoing frame (v2.1)
   if (!info.ok) return;
   if (brightPending) { writeControlBits(drawBuf); brightPending = (uint8_t)(brightPending - 1); }
 

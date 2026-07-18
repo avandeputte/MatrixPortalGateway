@@ -159,8 +159,10 @@ void dispReturnToWall() {
   gEffectReq  = EFFECT_REQ_IDLE;   // cancel a pending start
   gEffect     = EFFECT_NONE;       // stop rendering the current effect (taskDisplay just stops)
   gCanvasMode = false;             // release the raw canvas
-  canvasAnimStop();                // stop animation playback / the ticker
-  canvasTickerStop();
+  canvasAnimStop();                // stop animation playback
+  canvasTickerStop();              // exclusive ticker only -- an overlay ticker survives
+                                   // page changes by design (canvasTickerStopForce is the
+                                   // explicit/Quiet-Time kill)
   dispMarkDirty();                 // repaint the wall
 }
 
@@ -392,8 +394,9 @@ void taskDisplay(void* pv) {
     }
     // On-device animation loop / scrolling ticker: same deal as an effect -- taskDisplay owns the
     // panel and each render call presents a frame (or yields until its next step is due).
-    if (gAnimActive)   { canvasAnimRender();   wdgDispMs = millis(); continue; }
-    if (gTickerActive) { canvasTickerRender(); wdgDispMs = millis(); continue; }
+    if (gAnimActive)   { canvasAnimRender();   canvasTickerTick(now); wdgDispMs = millis(); continue; }
+    if (gTickerActive && !gTickerOverlay) { canvasTickerRender(); wdgDispMs = millis(); continue; }
+    canvasTickerTick(now);   // overlay ticker: advance scroll; repaints the idle wall as needed
     if (vmTick(now)) pending = true;
     // dispRender clears dispDirty itself, but only once it is committed to
     // painting -- so a repaint it declined still leaves work for the next tick.

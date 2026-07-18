@@ -31,6 +31,7 @@ struct GwConfig {
   uint8_t       gridCols;      // wall columns (>=1)
   // ---- v3.0 ----
   char          companionUrl[128]; // registered companion-app URL (blank = none)
+  char          bootAnim[25];      // animation library name autoplayed at boot (blank = none)
   bool          quietSchedEnabled; // auto-enable Quiet Time on a daily schedule
   char          quietStart[6];     // quiet window start "HH:MM" (the user's LOCAL time)
   char          quietEnd[6];       // quiet window end   "HH:MM" (the user's LOCAL time)
