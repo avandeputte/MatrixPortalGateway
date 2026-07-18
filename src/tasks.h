@@ -5,7 +5,7 @@
 
 #include "common.h"
 
-void taskRS485(void* pv);     // drains the emulated bus (was: the UART)
+void taskBus(void* pv);       // drains the emulated bus (was: the UART)
 void taskRTC(void* pv);
 void taskWeb(void* pv);
 void taskNetwork(void* pv);

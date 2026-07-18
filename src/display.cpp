@@ -5,7 +5,7 @@
 
 // display.cpp -- the HUB75 flap wall: geometry, the flap renderer, and the reel task.
 // All output goes through panel.h; this file never sees a pixel format, a bitplane or a
-// brightness value. See panel.h for which backend is compiled in.
+// brightness value. panel.cpp is the one driver (LCD_CAM + GDMA).
 
 PanelGeometry gPanel = {0};
 
@@ -164,8 +164,8 @@ void dispReturnToWall() {
   dispMarkDirty();                 // repaint the wall
 }
 
-// Show black and halt output. Used while a firmware image streams in: writing flash
-// disables the instruction cache on both cores. Reversible -- see dispResume().
+// Show black and halt output while a firmware image streams in -- see the note on
+// panelStop() in panel.h. Reversible -- see dispResume().
 void dispBlank() { if (gPanel.ready) panelStop(); }
 
 // Restart output and repaint. Called when an upload fails.
@@ -246,6 +246,22 @@ static void drawFace(int cx, int cy, const FaceSnap& f, Ink ink, int rowFrom, in
     if (!bits) continue;
     for (int c = 0; c < wide; c++)
       if (bits & (0x8000 >> c)) panelPixel(gx + c, gy + r, ink.r, ink.g, ink.b);
+  }
+}
+
+// The one shared glyph blitter (see display.h). Kept beside the cell renderer so
+// the row/bit conventions live in a single file.
+void dispDrawGlyph1252(int px, int py, const Font1252* f, uint8_t ch,
+                       int rowFrom, int rowTo, uint8_t r, uint8_t g, uint8_t b) {
+  uint8_t gi = FONT1252_INDEX[ch];
+  if (gi == 0xFF) return;
+  if (rowFrom < 0) rowFrom = 0;
+  if (rowTo > f->height) rowTo = f->height;
+  for (int row = rowFrom; row < rowTo; row++) {
+    uint16_t bits = font1252Row(*f, gi, (uint8_t)row);
+    if (!bits) continue;
+    for (int col = 0; col < f->width; col++)
+      if (bits & (uint16_t)(0x8000 >> col)) panelPixel(px + col, py + row, r, g, b);
   }
 }
 
@@ -375,9 +391,9 @@ bool dispRender() {
 // vmTick per tick and no show().
 //
 // The tick is the reel TIMER's resolution, not the frame rate: vmTick is a handful of
-// comparisons, while a repaint redraws every cell and then calls show(), which
-// re-encodes the whole canvas into bitplanes and busy-waits for the refresh ISR to swap
-// buffers. Those differ by orders of magnitude, so the repaint gets its own ceiling. At
+// comparisons, while a repaint redraws every cell (bitplane encoding happens per pixel
+// write) and then calls show(), which re-points the GDMA chain and yields one frame so
+// the swap lands. Those differ by orders of magnitude, so the repaint gets its own ceiling. At
 // DEFAULT_FLAP_MS a turning reel half-steps every 30 ms (~33 Hz) and never reaches it;
 // the ceiling is there so a reel set to the minimum flapMs coalesces frames instead of
 // pinning the panel at 100 Hz.

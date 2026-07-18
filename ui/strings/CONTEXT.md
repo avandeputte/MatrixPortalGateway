@@ -51,7 +51,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Clock` | Status tab (diagnostics) | HEADING |
 | `Color depth (bitplanes, 1-6)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Columns` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
-| `Common panel & wall combinations. Choosing one fills the Panel and Module Wall cards below and saves them.` | — | (built at runtime) |
+| `Common panel & wall combinations. Choosing one fills the LED Panel card and the rows and columns below, and saves them.` | — | (built at runtime) |
 | `Companion App` | Status tab (diagnostics) | HEADING |
 | `Compose` | — | TAB / LINK LABEL (a noun) |
 | `Connected` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
@@ -60,7 +60,6 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Data (ASCII)` | Monitor tab (live REST/MQTT command log) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Debug disabled` | — | RUNTIME MESSAGE (shown after an action, in saveDebug()) |
 | `Debug enabled` | — | RUNTIME MESSAGE (shown after an action, in saveDebug()) |
-| `Device Name` | Settings tab | HEADING (card title -- a noun phrase) |
 | `Dhaka (UTC+6 no DST)` | Settings tab | DROPDOWN OPTION |
 | `Display` | — | TAB / LINK LABEL (a noun) |
 | `Download Log` | Monitor tab (live REST/MQTT command log) | BUTTON (an action -- use the imperative) |
@@ -73,14 +72,14 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Error` | — | RUNTIME MESSAGE (shown after an action, in g()) |
 | `Error:` | — | RUNTIME MESSAGE (shown after an action); RUNTIME MESSAGE (shown after an action, in applyGeomPreset()); RUNTIME MESSAGE (shown after an action, in doSend()); RUNTIME MESSAGE (shown after an action, in g()); RUNTIME MESSAGE (shown after an action, in saveDebug()); RUNTIME MESSAGE (shown after an action, in saveGrid()); RUNTIME MESSAGE (shown after an action, in saveHa()); RUNTIME MESSAGE (shown after an action, in saveHost()); RUNTIME MESSAGE (shown after an action, in saveMqtt()); RUNTIME MESSAGE (shown after an action, in saveOTA()); RUNTIME MESSAGE (shown after an action, in savePanel()); RUNTIME MESSAGE (shown after an action, in saveTz()); RUNTIME MESSAGE (shown after an action, in saveWifi()); RUNTIME MESSAGE (shown after an action, in sendChar()); RUNTIME MESSAGE (shown after an action, in sendIndex()); RUNTIME MESSAGE (shown after an action, in sendText()); RUNTIME MESSAGE (shown after an action, in testMqtt()) |
 | `Failed:` | — | RUNTIME MESSAGE (shown after an action, in testMqtt()) |
-| `Flap Index (0-162)` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
+| `Flap Index (0-236)` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Flip speed (ms per flap)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Frames RX` | Status tab (diagnostics) | TEXT |
 | `Frames TX` | Status tab (diagnostics) | TEXT |
 | `Free Heap` | Status tab (diagnostics) | TEXT |
 | `From` | — | (built at runtime) |
+| `GATEWAY` | — | INLINE TEXT |
 | `Gateway Time` | Status tab (diagnostics) | TEXT |
-| `Geometry preset` | Settings tab | HEADING (card title -- a noun phrase) |
 | `Grid` | — | RUNTIME MESSAGE (shown after an action, in buildWall()) |
 | `Grid brightness (0=off)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Grid color` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
@@ -95,13 +94,14 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `KB` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
 | `Karachi (UTC+5 no DST)` | Settings tab | DROPDOWN OPTION |
 | `LED Panel` | Settings tab | HEADING (card title -- a noun phrase) |
-| `Language` | Settings tab | FORM LABEL (names the input below it -- a noun phrase); HEADING (card title -- a noun phrase) |
+| `Language` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Language of this dashboard.` | — | (built at runtime) |
 | `Layout saved — reboot to rebuild the wall` | — | (built at runtime) |
 | `Leave blank for no password` | Settings tab | INPUT PLACEHOLDER (example text) |
 | `Leave blank for open network` | Settings tab | INPUT PLACEHOLDER (example text) |
 | `Live Display` | Display tab (send text/characters to the wall) | HEADING (card title -- a noun phrase) |
 | `Loading...` | Display tab (send text/characters to the wall) | TEXT |
+| `Localization` | Settings tab | HEADING (card title -- a noun phrase) |
 | `London (UTC+0/+1)` | Settings tab | DROPDOWN OPTION |
 | `Lowest minimum-ever free stack across tasks. Trending toward 0 warns of a stack overflow before it crashes.` | Status tab (diagnostics) | TOOLTIP |
 | `MAINTENANCE MODE - external MQTT commands are being ignored` | — | (built at runtime) |
@@ -119,7 +119,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Moscow (UTC+3 no DST)` | Settings tab | DROPDOWN OPTION |
 | `NTP Server` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `NTP Sync` | Status tab (diagnostics) | TEXT |
-| `Network` | Status tab (diagnostics) | HEADING |
+| `Network` | Settings tab; Status tab (diagnostics) | HEADING; HEADING (card title -- a noun phrase) |
 | `Network name` | Settings tab | INPUT PLACEHOLDER (example text) |
 | `Not registered` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
 | `Nothing to send.` | — | RUNTIME MESSAGE (shown after an action, in doSend()) |
@@ -141,8 +141,8 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Port` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Power-cycle the gateway to apply.` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()) |
 | `Protects ArduinoOTA (IDE/command-line) uploads. The web updater above is always accessible.` | Settings tab | HELP TEXT (a full sentence) |
-| `Pub: .../rx   .../tx   .../status   .../flap/adv   .../flap/ack` | — | (built at runtime) |
-| `QUIET TIME - the display is blanked and flaps will not move. It is restored when Quiet Time ends (calibration still works)` | — | TEXT |
+| `Pub: .../rx   .../tx   .../status   .../display/state` | — | (built at runtime) |
+| `QUIET TIME - the display is blanked and flaps will not move. It is restored when Quiet Time ends` | — | TEXT |
 | `Quiet Time Schedule` | Settings tab | HEADING (card title -- a noun phrase) |
 | `Raw — send verbatim, skip sanitizing & framing (debug)` | — | (built at runtime) |
 | `Reboot (power-cycle) to apply.` | Settings tab | EMPHASIS |
@@ -181,7 +181,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Start Module ID` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Status` | — | TAB / LINK LABEL (a noun) |
 | `Stops fetching. Entries beyond the 64-entry ring are lost while paused.` | Monitor tab (live REST/MQTT command log) | TOOLTIP |
-| `Sub: .../flap/set   .../flap/home   .../flap/provision   .../send` | — | (built at runtime) |
+| `Sub: .../send   .../flap/set   .../flap/home   .../display/set   .../maintenance/set   .../quiet/set` | — | (built at runtime) |
 | `Sydney (UTC+10/+11)` | Settings tab | DROPDOWN OPTION |
 | `Synced` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
 | `System Health` | Status tab (diagnostics) | HEADING |
@@ -193,7 +193,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `The wall of virtual split-flap modules drawn on the LED panel. One module per cell, IDs assigned left-to-right, top-to-bottom (module 0 = top-left). This also lays out the Live Display on the Display tab.` | — | (built at runtime) |
 | `Tick this if red comes out blue. HUB75 panels vary: a BGR panel draws red as blue, blue as orange and yellow as cyan, while green and white look perfectly normal — which is why it is easy to miss. Takes effect immediately.` | Settings tab | HELP TEXT (a full sentence) |
 | `Time settings saved` | — | RUNTIME MESSAGE (shown after an action, in saveTz()) |
-| `Timezone` | Settings tab | FORM LABEL (names the input below it -- a noun phrase); HEADING (card title -- a noun phrase) |
+| `Timezone` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `To` | — | (built at runtime) |
 | `Tokyo (UTC+9 no DST)` | Settings tab | DROPDOWN OPTION |
 | `Topic Prefix` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
@@ -210,7 +210,6 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Used for bus monitor timestamps. Takes effect immediately after saving.` | Settings tab | HELP TEXT (a full sentence) |
 | `Username` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Wall` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()) |
-| `WiFi` | Settings tab | HEADING (card title -- a noun phrase) |
 | `WiFi IP` | Status tab (diagnostics) | TEXT |
 | `WiFi saved - reconnecting...` | — | RUNTIME MESSAGE (shown after an action, in saveWifi()) |
 | `Width, height and color depth are read once at boot — reboot to apply.` | Settings tab | EMPHASIS |

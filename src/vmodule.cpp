@@ -5,19 +5,23 @@
 // vmodule.cpp -- the emulated split-flap modules. See vmodule.h for the reel
 // layout and for what is deliberately NOT emulated (everything mechanical).
 //
-// Four concerns: (1) building the default reel and the bogus serial numbers;
-// (2) persisting each module's protocol-visible state to /vmods.dat;
-// (3) vmDispatch, which parses a bus frame and applies it to every addressed
-// module; (4) vmRenderReply, which turns a queued reply intent back into
+// Three concerns: (1) building the reel and the bogus serial numbers;
+// (2) vmDispatch, which parses a bus frame and applies it to every addressed
+// module; (3) vmRenderReply, which turns a queued reply intent back into
 // protocol bytes.
 //
+// There is NO persistence. Every field of every module is deterministic from
+// the configured grid (id = wall slot, serial derived from the MAC, reel homed
+// at boot), so /vmods.dat -- which the physical modules need for their ids and
+// calibration -- stored nothing here that could actually vary. vmInit deletes
+// a leftover file from older firmware.
+//
 // Concurrency: everything here runs under vmMutex, taken by the caller
-// (vbusDeliver, vbusPoll) or by vmTick/vmSave themselves. vmDispatch is reached
-// only from rs485Send, which holds txMutex, so its static scratch buffer has a
+// (vbusDeliver, vbusPoll) or by vmTick itself. vmDispatch is reached
+// only from busSend, which holds txMutex, so its static scratch buffer has a
 // single writer.
 
 // ---- file-private forward declarations ----
-static void   vmApplyDefaults(VModule& m);
 static void   vmMakeSerial(int index, char* out);
 static void   vmSetTarget(VModule& m, int idx);
 
@@ -70,12 +74,6 @@ static void vmMakeSerial(int index, char* out) {
   out[VM_SN_CHARS] = 0;
 }
 
-static void vmApplyDefaults(VModule& m) {
-  m.autoHome = true;      // the reel is shared now: there is nothing else to default
-}
-
-
-
 /* ----------------------------------------------------------
    The flip
    ----------------------------------------------------------
@@ -127,97 +125,18 @@ bool vmTick(uint32_t now) {
   return moved;
 }
 
-/* ----------------------------------------------------------
-   Persistence -- the protocol-visible state, in /vmods.dat
----------------------------------------------------------- */
-
-struct PersistedVModule {
-  uint8_t  id;
-  bool     provisioned;
-  char     sn[VM_SN_CHARS + 1];
-  bool     autoHome;
-  uint8_t  bootCount;
-  int16_t  curIndex;
-};
-
-struct VModulesFileHeader { unsigned long magic; int count; };
-
-void vmSave() {
-  if (!sfFsReady || !vmods) return;
-  File f = FFat.open(VMODULES_TMP, "w");
-  if (!f) { DBG("[VM] open for write failed\n"); return; }
-  VModulesFileHeader hdr = { VMODULES_MAGIC, vmCount };
-  f.write((const uint8_t*)&hdr, sizeof(hdr));
-
-  // Copy each record under the lock, then write it outside. Holding vmMutex for
-  // the whole ~11 KB flash write would stall vbusDeliver -- and therefore every
-  // command the gateway sends -- for as long as the write takes. A record torn
-  // across the boundary is harmless: this is persistence, not a transaction.
-  static PersistedVModule rec;   // one record at a time; taskNetwork's stack is 8 KB
-  for (int i = 0; i < vmCount; i++) {
-    if (vmMutex) xSemaphoreTake(vmMutex, portMAX_DELAY);
-    const VModule& m = vmods[i];
-    memset(&rec, 0, sizeof(rec));
-    rec.id = m.id; rec.provisioned = m.provisioned;
-    strlcpy(rec.sn, m.sn, sizeof(rec.sn));
-    rec.autoHome = m.autoHome;
-    rec.bootCount = m.bootCount; rec.curIndex = m.curIndex;
-    if (vmMutex) xSemaphoreGive(vmMutex);
-    f.write((const uint8_t*)&rec, sizeof(rec));
-  }
-  f.close();
-  // Temp-file-then-rename, so a crash mid-write cannot corrupt the good copy.
-  FFat.remove(VMODULES_FILE);
-  FFat.rename(VMODULES_TMP, VMODULES_FILE);
-  DBG("[VM] saved %d modules\n", vmCount);
-}
-
-void vmLoad() {
-  if (!sfFsReady || !vmods) return;
-  if (!FFat.exists(VMODULES_FILE)) { DBG("[VM] no saved state\n"); return; }
-  File f = FFat.open(VMODULES_FILE, "r");
-  if (!f) return;
-  VModulesFileHeader hdr;
-  if (f.read((uint8_t*)&hdr, sizeof(hdr)) != sizeof(hdr) || hdr.magic != VMODULES_MAGIC) {
-    DBG("[VM] bad magic -- ignoring saved state\n");
-    f.close();
-    return;
-  }
-  // The wall may have been resized since the last boot. Restore what overlaps;
-  // any extra modules keep the freshly-built defaults vmInit gave them.
-  static PersistedVModule rec;
-  int n = (hdr.count < vmCount) ? hdr.count : vmCount;
-  int loaded = 0;
-  for (int i = 0; i < n; i++) {
-    if (f.read((uint8_t*)&rec, sizeof(rec)) != sizeof(rec)) break;
-    VModule& m = vmods[i];
-    m.id = rec.id; m.provisioned = rec.provisioned;
-    strlcpy(m.sn, rec.sn, sizeof(m.sn));
-    m.bootCount = rec.bootCount;
-
-    // No reel to restore: it is shared, complete and rebuilt at boot. The old file
-    // carried a per-module copy, which was its own hazard -- a firmware whose default
-    // reel had changed would silently resurrect the OLD one on every provisioned board.
-    // That whole class of bug is gone with the field. (VMODULES_MAGIC is bumped, so a
-    // file from a build that still had it is discarded rather than misread.)
-    m.autoHome = rec.autoHome;
-    m.curIndex = (rec.curIndex >= 0 && rec.curIndex < SF_MAX_FLAPS) ? rec.curIndex : 0;
-    loaded++;
-  }
-  f.close();
-  DBG("[VM] restored %d of %d modules\n", loaded, vmCount);
-}
-
 void vmInit(int count) {
   if (count < 1) count = 1;
   if (count > VM_MAX_MODULES) count = VM_MAX_MODULES;
-  // INTERNAL RAM, deliberately -- not gwPsramAlloc like the other three arrays.
-  // taskDisplay walks this array a hundred times a second (vmTick), on core 1, which
-  // is where the display task runs. This board's PSRAM is quad SPI: a
-  // cache miss stalls the pipeline for most of a microsecond and the ISR cannot be
-  // taken until the load retires, so the OE window for the short bitplanes wanders
-  // and the panel flickers. The monitor ring and the MQTT queue stay in PSRAM -- nothing
-  // on the display path touches them. ~2 KB for a 45-module wall.
+  // INTERNAL RAM, deliberately -- not gwPsramAlloc like the large buffers.
+  // taskDisplay walks this array a hundred times a second (vmTick) on the core
+  // the panel driver's setup ran on. This board's PSRAM is quad SPI: a cache
+  // miss stalls the pipeline for most of a microsecond, and in the old
+  // ISR-driven driver that visibly wandered the OE window (an idle wall that
+  // shimmers -- see platformio.ini). Today's driver refreshes by GDMA with no
+  // CPU involvement, but the array is small (~40 B/module) and hot, so it stays
+  // internal. The command log and the MQTT queue stay in PSRAM -- nothing on
+  // the display path touches them. ~2 KB for a 45-module wall.
   size_t vmBytes = sizeof(VModule) * (size_t)count;
   vmods = (VModule*) heap_caps_malloc(vmBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (!vmods) { printf("[VM] FATAL: cannot allocate %d modules\n", count); return; }
@@ -234,43 +153,22 @@ void vmInit(int count) {
     m.id          = (uint8_t)i;
     m.provisioned = true;
     vmMakeSerial(i, m.sn);
-    vmApplyDefaults(m);
-  }
-  vmLoad();
-
-  for (int i = 0; i < count; i++) {
-    VModule& m = vmods[i];
-    // A /vmods.dat written by a build that still had de-provisioning can hold a
-    // module parked at id 255. Nothing advertises and nothing assigns IDs now, so
-    // that module would answer no frame ever again. Re-adopt it at its wall slot.
-    if (!m.provisioned || m.id == 255) {
-      m.id = (uint8_t)i;
-      m.provisioned = true;
-    }
-    m.bootCount  = (uint8_t)(m.bootCount + 1);   // wraps at 255, like the real one
     m.target     = -1;
     m.pendFlap   = -1;
     m.flipPhase  = 0;
     m.nextStepMs = millis();
-    // HOME AT BOOT, if the module says to -- which by default it does.
-    //
-    // 'a' sets autoHome and 'A' reports it, and a REAL module with the flag set drives its
-    // reel to the blank flap on power-up. This emulation used to store the flag, report it,
-    // and then quietly ignore it, on the reasoning that a drawn reel has no position to
-    // lose. True -- but it does have a position to REMEMBER, and /vmods.dat faithfully
-    // restored it, so a reboot brought the wall up still showing whatever half-finished
-    // sentence was on it when the power went. That is not "no position to lose", it is
-    // stale content presented as current.
-    //
-    // Honouring the flag is both what a mechanical module does and what anyone actually
-    // wants: come up blank, and let whatever drives the wall draw the first real frame.
-    // A module whose autoHome has been cleared over the bus keeps the old behaviour.
-    if (m.autoHome) m.curIndex = 0;
-    if (m.curIndex < 0 || m.curIndex >= SF_MAX_FLAPS) m.curIndex = 0;
+    // HOME AT BOOT, unconditionally -- what a mechanical module with auto-home
+    // does, and what anyone actually wants: come up blank, and let whatever
+    // drives the wall draw the first real frame. (Restoring the pre-reboot wall
+    // from flash was tried and rejected: it presented stale content as current.)
+    m.curIndex   = 0;
   }
-  vmDirty = true;   // persist the bumped boot counters
-  printf("[VM] %d virtual modules, %d flaps each (%d glyphs + %d colours), sn %s..\n",
-         vmCount, SF_MAX_FLAPS, SF_CHAR_FLAPS, SF_COLOUR_FLAPS, vmods[0].sn);
+  // Older firmware persisted module state to /vmods.dat. Every field is
+  // deterministic now, so the file is meaningless -- delete a leftover one.
+  if (sfFsReady && FFat.exists("/vmods.dat")) FFat.remove("/vmods.dat");
+  printf("[VM] %d virtual modules, %d flaps each (%d glyphs + %d colours + %d lowercase + %d pictographs), sn %s..\n",
+         vmCount, SF_MAX_FLAPS, SF_CHAR_FLAPS, SF_COLOUR_FLAPS, SF_LOWER_FLAPS,
+         SF_EMOJI_FLAPS, vmods[0].sn);
 }
 
 /* ----------------------------------------------------------
@@ -291,7 +189,7 @@ static void vmDispatchBySerial(const char* p, size_t len, uint32_t now) {
     VModule& m = vmods[i];
     if (strncmp(sn, m.sn, VM_SN_CHARS) != 0) continue;
     switch (cmd) {
-      case 'A': vbusQueue((uint8_t)i, VR_ALL, 0, now + VBUS_REPLY_MS); return;
+      case 'A': vbusQueue((uint8_t)i, VR_ALL, now + VBUS_REPLY_MS); return;
       // 'N' (set the flap set) is gone: the reel is shared, complete and fixed.
       default: return;
     }
@@ -301,7 +199,7 @@ static void vmDispatchBySerial(const char* p, size_t len, uint32_t now) {
 void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
   if (!vmods || len < 2 || frame[0] != 'm') return;
 
-  // Single writer: rs485Send serialises every send through txMutex, and that is
+  // Single writer: busSend serialises every send through txMutex, and that is
   // the only path here.
   static char buf[TX_MAX_BYTES + 1];
   size_t n = (len < TX_MAX_BYTES) ? len : TX_MAX_BYTES;
@@ -343,6 +241,17 @@ void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
     if (*e == '-') { lo = (int)a; hi = (int)strtol(e + 1, NULL, 10); }
   }
 
+  // Resolve the display payload ONCE, outside the module loop: on a broadcast the
+  // reel scan / strtol are loop-invariant, and this runs under both txMutex and
+  // vmMutex. -1 means "no valid payload -> the case below does nothing".
+  int showIdx = -1;
+  if (cmd == '-' && payload[0]) {
+    int r = vmFlapIndexOf(payload[0]);
+    showIdx = (r < 0) ? 0 : r;   // unknown character homes, as of fw v31
+  } else if (cmd == '+' && isdigit((unsigned char)payload[0])) {
+    showIdx = (int)strtol(payload, NULL, 10);
+  }
+
   for (int i = 0; i < vmCount; i++) {
     VModule& m = vmods[i];
     if (bcast) { if (!m.provisioned) continue; }
@@ -350,33 +259,24 @@ void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
 
     switch (cmd) {
       // ---- display ----
-      case '-': {   // show character. An unknown character homes, as of fw v31.
-        if (!payload[0]) break;
-        int idx = vmFlapIndexOf(payload[0]);
-        vmSetTarget(m, idx < 0 ? 0 : idx);
-        break;
-      }
-      case '+':     // show flap index; out of range is ignored
-        if (isdigit((unsigned char)payload[0])) vmSetTarget(m, (int)strtol(payload, NULL, 10));
+      case '-':     // show character (resolved to showIdx above)
+      case '+':     // show flap index; out of range is ignored by vmSetTarget
+        if (showIdx >= 0) vmSetTarget(m, showIdx);
         break;
       case 'h': vmSetTarget(m, 0); break;
 
-      // 'N' (set the flap count / character set) is GONE. The reel is shared, carries
-      // every glyph the font can draw, and is not configurable -- so an 'N' frame now
-      // falls through to the default below and is ignored, exactly like any other
-      // command this module does not implement.
       // ---- queries ----
       // 'v' and 'A' answer a broadcast too. Each module gets its own slot so the
       // train stays in ID order; the slots are milliseconds, not the hundreds a
       // real half-duplex bus needs to dodge collisions.
       case 'v':
         if (bcast && (m.id < lo || m.id > hi)) break;
-        vbusQueue((uint8_t)i, VR_VER, 0,
+        vbusQueue((uint8_t)i, VR_VER,
                   now + VBUS_REPLY_MS + (bcast ? (uint32_t)(m.id - lo) * VBUS_SLOT_MS : 0));
         break;
       case 'A':
         if (bcast && (m.id < lo || m.id > hi)) break;
-        vbusQueue((uint8_t)i, VR_ALL, 0,
+        vbusQueue((uint8_t)i, VR_ALL,
                   now + VBUS_REPLY_MS + (bcast ? (uint32_t)(m.id - lo) * VBUS_SLOT_MS : 0));
         break;
       default: break;                    // unknown command: silently ignored
@@ -388,15 +288,13 @@ void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
 /* ----------------------------------------------------------
    Replies
    ----------------------------------------------------------
-   Correctly formed protocol frames reporting a flawless module, every time: the
-   Hall sensor sees exactly one clean pulse per revolution, the mechanism turns
-   exactly VM_TOTAL_STEPS every revolution with zero spread, the supply is
-   nominal, the EEPROM verifies, and the flap map is empty (uncalibrated, which is
-   what a module with no fine calibration reports).
+   Only two reply kinds exist -- 'v' (version) and 'A' (all fields) -- and both
+   report a flawless module: the nominal home offset and steps-per-revolution,
+   auto-home on, and an empty flap map (uncalibrated, which is what a module
+   with no fine calibration reports).
 ---------------------------------------------------------- */
 
-size_t vmRenderReply(uint8_t mod, VmReplyKind kind, int32_t arg,
-                     uint8_t* out, size_t outSize) {
+size_t vmRenderReply(uint8_t mod, VmReplyKind kind, uint8_t* out, size_t outSize) {
   if (mod >= vmCount || outSize < 32) return 0;
   const VModule& m = vmods[mod];
   char*  o = (char*)out;
@@ -410,9 +308,9 @@ size_t vmRenderReply(uint8_t mod, VmReplyKind kind, int32_t arg,
     case VR_ALL: {
       // m<id>A:<ver>:<id>:<sn>:<ho>:<ts>:<autoHome>:<curIndex>:<map>:<count>:<chars>
       // with <map> empty.
-      n = snprintf(o, outSize, "m%dA:%d:%d:%s:%d:%d:%d:%d::%u:",
+      n = snprintf(o, outSize, "m%dA:%d:%d:%s:%d:%d:1:%d::%u:",
                    m.id, VM_FW_VERSION, m.id, m.sn, VM_HOME_OFFSET, VM_TOTAL_STEPS,
-                   m.autoHome ? 1 : 0, m.curIndex, SF_LEGACY_FLAPS);
+                   m.curIndex, SF_LEGACY_FLAPS);
       // Report the LEGACY reel only -- the 163 flaps this protocol can actually name.
       //
       // It must stop there, and not merely as a matter of taste: the flaps past 163 are

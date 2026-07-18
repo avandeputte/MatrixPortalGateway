@@ -70,11 +70,18 @@ void dispMarkDirty();
 // from any task. Called when a split-flap command arrives, on canvas release, and by Quiet Time.
 void dispReturnToWall();
 
-// Show black and halt the refresh ISR, so writing flash cannot scramble the panel.
+// Blit font rows [rowFrom,rowTo) of the glyph for CP1252 byte `ch` at (px,py),
+// solid colour, bit 15 = leftmost column. The one shared glyph blitter -- the
+// ticker (canvas.cpp), the effects (fliporama/clock) and the canvas text op all
+// draw through it. Rows clamp to the face height, so (0, 255) means "whole glyph".
+void dispDrawGlyph1252(int px, int py, const Font1252* f, uint8_t ch,
+                       int rowFrom, int rowTo, uint8_t r, uint8_t g, uint8_t b);
+
+// Show black and halt the panel's GDMA output for the duration of an OTA upload.
 // Reversible -- a failed upload calls dispResume().
 void dispBlank();
 
-// Restart the refresh ISR and repaint. Pairs with dispBlank().
+// Restart the panel output and repaint. Pairs with dispBlank().
 void dispResume();
 
 // Black, halted, and marked not-ready. Call only once a reboot is certain.

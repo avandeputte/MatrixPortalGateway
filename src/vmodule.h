@@ -11,15 +11,14 @@
 //   * No calibration state. Home offset and steps-per-revolution are the
 //     compile-time nominal values below, the same for every module and never
 //     stored. The flap-position map is always empty, which is what a module with
-//     no fine calibration reports anyway. The calibration commands ('o', 't',
-//     's', 'g', 'w', 'e' and the 'mXW' restore's calibration fields) are accepted
-//     and acknowledged -- none of them has a reply -- and then discarded. A 'd' or
-//     'A' dump always reports the nominal values and an empty map.
+//     no fine calibration reports anyway. The calibration-family commands
+//     ('c', 'o', 't', 's', 'g', 'w') pass the frame sanitizer but vmDispatch
+//     has no case for them: they are silently discarded, with no reply. The 'A'
+//     dump always reports the nominal values and an empty map.
 //   * No position to lose. The reel always knows where it is, so 'h' (home)
 //     simply shows flap 0, the blank.
-//   * Nothing to measure. 'c' (calibrate) answers immediately with a correctly
-//     formed frame reporting the result a flawless module gives. A controller
-//     that sweeps the wall sees every module pass.
+//   * The only commands ANSWERED are 'v' (version) and 'A' (all fields);
+//     '-', '+' and 'h' act silently, like the real module.
 //
 // What the reel does do is FLIP. Changing the displayed flap cascades forward
 // through the reel one flap at a time, so the panel shows the split-flap effect
@@ -31,26 +30,22 @@
 //
 // The reel
 // --------
-// 163 flaps: EVERY printable Windows-1252 glyph the font can draw, then the seven
-// colours. A physical reel has 64 leaves because it is a physical object; this one is
-// drawn, so there is nothing to ration and every character has somewhere to land.
+// 237 flaps, sectioned (the full story lives in reel.h, which defines it):
 //
 //   index 0        ' '                   blank (the home position)
-//   index 0..155   the CP1252 repertoire, in code-point order, MINUS the lowercase
-//                  letters:  !"#$%&'()*+,-./0-9:;<=>?@A-Z[\]^_`{|}~ €‚ƒ„…†‡ˆ‰Š‹ŒŽ...
-//                  ...¡¢£¤¥¦§¨©ª«¬®¯°±²³´µ¶·¸¹º»¼½¾¿ À-Þ ß ÷
+//   index 0..155   the CP1252 repertoire in code-point order, minus lowercase
 //   index 156..162 r o y g b p w         COLOUR flaps (VM_COLOUR_BASE ..)
+//   index 163..222 the 60 lowercase letters      -- index-addressed only
+//   index 223..236 the pictographs               -- index-addressed only
 //
-// NO LOWERCASE, and that is load-bearing. The colour flaps are addressed by the
-// lowercase letters r o y g b p w, so if the reel carried lowercase, vmFlapIndexOf()
-// would resolve 'r' to the letter and every colour command ever written would quietly
-// start printing letters. Lowercase folds to uppercase instead (cp1252ToUpper), which
-// is what a real reel -- printed in capitals -- does anyway.
+// The one-byte legacy path (vmFlapIndexOf) folds lowercase to uppercase and scans
+// only the first 163 flaps -- it must, because the bytes r o y g b p w mean colours
+// there. The index-addressed path (vmFlapIndexOfCodepoint) reaches everything.
 //
 // The reel is SHARED and FIXED. It is not stored per module and it is not configurable:
 // a drawn reel that can already render everything has nothing left to reconfigure, so
-// the 'N' command and the flap-set editor are gone. It is built once at boot by
-// vmBuildReel() from isFlapByte() + cp1252IsLower(), rather than typed out, so it cannot
+// the physical gateway's 'N' command and flap-set editor are gone. It is built once at
+// boot by vmBuildReel() (reelBuild in reel.h), rather than typed out, so it cannot
 // drift from the font or from the folding rule.
 
 #ifndef MPGW_VMODULE_H
@@ -74,34 +69,27 @@
 #define VM_HOME_OFFSET   2832
 #define VM_TOTAL_STEPS   4096
 
-// The reel's colour flaps: the LAST seven, always. They are addressed by the LOWERCASE
-// letters r o y g b p w, which is exactly why the reel carries no lowercase -- see the
-// flap-set block in common.h. vmFlapIndexOf() checks them before it scans the glyphs, so
-// 'r' can only ever be red.
-// VM_COLOUR_BASE and the colour codes live in reel.h, beside the reel they index.
+// The reel's colour flaps are addressed by the LOWERCASE letters r o y g b p w on the
+// legacy path, which is exactly why that path never scans the lowercase section -- see
+// reel.h. vmFlapIndexOf() checks them before it scans the glyphs, so 'r' can only ever
+// be red. VM_COLOUR_BASE and the colour codes live in reel.h, beside the reel they index.
 
-// The one reel every module shows: 156 CP1252 glyphs then the 7 colours. Built once at
-// boot by vmBuildReel(); read-only thereafter.
+// The one reel every module shows. Built once at boot by vmBuildReel(); read-only
+// thereafter.
 extern const char* vmReel();
 
-// A virtual module. flapChars dominates the footprint (~270 B per module). The array
-// lives in INTERNAL RAM, not PSRAM: taskDisplay walks it at 100 Hz and quad PSRAM is
-// too slow to sit on that path -- see vmInit().
+// A virtual module (~40 bytes). The array lives in INTERNAL RAM, not PSRAM:
+// taskDisplay walks it at 100 Hz and quad PSRAM is too slow to sit on that
+// path -- see vmInit().
 struct VModule {
   // ---- identity (persisted) ----
   uint8_t  id;                    // 0..254, or 255 when unprovisioned
   bool     provisioned;
   char     sn[VM_SN_CHARS + 1];   // 20 uppercase hex chars, NUL-terminated
-
-  // ---- configuration the protocol reads and writes (persisted) ----
-  bool     autoHome;              // set by 'a', reported by 'A'; nothing acts on it
-  uint8_t  bootCount;             // wraps at 255, reported by 'Q'
-  // NOTE: there is no flap table here any more. Every module shows the SAME reel -- the
-  // whole CP1252 repertoire (see vmBuildReel) -- so it lives once, in a shared constant,
-  // instead of 163 bytes per module. That is the point of the change: a drawn reel can
-  // render everything, so there is nothing to configure and nothing to store. It also
-  // took sizeof(VModule) from 108 bytes to 40, which is 5 KB of internal RAM back on a
-  // 75-module wall -- the same RAM the panel's framebuffer and WiFi are fighting over.
+  // NOTE: there is no flap table here. Every module shows the SAME reel -- see
+  // reel.h -- so it lives once, in a shared constant, instead of 163+ bytes per
+  // module. A drawn reel can render everything, so there is nothing to configure
+  // and nothing to store per module.
 
   // ---- runtime ----
   int16_t  curIndex;              // the flap on show; always valid
@@ -124,18 +112,12 @@ extern VModule* vmods;
 extern int      vmCount;
 extern SemaphoreHandle_t vmMutex;
 extern StaticSemaphore_t vmMutexBuf;
-extern volatile bool     vmDirty;          // some module needs persisting
-extern volatile unsigned long vmDirtyMs;
 
-// Allocate and populate `count` modules (PSRAM), restoring /vmods.dat if present.
-// Modules not found in the file are created pre-provisioned with IDs 0..count-1
-// and a deterministic bogus serial number. Call after sfFsInit().
+// Allocate and populate `count` modules (internal RAM -- see the struct note).
+// Every field is deterministic: IDs 0..count-1 by wall slot, a MAC-derived
+// serial number, and every reel homed. Nothing is persisted or restored.
+// Call after sfFsInit() (it deletes the legacy /vmods.dat if one exists).
 void vmInit(int count);
-
-// Persist / restore the modules' protocol-visible state. Debounced by the
-// network task.
-void vmSave();
-void vmLoad();
 
 // Feed one complete frame from the emulated bus to every module. Called by
 // vbusDeliver on the sender's task, so it must not block. Replies are queued (see

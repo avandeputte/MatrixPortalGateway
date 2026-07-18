@@ -8,7 +8,6 @@
 
 struct VbusReply {
   uint32_t     dueMs;
-  int32_t      arg;
   uint8_t      mod;
   VmReplyKind  kind;
   bool         used;
@@ -21,13 +20,12 @@ void vbusBegin() {
   printf("[VBUS] emulated bus up (%d virtual modules)\n", vmCount);
 }
 
-void vbusQueue(uint8_t mod, VmReplyKind kind, int32_t arg, uint32_t dueMs) {
+void vbusQueue(uint8_t mod, VmReplyKind kind, uint32_t dueMs) {
   for (int i = 0; i < VBUS_QUEUE_LEN; i++) {
     if (!vbusQ[i].used) {
       vbusQ[i].used  = true;
       vbusQ[i].mod   = mod;
       vbusQ[i].kind  = kind;
-      vbusQ[i].arg   = arg;
       vbusQ[i].dueMs = dueMs;
       return;
     }
@@ -43,7 +41,7 @@ void vbusDeliver(const uint8_t* data, size_t len) {
   if (!vmods || !len) return;
   // Wait for the lock rather than time out: dropping a command here would lose a
   // character off the wall with no error anywhere. The wait is bounded in
-  // practice because nothing holds vmMutex across a blocking call (vmSave takes
+  // practice because nothing holds vmMutex across a blocking call (dispRender takes
   // it per record), and nothing takes txMutex while holding it, so this cannot
   // deadlock against the caller.
   if (vmMutex) xSemaphoreTake(vmMutex, portMAX_DELAY);
@@ -65,7 +63,7 @@ bool vbusPoll(uint32_t now, uint8_t* out, size_t outSize, size_t* outLen) {
   }
   size_t n = 0;
   if (best >= 0) {
-    n = vmRenderReply(vbusQ[best].mod, vbusQ[best].kind, vbusQ[best].arg, out, outSize);
+    n = vmRenderReply(vbusQ[best].mod, vbusQ[best].kind, out, outSize);
     vbusQ[best].used = false;
   }
   if (vmMutex) xSemaphoreGive(vmMutex);

@@ -12,19 +12,20 @@ settings blob are all inherited verbatim and are still true.
 
 ## The emulation seam is the UART, not the API
 
-The single most important structural decision. `rs485Send()` — which strips terminators, trims
-anything past a complete well-formed command, re-frames, enforces Quiet Time, updates display
-tracking, pushes to the monitor ring and mirrors to MQTT — is untouched. Its last three lines
-call `vbusDeliver()` instead of writing the frame to a UART.
+The single most important structural decision. `busSend()` (`src/bus.*` — the physical
+gateway's `rs485Send()`, renamed in 1.20 because there is no RS-485 here) — which strips
+terminators, trims anything past a complete well-formed command, re-frames, enforces Quiet
+Time and mirrors to MQTT — is otherwise untouched. Its last three lines call `vbusDeliver()`
+instead of writing the frame to a UART.
 
 Everything above that line is the gateway, unmodified. Everything below is new. The virtual
 modules receive the same bytes a real module would have received, and reply with frames that go
-back up through the *same* byte accumulator, the same `ringPush`, the same `mqttPublishMsg`, the
-same `sfParseResponse`.
+back up through the *same* byte accumulator the UART fed (`taskBus`) and out through the same
+MQTT wire mirror, `mqttPublishMsg`.
 
 The alternative — short-circuiting at the API layer, so `POST /api/flap/char` directly sets a
 cell — would have been a tenth of the code and would have tested nothing. The gateway's framing,
-sanitization, collision guard, staggered-broadcast handling and reply parser would all have
+sanitization, collision guard and staggered-broadcast handling would all have
 become dead code, and the first real firmware change upstream would
 have silently diverged. Emulating at the protocol level keeps every one of those paths live.
 
@@ -39,71 +40,88 @@ that can be out of tune. Every module is a perfect one. That is not a shortcut s
 only coherent position: a simulated Hall sensor would report whatever we told it to, and a
 simulated calibration would converge on the constant we seeded it with.
 
-So the calibration, diagnostics, provisioning and backup commands have been removed outright
-rather than faked, and the surviving `A` reply always reports the nominal values with an
+So the calibration, diagnostics, provisioning and backup commands are ignored rather than
+faked — the sanitizer passes them through untrimmed, `vmDispatch()` has no case for them, and
+they draw no reply — and the surviving `A` reply always reports the nominal values with an
 **empty flap map**. Reading back what you wrote would have meant storing it, and storing it
 would have meant a 64-entry `uint16_t` map per module.
 
-Combined with the 64-flap reel (below), that keeps the frames small, and the frames are what
-size the buffers:
+Even with the empty map, the frames are what size the buffers:
 
-| | RS-485 gateway (64 flaps, real map) | here (64 flaps, no map) |
+| | RS-485 gateway (64 flaps, real map) | here (237 flaps, empty map) |
 |---|---|---|
-| worst-case `A` reply | ~570 B | **~117 B** |
+| worst-case `A` reply | ~570 B | **~225 B** |
 | `TX_MAX_BYTES` | 768 | **512** |
 | `MSG_MAX_BYTES` | 256 | **320** |
 | `MQTT_BUF_SIZE` | 1024 | **1280** |
 
-The `A` reply carries a `flapChars` tail but no flap map, so its worst case is ~117 B — a real
-module's is ~570 B because it also serialises the 64-entry position map. `TX_MAX_BYTES` (512) is
+The `A` reply carries no flap map but does carry the 163-byte legacy `flapChars` tail (below),
+which dominates its ~225 B worst case — `tools/reel_test.cpp` measures it. A real module's is
+~570 B because it also serialises the 64-entry position map. `TX_MAX_BYTES` (512) is
 kept generous for raw frame sends, and `MSG_MAX_BYTES` (320) is large enough that a whole `A`
-reply lands in one monitor-ring entry untruncated, which is the frame you most want to read.
+reply lands in one `BusMsg` untruncated, which is the frame you most want to read.
 
 `MSG_MAX_BYTES` also sizes `mqttPublishMsg`'s stack buffer (`MSG_MAX_BYTES * 3 + 80`, since a
 flap byte can expand to a 3-byte UTF-8 glyph). Raise one, check the other.
 
-## The reel: 64 flaps, German by default
+## The reel: 237 flaps, sectioned
 
-The reel is 64 flaps — the same count as a real module — because the flap **count** is protocol:
-the `A` reply reports `flapCount`, and the [companion](../../SplitFlapGatewayCompanion) (and the
-real controllers) reject any `flapCount` outside 1..64. A larger virtual reel would make every
-`flapCount` sync fail silently and the controller fall back to its own map.
+The reel is **shared, fixed, and built at boot** — `reelBuild()` in `src/reel.h`, which is
+deliberately Arduino-free so `tools/reel_test.cpp` compiles the *same* code rather than a copy
+of it. It is derived from `isFlapByte()`, `cp1252IsLower()` and the font's `FONT_EXTRA_CP`
+list — the code that already owns *which bytes exist*, *which are lowercase* and *which
+pictographs we have* — so it cannot drift from the font or from the folding rule. It is not
+stored per module and not configurable: a drawn reel that can already render everything has
+nothing left to reconfigure, so the physical gateway's `N` command and flap-set editor are gone.
 
-The default layout is German — `VM_DEFAULT_REEL` in `vmodule.cpp`:
+The section order is the contract: everything the legacy one-byte protocol can reach comes
+first, at the indices it has always had, so growing the reel can never move a flap an existing
+controller addresses by number:
 
 ```
- ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜß0123456789!@#&€-=;q:'.,/?*roygbpw
+0..155     the CP1252 glyphs, no lowercase        legacy: m<id>-<char>
+156..162   the colour flaps  r o y g b p w        legacy: m<id>-r  == RED
+---- everything below is unreachable from the legacy protocol ----
+163..222   the 60 lowercase letters               index only
+223..236   the pictographs (heart, smiley, ...)   index only
 ```
 
-Flap 0 is blank; the seven colour flaps sit at the **end** (indices 57..63), and `VM_COLOUR_BASE`
-is *defined* from that (`SF_MAX_FLAPS - SF_COLOUR_FLAPS`), so they must stay last.
+There are two resolvers, because the one-byte path has a problem it can never solve — the byte
+for lowercase `r` already means red:
 
-Two positions are not what they look like:
+- **`reelIndexOf()` — the legacy path.** Colour codes first (which is what guarantees `r` can
+  only ever be red), then splitflap-os's `q` → `"` alias, then fold to uppercase, then scan
+  **only the 156 glyph flaps**. It never sees the lowercase or pictograph sections: as far as
+  this protocol is concerned, they do not exist.
+- **`reelIndexOfCodepoint()` — the index-addressed path** (`POST /api/display/cells`,
+  `POST /api/flap/index`). No folding, no colour-stealing, and it reaches every flap; colours
+  are *named* on this path, which is exactly why that API had to have a different shape.
 
-- **The colour flaps are the last seven.** `flapIndexOf()` is a first-match scan, and the only
-  lowercase bytes on the reel are `q` and the seven colour codes — so `r` resolves to red (index
-  57) and never to the letter `R` (a distinct byte at index 18). This matches the physical reel's
-  ordering, which is the whole point.
-- **`q` (index 49) is the double-quote flap.** The real reel has no lowercase, so the firmware's
-  char map has always addressed the `"` flap as `q`; the companion rewrites `"` → `q` before
-  sending. `dispFlapGlyph`/`drawFace` renders it back as `"`.
+Two details are not what they look like:
 
-Two knock-on effects:
+- **`q` is the double-quote flap** on the legacy path. The classic reel had no lowercase, so
+  splitflap-os's char map borrowed that byte; the companion rewrites `"` → `q` before sending,
+  and `vmFlapGlyph`/`drawFace` renders the flap back as `"`.
+- **Folding has traps, and `charset.cpp` owns all of them**: `ÿ` uppercases to `0x9F`, not to
+  an eszett; `÷` is not a letter and `ß` has no CP1252 uppercase, so both keep flaps of their
+  own; `œ`, `š` and `ž` uppercase nowhere near a `0x20` offset.
 
-- **`sfSendChar()` uppercases again.** The 64-flap reel has no lowercase, so ASCII a–z is folded
-  to A–Z — *except* the seven colour codes `roygbpw`, which stay lowercase and resolve to colours.
-  Accented lowercase is folded too (`ä` → `Ä`), skipping `0xF7` (÷, not a letter) and `0xFF`
-  (`ÿ`, whose CP1252 uppercase is `0x9F`, not `0xDF` — folding it blindly would forge an eszett).
-- **The reel is length-counted, not sentinel-terminated.** An `N` command may set an arbitrary
-  reel, and the real firmware reserves `0xFF` as its "unused flap" sentinel, so `flapChars` is a
-  byte array with an explicit `flapCharsLen`, not a C string.
+**The `A` reply reports `flapCount` = 163 (`SF_LEGACY_FLAPS`) and carries only the legacy
+tail.** It must stop there, and not merely as a matter of taste: a pictograph has no CP1252
+byte, so serialising the whole reel would splice fourteen NUL bytes into the middle of an
+ASCII frame and truncate it at the receiver. Reporting 163 buys one **deliberately accepted
+incompatibility**: splitflap-os gates `flapCount` on 1..64, so it refuses this reel and falls
+back to its own map. That costs nothing here — it addresses flaps **by character** (`-`),
+never by index, so all of its text still displays exactly as before.
 
-`tools/reel_test.cpp` compiles against the real `charset.cpp` and asserts these invariants — the
-reel length, the colour positions, the first-match resolution and the `A` reply's colon arithmetic.
+`tools/reel_test.cpp` compiles the real `reel.h`, `charset.cpp` and `font1252.cpp` and asserts
+all of it — the section bases, the colour-first resolution, every folding trap, that every
+printable CP1252 character resolves to a flap, and that the `A` reply is byte-clean and fits
+`TX_MAX_BYTES`.
 
 ## Why the bus timing is *not* faithful
 
-The emulated bus is deliberately **not** metered at `cfg.rs485Baud`, held half-duplex, or
+The emulated bus is deliberately **not** metered at a serial baud rate, held half-duplex, or
 staggered at the protocol's 100 ms / 700 ms reply slots.
 
 At 9600 baud even a short reply takes tens of milliseconds to clock out, and a broadcast `m*v`
@@ -113,9 +131,9 @@ Nothing is learned by making a virtual bus slow.
 What remains is the ordering, not the pacing: replies are queued as *intents* (not text), and
 `vbusPoll()` renders the earliest-due one into a single shared buffer. A broadcast still produces
 one frame per module in module-ID order, `VBUS_SLOT_MS` apart, and ranged batch queries
-(`m*v0-49`) are still honoured. `rs485Send()`'s bus-quiet guard still runs — it can no longer
+(`m*v0-49`) are still honoured. `busSend()`'s bus-quiet guard still runs — it can no longer
 prevent a corruption that cannot happen, but it keeps command and reply frames from interleaving
-in the monitor, and it keeps the code path identical to the one upstream runs.
+in the MQTT mirror, and it keeps the code path identical to the one upstream runs.
 
 Queueing intents rather than rendered text is what makes a broadcast `m*A` cheap: 45 rendered
 replies held resident would be several KB, and more on a larger wall.
@@ -127,26 +145,24 @@ duplicate ID is reproduced.
 
 ## Locking
 
-Four mutexes are inherited (`sfMutex`, `msgMutex`, `timeMutex`, `mqttQMutex`, `txMutex`); one is
-new: **`vmMutex`**, guarding the virtual-module array and the reply queue.
+Six mutexes exist. Four are inherited (`msgMutex`, `timeMutex`, `mqttQMutex`, `txMutex`); two
+are this product's: **`vmMutex`**, guarding the virtual-module array and the reply queue, and
+**`txQMutex`**, guarding the scheduled-TX ring that paces `/api/bus/batch` off the web task.
+(`sfMutex` went with the module registry in 1.10.)
 
-Lock order is `txMutex → {sfMutex, msgMutex, vmMutex}`, never inverted. Nothing takes `txMutex`
+Lock order is `txMutex → vmMutex`, never inverted. Nothing takes `txMutex`
 while holding any of the others, which is what makes `vbusDeliver()` safe to wait on `vmMutex`
 with `portMAX_DELAY` — and it must wait, because timing out there would drop a command off the
 wall with no error anywhere.
 
-Two consequences worth remembering:
+One consequence worth remembering:
 
-- **`vmSave()` takes `vmMutex` per record, not across the whole write.** Holding it for an ~11 KB
-  FATFS write would stall `vbusDeliver()` — and therefore every command the gateway sends — for
-  the duration. A record torn across the boundary is harmless: this is persistence, not a
-  transaction.
 - **`dispRender()` snapshots under the lock and draws outside it.** The drawing loop touches
   thousands of pixels and must not sit on the bus path. The snapshot is one `{char, colour}` pair
   per cell for the current and incoming flap.
 
 `vmDispatch()` has a `TX_MAX_BYTES` static scratch buffer with a single writer, because
-`rs485Send()` serialises every send through `txMutex` and that is the only path that reaches it.
+`busSend()` serialises every send through `txMutex` and that is the only path that reaches it.
 A 512-byte frame will not fit on the 6–8 KB task stacks that call it.
 
 ## The panel
@@ -171,9 +187,11 @@ with no external library. Three properties fall out of that and are load-bearing
 slow to feed a display, so `panelBegin()` allocates both framebuffers and the descriptor chains
 from `MALLOC_CAP_DMA` (internal by definition). That single fact bounds panel size and colour
 depth together — and because WiFi/lwIP draw from the same internal pool, `dispInit()` runs
-*before* `WiFi.mode()` in `setup()` so the panel gets first refusal, and `panelBegin()` **refuses
-a geometry whose framebuffer would leave WiFi too little** (`PANEL_RAM_BUDGET`/`PANEL_RAM_RESERVE`
-in `common.h`) rather than boot into a slow-motion malloc failure.
+*before* `WiFi.mode()` in `setup()` so the panel gets first refusal, and `panelBegin()` **clamps
+the bit depth down until the framebuffer leaves WiFi enough** (`PANEL_RAM_BUDGET`/
+`PANEL_RAM_RESERVE` in `common.h`) rather than boot into a slow-motion malloc failure — since
+1.17.1 it refuses outright only when even depth 1 does not fit, so an over-deep geometry dims
+instead of going blank.
 
 The same quad-vs-octal fact is why the pinout works at all — an octal-PSRAM S3 module consumes
 GPIO 35/36/37, which this board uses for the HUB75 D, B and B2 lines.
@@ -185,13 +203,14 @@ descriptor fetches) starved the WiFi MAC, which shares that SRAM — association
 refresh at the default geometry, well above flicker. Do not raise `LCD_CLK_HZ`; if a long chain
 ghosts, lower it.
 
-Conversely, the monitor ring, the MQTT queue, the scheduled-TX ring and the
-*saved* module state are in PSRAM (`gwPsramAlloc`), precisely to leave that internal SRAM free.
+Conversely, the monitor ring, the MQTT queue and the scheduled-TX ring
+are in PSRAM (`gwPsramAlloc`), precisely to leave that internal SRAM free.
 The virtual-module array is the exception — it is pinned to internal RAM, because `taskDisplay`
 walks it 100×/s on the core the refresh runs on, and a quad-PSRAM cache miss there shimmers the
 wall. None of the PSRAM structures is on a hot path, in an ISR, or fed by DMA.
 
-If `panelBegin()` fails, the firmware logs why and **runs headless**. The web UI, MQTT and the
+If `panelBegin()` still fails — a geometry too big even at depth 1 — the firmware logs why and
+**runs headless**. The web UI, MQTT and the
 whole emulated bus still work; refusing to boot over a display fault would be worse.
 
 ### Geometry falls out of the grid
@@ -209,8 +228,8 @@ raw config. A cell too small to hold a glyph is not a module.
 
 They cannot draw accents. At 5×7 the X11 misc-fixed face has no room above the capitals and
 renders `À` with a bitmap **identical to `A`** — likewise `Š` and `S`. The bundled fonts carry
-the whole 216-glyph CP1252 set (so any reel, including custom `N`-command reels, can be drawn),
-and the German default reel already needs `Ä Ö Ü`, so this is a correctness bug, not an aesthetic
+the whole 216-glyph CP1252 set — the reel has a flap for every one of those glyphs, `Ä Ö Ü`
+and the rest of the diacritics included — so this is a correctness bug, not an aesthetic
 compromise: two distinct flaps would be indistinguishable.
 
 This was found by a check that now lives in the generator. `tools/genfont.py` rasterises each face
@@ -218,13 +237,16 @@ and rejects it if any of eight accented/base pairs (grave, diaeresis, ring, cedi
 — both cases) come out byte-identical, if a glyph's ink spills past the declared width, or if any
 glyph but the space is blank. Swapping in a different BDF cannot silently regress.
 
-The bundled faces are `6x13`, `6x10`, `6x9` and `5x8` — 216 glyphs each, 8.6 KB of flash total,
-one byte per row with bit 7 leftmost.
+The bundled faces are seven — `10x20`, `9x18`, `8x13`, `6x13`, `6x10`, `6x9` and `5x8` — each
+carrying the 216 CP1252 glyphs plus the 14 pictographs, ~41 KB of flash total. Rows are
+**16-bit** with bit 15 leftmost: one byte per row silently capped every face at 8 pixels wide,
+which is the real reason nothing bigger than `6x13` was bundled before 1.8.
 
 ### The flip is a rendering effect
 
-Walking a full 64-flap reel at the default 60 ms/flap takes ~3.8 seconds. `cfg.flapMax`
-(≤ `FLAP_ANIM_MAX` = 64) caps one change at that many flips, and a longer jump starts its walk
+Walking 64 flaps at the default 60 ms/flap takes ~3.8 seconds. `cfg.flapMax`
+(≤ `FLAP_ANIM_MAX` = 64 — a physical reel's full revolution, kept as the cap even though this
+reel has 237 flaps) caps one change at that many flips, and a longer jump starts its walk
 `flapMax` flaps short of the destination. Nothing here models a motor: there is no travel time to
 respect and no position to lose, so retargeting mid-flip simply changes the destination.
 
@@ -302,8 +324,8 @@ needs no `data-i18n` tagging at all, so the static page is translated with zero 
 Two mechanisms, because neither covers both cases:
 
 - A **DOM walk + `MutationObserver`** translates text nodes. That covers the static page *and*
-  the markup the JS builds later (module cards, the flap wall, the status tiles) — the observer
-  sees them when they are inserted.
+  the markup the JS builds later (the flap wall, the monitor rows, the quiet-day checkboxes) —
+  the observer sees them when they are inserted.
 - **`t("...")`** wraps messages the JS *composes* (`"Error: " + e`). A walk only ever sees the
   finished string, which is not a key.
 

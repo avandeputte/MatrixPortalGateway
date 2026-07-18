@@ -123,8 +123,8 @@ void rtcFormatTime(char* out, size_t outLen) {
   xSemaphoreGive(timeMutex);
 }
 
-// Current UTC epoch, or 0 if the clock has never been set. Used for module
-// last-seen tracking that must survive reboots (millis() resets).
+// Current UTC epoch, or 0 if the clock has never been set. Consumers: the quiet
+// schedule and the command log's browser-local timestamps.
 unsigned long rtcEpochNow() {
   if (!rtcNow.valid) return 0;
   return (unsigned long)rtcToEpochUTC(rtcNow.year, rtcNow.month, rtcNow.day,

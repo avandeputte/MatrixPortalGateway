@@ -6,7 +6,6 @@
 #include "display.h"
 #include "effects.h"
 #include "font1252.h"
-#include <esp_heap_caps.h>
 #include <string.h>
 
 volatile bool gAnimActive   = false;
@@ -120,16 +119,6 @@ static const Font1252* tickerFace() {
   return &FONT_6x9;
 }
 
-static void drawGlyph1252(int px, int py, const Font1252* f, char c, uint8_t r, uint8_t g, uint8_t b) {
-  uint8_t gi = FONT1252_INDEX[(uint8_t)c];
-  if (gi == 0xFF) return;
-  for (int row = 0; row < f->height; row++) {
-    uint16_t bits = font1252Row(*f, gi, (uint8_t)row);
-    for (int col = 0; col < f->width; col++)
-      if (bits & (uint16_t)(0x8000 >> col)) panelPixel(px + col, py + row, r, g, b);
-  }
-}
-
 void canvasTickerSet(const char* text, uint8_t r, uint8_t g, uint8_t b, int speed) {
   gTickerActive = false;                     // stop the renderer reading half-updated state
   strlcpy(tickText, text ? text : "", sizeof(tickText));
@@ -157,7 +146,7 @@ void canvasTickerRender() {
     int gx = startX + (int)i * gw;
     if (gx >= gPanel.panelW) break;                    // this glyph and the rest are off the right
     if (gx + f->width < 0) continue;                   // already off the left
-    drawGlyph1252(gx, y0, f, tickText[i], tickR, tickG, tickB);
+    dispDrawGlyph1252(gx, y0, f, (uint8_t)tickText[i], 0, 255, tickR, tickG, tickB);
   }
   panelShow();
   tickScroll += tickSpeed;

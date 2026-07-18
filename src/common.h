@@ -6,11 +6,10 @@
  * Firmware for the Adafruit MatrixPortal ESP32-S3 driving a HUB75 RGB LED matrix.
  *
  * A port of the Split-Flap Gateway (v3.1) that keeps the entire gateway -- web UI,
- * REST API, MQTT/Home Assistant, OTA, bus monitor -- and replaces
+ * REST API, MQTT/Home Assistant, OTA, command monitor -- and replaces
  * the RS-485 transceiver with a software bus and a panel full of *virtual*
  * split-flap modules. Nothing is wired to a real reel: every module the gateway
- * discovers, calibrates and drives is emulated in firmware and drawn as a flap
- * cell on the LED matrix.
+ * drives is emulated in firmware and drawn as a flap cell on the LED matrix.
  *
  * The emulation is at the PROTOCOL level, not the API level. Commands are framed,
  * sanitized and "transmitted" exactly as before; the virtual modules parse those
@@ -29,19 +28,22 @@
  * (YouTube: https://www.youtube.com/@AdamGMakes).
  *
  * Emulated protocol (module firmware v31, backward-compatible to v6):
- *   Bus format:   m<ADDR><CMD>[data]\n
+ *   Frame format: m<ADDR><CMD>[data]\n
  *   Address:      decimal (zero-padded 2-digit v6 style, or variable-length v7+)
  *                 broadcast: m** (v6) or m* (v7+), optional range m*v<lo>-<hi>
  *                 by serial: mX...
- *   Key commands: m<id>-<char>    display character
+ *   Commands the virtual modules ANSWER (vmDispatch):
+ *                 m<id>-<char>    display character
  *                 m<id>+<n>       display by flap index
  *                 m<id>h          home
- *                 m<id>c          calibrate     -> m<id>:<steps>\n
  *                 m<id>v          get version   -> m<id>v:<ver>:<id>:<sn>\n
- *                 m<id>d          dump EEPROM   -> m<id>d:<ho>:<ts>:<map>\n
  *                 m<id>A          all fields    -> ...:<map>:<flapCount>:<flapChars>\n
- *                 m<id>N<n>:<s>   configure the flap set
- *                 mX<cmd><sn>     address one module by serial number
+ *                 mXA<sn>         'A' addressed by serial number
+ *   The physical gateway's calibration/dump grammar (calibrate 'c', dump 'd',
+ *   goto 'g', nudge 's', ...) is NOT modelled: neither the companion (which
+ *   only ever sends m<id>-<char>) nor the web UI emits it. Such frames pass
+ *   the sanitizer untrimmed and the virtual modules silently ignore them,
+ *   exactly like any unknown command.
  *
  * Board: Adafruit MatrixPortal ESP32-S3 (8MB flash, 2MB *quad* PSRAM)
  * Libraries: none for the panel -- see panel.cpp, a direct LCD_CAM + GDMA driver.
@@ -136,7 +138,7 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
    "RTC not valid yet" path the frame timestamps handle. */
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "1.19.1"   // this product's version (UI + boot log)
+#define FW_VERSION           "1.20.0"   // this product's version (UI + boot log)
 // The gateway REST/MQTT surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it
@@ -227,7 +229,8 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
    framebuffer plus descriptors; that leaves the network stack on fumes, and the
    failure does NOT look like a panel fault. It looks like TCP connects failing
    (MQTT rc=-2), a web UI that stalls, and loop()'s 20 KB heap floor rebooting the
-   board. panelBegin() refuses any geometry that breaches either bound.
+   board. panelBegin() first clamps the bit depth down until the framebuffer fits
+   (v1.17.1) and refuses outright only if even depth 1 breaches a bound.
 
    BUDGET is the ceiling on the panel itself; RESERVE is what must still be free
    afterwards for WiFi/lwIP to come up. Both are internal-DMA-capable bytes.
@@ -248,17 +251,18 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
    Changing the displayed flap cascades forward through the reel, which is what
    makes the panel read as a split-flap. It is a rendering effect, not a mechanism.
 
-   FLAP_ANIM_MAX bounds one change to 64 flips -- a whole 64-flap reel's worth, and
-   64 * DEFAULT_FLAP_MS ~= 3.8 s for the longest cascade. A longer jump starts its
-   walk flapMax flaps short of the destination. Set flapMax to 1 for an instant cut. */
+   FLAP_ANIM_MAX bounds one change to 64 flips (64 * DEFAULT_FLAP_MS ~= 3.8 s for
+   the longest cascade -- a physical 64-flap reel's full revolution, kept as the
+   cap even though this reel has 237 flaps). A longer jump starts its walk flapMax
+   flaps short of the destination. Set flapMax to 1 for an instant cut. */
 #define DEFAULT_FLAP_MAX     64     // flips drawn for one character change
 #define FLAP_ANIM_MAX        64     // hard ceiling on flapMax
 
 /* ---- Bus timing ----
-   Carried over from the RS-485 gateway. The emulated bus is not metered at
+   Carried over from the physical gateway. The emulated bus is not metered at
    a baud rate -- replies come back promptly (see vbus.*), staggered only by
-   VBUS_SLOT_MS so a broadcast stays legible in the monitor. What remains is the
-   bus-quiet guard: rs485Send still waits for the bus to fall quiet before it
+   VBUS_SLOT_MS so a broadcast stays legible in the MQTT mirror. What remains is
+   the bus-quiet guard: busSend still waits for the bus to fall quiet before it
    transmits, which keeps command and reply frames from interleaving and keeps the
    gateway's collision-avoidance code path identical to the one upstream runs. */
 #define TX_BUS_GUARD_MS      12
@@ -266,31 +270,26 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 
 /* ---- Flap set sizing ----
    A physical reel has 64 leaves because it is a physical object. These modules are DRAWN,
-   so there is nothing to ration: the reel carries ONE FLAP FOR EVERY GLYPH THE FONT CAN
-   DRAW. Every printable Windows-1252 character now has somewhere to land, instead of the
-   99 of them ($ % ( ) + [ ] { } © ° « » ¿ À Á Â Ã Å Æ Ç È É ...) that the old 64-flap
-   German reel could only show as a blank.
+   so there is nothing to ration: the reel carries 237 flaps -- every printable CP1252
+   glyph, the seven colour flaps, every lowercase letter, and the pictographs. It is BUILT
+   AT BOOT (reelBuild in reel.h) rather than typed out, and it is not stored per module and
+   not configurable -- a reel that can already draw everything has nothing left to
+   reconfigure, so the physical gateway's 'N' command and flap-set editor are gone.
 
-   The reel is 156 characters + 7 colour flaps = 163, and it is BUILT AT BOOT (vmBuildReel)
-   rather than typed out: every printable CP1252 byte, in code-point order, skipping the
-   lowercase letters. It is not stored per module and it is not configurable -- a reel that
-   can already draw everything has nothing left to reconfigure, so the 'N' command and the
-   flap-set editor are gone.
+   The SECTION ORDER is the contract (see reel.h for the full story): the 156 uppercase
+   glyph flaps and the 7 colour flaps (indices 0..162) come first, byte-compatible with
+   the classic reel; the lowercase and pictograph flaps live PAST them, reachable only by
+   index. On the one-byte legacy path lowercase still folds to uppercase -- it must,
+   because the bytes r o y g b p w mean colours there -- while the index-addressed API
+   (/api/display/cells, /api/flap/index) reaches every flap without folding.
 
-   NO LOWERCASE, and that is load-bearing, not cosmetic. A real reel is printed in capitals,
-   so lowercase folds to uppercase (cp1252ToUpper) -- and it MUST, because the seven colour
-   flaps are addressed by the lowercase letters r o y g b p w. Put lowercase on the reel and
-   vmFlapIndexOf's scan would resolve 'r' to the letter, and every colour command any
-   controller has ever sent would silently start printing letters instead of colours.
+   Flap 0 is blank (the home position).
 
-   Flap 0 is blank (the home position). The colours sit LAST -- VM_COLOUR_BASE is derived
-   from that, so they must stay there.
-
-   ONE COMPATIBILITY NOTE, deliberately accepted: the 'A' reply reports flapCount, and
-   splitflap-os (server/app.py) rejects any count outside 1..64, so it will refuse this
-   reel and fall back to its own map. That costs nothing here -- it addresses flaps BY
-   CHARACTER ('-'), never by index, so all of its text still displays exactly as before.
-   The gateway's own UI/REST/MQTT are unaffected: they resolve by character too. */
+   ONE COMPATIBILITY NOTE, deliberately accepted: the 'A' reply reports flapCount as
+   SF_LEGACY_FLAPS (163), and splitflap-os (server/app.py) rejects any count outside
+   1..64, so it will refuse this reel and fall back to its own map. That costs nothing
+   here -- it addresses flaps BY CHARACTER ('-'), never by index, so all of its text
+   still displays exactly as before. The gateway's own UI/REST/MQTT are unaffected. */
 #include "reel.h"          // SF_MAX_FLAPS / SF_COLOUR_FLAPS / SF_CHAR_FLAPS, and the reel
                            // itself -- Arduino-free, so tools/reel_test.cpp compiles the
                            // very same code rather than a copy of it.
@@ -298,19 +297,19 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 
 /* ---- Buffer / queue sizes ----
    The virtual modules are perfectly calibrated, so they carry no flap-position
-   map and every dump reports an empty one. With the 64-flap reel the longest frame
-   is the 'A' reply, whose 64-byte flapChars tail dominates at ~117 bytes total,
-   followed by the 'mXW' restore and a broadcast 'm*N64:<chars>'. TX_MAX_BYTES (512)
-   is kept generous for raw frame sends -- comfortably more than any reply needs.
+   map and every dump reports an empty one. The longest frame is the 'A' reply,
+   whose 163-byte legacy flapChars tail dominates at ~225 bytes total
+   (tools/reel_test.cpp measures it). TX_MAX_BYTES (512) is kept generous for raw
+   frame sends -- comfortably more than any reply needs.
 
-   MSG_MAX_BYTES is 320 rather than the RS-485 gateway's 256 so a full 'A' reply
-   fits in one monitor-ring entry untruncated -- it is the frame you most want to
+   MSG_MAX_BYTES is 320 rather than the physical gateway's 256 so a full 'A'
+   reply fits in one BusMsg untruncated -- it is the frame you most want to
    read. It also sizes mqttPublishMsg's stack buffer (MSG_MAX_BYTES*3 + 80, since
    a flap byte can expand to a 3-byte UTF-8 glyph), which MQTT_BUF_SIZE must be
    able to hold. */
-#define MSG_RING_SIZE        64    // monitor ring: number of frames retained
-#define MSG_MAX_BYTES        320   // monitor ring: bytes stored per frame
-#define TX_MAX_BYTES         512   // max bytes rs485Send will transmit in one frame
+#define MSG_RING_SIZE        64    // command log: number of entries retained
+#define MSG_MAX_BYTES        320   // MQTT wire mirror: bytes stored per frame
+#define TX_MAX_BYTES         512   // max bytes busSend will transmit in one frame
 #define MQTT_BUF_SIZE        1280  // MQTT packet buffer + queue slot: >= the worst-case
                                    // rx/tx monitor JSON (320 wire bytes -> 3-byte UTF-8
                                    // glyphs = ~960B + prefix) and any dump payload
@@ -323,27 +322,13 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 // to be written -- which is the point. A single, real change persists after two quiet
 // minutes.
 #define COMPANION_SAVE_DEBOUNCE_MS 120000UL   // companion URL: persist once it settles
-#define VMODULE_SAVE_DEBOUNCE_MS   5000UL     // reel state: coalesce FATFS writes
 
 /* ---- Persisted files (FFat) ----
-   The virtual modules' own "EEPROM": id, serial, calibration. Written to a temp file and
-   renamed, so a power cut mid-write leaves the previous good file intact.
-
-   There is no /modules.dat any more. The gateway kept a sticky registry of "modules seen
-   on the bus" -- a concept borrowed wholesale from the RS-485 gateway, where the bus is
-   real and its population genuinely has to be discovered. Here the wall is DRAWN: vmods[]
-   is created whole from rows x cols and every module exists by construction. See
-   modules.cpp. */
-#define VMODULES_FILE    "/vmods.dat"
-#define VMODULES_TMP     "/vmods.tmp"
-// "VMO" + a layout generation. The saved record embeds flapChars[SF_MAX_FLAPS], so
-// sizeof(VModule) is part of the file format: bump the low byte whenever the record
-// layout changes (e.g. SF_MAX_FLAPS), or vmLoad() will read the old layout as garbage.
-#define VMODULES_MAGIC   0x564D4F02UL   // "VMO" + layout generation 2
-                                        // gen 2: the per-module flap table is gone
-                                        // (shared reel), so VModule and the on-disk
-                                        // record both shrank. A gen-1 file would
-                                        // deserialise into garbage -- reject it.
+   Only the companion settings blob below. The virtual modules persist NOTHING:
+   every field is deterministic from the configured grid (id = wall slot, serial
+   derived from the MAC, reel homed at boot), so the physical gateway's
+   /modules.dat registry and this product's former /vmods.dat are both gone --
+   vmInit() deletes a leftover file from older firmware. */
 
 /* ---- Companion settings blob (FFat) ---- */
 #define COMPANION_FILE       "/compset.gz"
@@ -394,12 +379,12 @@ extern volatile bool gOtaRebootPending;
 extern bool gApActive;
 extern SemaphoreHandle_t timeMutex;
 extern StaticSemaphore_t timeMutexBuf;
-extern volatile unsigned long wdgRS485Ms;
+extern volatile unsigned long wdgBusMs;
 extern volatile unsigned long gLastRxMs;
 extern volatile unsigned long wdgNetMs;
 extern volatile unsigned long wdgWebMs;
 extern volatile unsigned long wdgDispMs;
-extern TaskHandle_t hTaskRTC, hTaskRS485, hTaskOTA, hTaskWeb, hTaskNet, hTaskDisp;
+extern TaskHandle_t hTaskRTC, hTaskBus, hTaskOTA, hTaskWeb, hTaskNet, hTaskDisp;
 extern bool ntpSynced;
 extern unsigned long staDownSince;
 

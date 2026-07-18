@@ -3,7 +3,7 @@
 // These sidestep the raw-canvas API entirely: instead of a client pushing frames over HTTP (which
 // tops out around 8 fps, one TCP connection per frame), taskDisplay renders the effect itself, so
 // the panel runs at ~70 fps with nothing on the network. An effect owns the panel the way the reel
-// wall does -- it is a third display mode alongside the wall and raw canvas (gCanvasMode).
+// wall does -- one more display mode alongside the wall, the raw canvas, and the animation/ticker players (gCanvasMode).
 #pragma once
 #include <stdint.h>
 

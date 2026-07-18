@@ -3,7 +3,7 @@
 
 
 // tasks.cpp -- the long-lived FreeRTOS task loops.
-// taskRS485 (core 0): drains the emulated bus, frames messages, parses replies.
+// taskBus (core 0): drains the emulated bus, frames replies, mirrors them to MQTT.
 // taskRTC  (core 0): refreshes the wall clock once a second.
 // taskWeb  (core 0): services the HTTP server.
 // taskNetwork (core 1): WiFi/MQTT reconnect, status publishing, virtual-module and
@@ -14,30 +14,29 @@
    FreeRTOS tasks
 ---------------------------------------------------------- */
 
-// Bus receive + response parsing (Core 0)
+// Bus receive (Core 0)
 //
 // The split-flap protocol uses newline-terminated ASCII messages that always
 // start with 'm'. Replies arrive from vbusPoll() as whole frames, but they are
 // still fed through the same byte accumulator the UART fed: it is the accumulator
-// that guarantees every ring-buffer entry is exactly one complete protocol
-// message, and running the emulated bus down the identical path is what keeps the
-// gateway above it honest.
+// that guarantees every frame handed to the MQTT mirror is exactly one complete
+// protocol message, and running the emulated bus down the identical path is what
+// keeps the gateway above it honest.
 
-// Frame accumulator. Written only by taskRS485, hence file-static rather than a
-// parameter. A frame from a virtual module is at most an 'A' reply (~117 bytes
-// with the 64-flap reel); MSG_MAX_BYTES is sized so it fits in one
-// monitor-ring entry untruncated.
+// Frame accumulator. Written only by taskBus, hence file-static rather than a
+// parameter. A frame from a virtual module is at most an 'A' reply (~225 bytes
+// with the 163-flap legacy tail); MSG_MAX_BYTES (320) is sized so it fits in one
+// BusMsg untruncated.
 static uint8_t busLineBuf[TX_MAX_BYTES];
 static size_t  busLineLen = 0;
 
-// Feed one received byte to the accumulator; on a completed frame, log it, mirror
-// it to MQTT and hand it to the response parser.
+// Feed one received byte to the accumulator; a completed frame is mirrored to MQTT.
 static void busIngestByte(uint8_t c) {
   // Touch the watchdog per byte: a sustained burst of bus traffic (each completed
-  // frame triggers rtcFormatTime + MQTT + parse) could otherwise keep us in this
+  // frame triggers rtcFormatTime + MQTT) could otherwise keep us in this
   // loop past the 30 s bus-watchdog threshold and trigger a false stall reboot.
-  wdgRS485Ms = millis();
-  gLastRxMs  = wdgRS485Ms;   // bus activity marker for the TX quiet guard
+  wdgBusMs  = millis();
+  gLastRxMs = wdgBusMs;   // bus activity marker for the TX quiet guard
 
   // If we see an 'm' and the buffer already holds something that doesn't start
   // with 'm', discard the stale partial frame and start fresh.
@@ -54,33 +53,26 @@ static void busIngestByte(uint8_t c) {
   }
   if (c != '\n') return;
 
-  // Newline = end of message. Commit to the ring buffer.
+  // Newline = end of message. Mirror it to MQTT.
   rxCount = rxCount + 1;
-  RS485Msg m;
+  BusMsg m;
   m.timestamp = millis();
   m.dir       = 'R';
-  m.origin    = 0;       // origin only labels 'C' (command) rows, not bus TX/RX
-  m.sanitized = false;   // RX frames are never sanitized
-  // The ring entry is fixed-size; store at most MSG_MAX_BYTES. The full frame is
-  // still parsed below -- this copy is display-only.
+  // The BusMsg is fixed-size; store at most MSG_MAX_BYTES.
   size_t ringLen = (busLineLen > MSG_MAX_BYTES) ? MSG_MAX_BYTES : busLineLen;
   m.len = ringLen;
   memcpy(m.data, busLineBuf, ringLen);
   rtcFormatTime(m.wallTime, sizeof(m.wallTime));
-  m.epoch = rtcEpochNow();   // UTC epoch for browser-local display
-  // No [RX] serial line either: these replies were synthesized by the virtual modules a
-  // microsecond ago, in this same process. Echoing them as 'received' was theatre.
-  // Mirrored to MQTT (<prefix>/rx) but NOT to the web Monitor -- these replies are
-  // synthesized by the virtual modules a microsecond ago; showing them as "received
-  // from the bus" was theatre.
+  // Mirrored to MQTT (<prefix>/rx) but NOT to the web Monitor and NOT parsed:
+  // these replies were synthesized by the virtual modules a microsecond ago, in
+  // this same process. Echoing them as 'received' was theatre, and the module
+  // registry the parse used to feed is gone. The MQTT wire mirror is the only
+  // consumer left.
   mqttPublishMsg(m);
-  // Nothing parses the reply any more: it used to feed the module registry, and the
-  // registry is gone. The frame is still mirrored to MQTT above, which is the only
-  // consumer it ever had besides that.
   busLineLen = 0;
 }
 
-void taskRS485(void* pv) {
+void taskBus(void* pv) {
   static uint8_t rxFrame[TX_MAX_BYTES];   // one polled reply; this task is its only reader
 
   // No startup discovery. There is nothing to discover: the wall IS the modules, all of them
@@ -91,12 +83,12 @@ void taskRS485(void* pv) {
   while (true) {
     // Stand down while a firmware image is streaming: no bus traffic, no flash
     // contention. Feed the watchdog so the stall check stays happy.
-    if (gOtaInProgress) { wdgRS485Ms = millis(); vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+    if (gOtaInProgress) { wdgBusMs = millis(); vTaskDelay(pdMS_TO_TICKS(100)); continue; }
 
-    // Send any scheduled batch frames now due. This is where /api/rs485/batch's
+    // Send any scheduled batch frames now due. This is where /api/bus/batch's
     // cascade pacing actually happens -- moved off taskWeb so the HTTP server never
-    // blocks on delay() (see rs485.h). At most one 5 ms tick of latency per frame.
-    rs485PollScheduled(millis());
+    // blocks on delay() (see bus.h). At most one 5 ms tick of latency per frame.
+    busPollScheduled(millis());
 
     // Drain what the modules have queued, bounded per iteration so a long
     // broadcast reply train cannot monopolise the task -- the rest arrives on the
@@ -107,7 +99,7 @@ void taskRS485(void* pv) {
       for (size_t i = 0; i < rxLen; i++) busIngestByte(rxFrame[i]);
     }
 
-    wdgRS485Ms = millis();
+    wdgBusMs = millis();
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
@@ -222,8 +214,8 @@ void taskWeb(void* pv) {
   }
 }
 
-bool          staWasUp    = false;
-unsigned long wifiRetryMs = 0;
+static bool          staWasUp    = false;
+static unsigned long wifiRetryMs = 0;
 
 void taskNetwork(void* pv) {
   // WiFi init done in setup() - this task only polls and reconnects.
@@ -295,14 +287,24 @@ void taskNetwork(void* pv) {
       }
       if (mqtt.connected()) {
         mqtt.loop();
-        // Drain the outbound queue -- all mqtt.publish calls happen here
-        if (mqttQMutex && mqttQueue && xSemaphoreTake(mqttQMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-          while (mqttQTail != mqttQHead) {
-            MqttQItem& item = mqttQueue[mqttQTail];
-            mqtt.publish(item.topic, (uint8_t*)item.payload, item.len, false);
+        // Drain the outbound queue -- all mqtt.publish calls happen here. Each
+        // item is copied out UNDER the lock and published AFTER releasing it:
+        // publish() is a blocking TCP write, and holding mqttQMutex across up to
+        // MQTT_Q_SIZE of them starved mqttEnqueue (10 ms timeout) into silently
+        // dropping messages whenever the broker was slow.
+        for (;;) {
+          static MqttQItem item;   // this task is the only consumer
+          bool have = false;
+          if (!mqttQMutex || !mqttQueue ||
+              xSemaphoreTake(mqttQMutex, pdMS_TO_TICKS(10)) != pdTRUE) break;
+          if (mqttQTail != mqttQHead) {
+            item = mqttQueue[mqttQTail];
             mqttQTail = (mqttQTail + 1) % MQTT_Q_SIZE;
+            have = true;
           }
           xSemaphoreGive(mqttQMutex);
+          if (!have) break;
+          mqtt.publish(item.topic, (uint8_t*)item.payload, item.len, false);
         }
       }
     }
@@ -330,16 +332,6 @@ void taskNetwork(void* pv) {
       DBG("[CFG] companion URL settled -- persisted: %s\n", cfg.companionUrl);
     }
 
-    // The virtual modules' own state, debounced to limit flash wear. 'N', 'i' and the
-    // restore command dirty it; showing a character does not.
-    if (vmDirty) {
-      if (vmDirtyMs == 0) vmDirtyMs = millis();
-      if (millis() - vmDirtyMs > VMODULE_SAVE_DEBOUNCE_MS) {
-        vmSave();
-        vmDirty   = false;
-        vmDirtyMs = 0;
-      }
-    }
     wdgNetMs = millis();
     vTaskDelay(pdMS_TO_TICKS(100));
   }

@@ -14,8 +14,7 @@
 #include <esp_random.h>
 #include <string.h>
 #include <time.h>
-
-extern bool rtcLocalNow(struct tm* out);   // broken-down local time from rtc.cpp; false if unset
+#include "rtc.h"           // rtcLocalNow: broken-down local time for the clock effect
 
 volatile uint8_t gEffect      = EFFECT_NONE;
 volatile uint8_t gEffectSpeed = 4;
@@ -123,20 +122,6 @@ const char* effectListJson() {
 
 // ---- flap cells (fliporama + clock) -------------------------------------------------------------
 
-// Draw font rows [rowFrom,rowTo) of the glyph for ASCII `ch` at (px,py) in (r,g,b).
-static void drawGlyphRows(int px, int py, const Font1252* f, uint8_t ch,
-                          int rowFrom, int rowTo, uint8_t r, uint8_t g, uint8_t b) {
-  uint8_t gi = FONT1252_INDEX[ch];
-  if (gi == 0xFF) return;
-  if (rowFrom < 0) rowFrom = 0;
-  if (rowTo > f->height) rowTo = f->height;
-  for (int row = rowFrom; row < rowTo; row++) {
-    uint16_t bits = font1252Row(*f, gi, (uint8_t)row);
-    for (int col = 0; col < f->width; col++)
-      if (bits & (uint16_t)(0x8000 >> col)) panelPixel(px + col, py + row, r, g, b);
-  }
-}
-
 // One flap cell i: a TRUE-BLACK flap with bright warm ink and a subtle split seam -- the classic
 // Solari look. (The old dim-grey card washed out to near-white at large sizes.) The glyph is
 // split at its mid-line for the flip phases.
@@ -150,11 +135,11 @@ static void drawFlapCell(int i) {
   panelFillRect(cx, cy, cw, ch, 0, 0, 0);       // the flap: true black
   const uint8_t cur = cellCur[i], nxt = cellNxt[i];
   const int fl = cellFlip[i];
-  if      (fl == 0) drawGlyphRows(gx, gy, f, cur, 0, f->height, R, G, B);      // idle: whole glyph
-  else if (fl > 4)  drawGlyphRows(gx, gy, f, cur, hh, f->height, R, G, B);     // A: top gone
-  else if (fl > 2) { drawGlyphRows(gx, gy, f, nxt, 0, hh, R, G, B);            // B: new top...
-                     drawGlyphRows(gx, gy, f, cur, hh, f->height, R, G, B); }  //    ...old bottom
-  else              drawGlyphRows(gx, gy, f, nxt, 0, f->height, R, G, B);      // C: whole new glyph
+  if      (fl == 0) dispDrawGlyph1252(gx, gy, f, cur, 0, f->height, R, G, B);      // idle: whole glyph
+  else if (fl > 4)  dispDrawGlyph1252(gx, gy, f, cur, hh, f->height, R, G, B);     // A: top gone
+  else if (fl > 2) { dispDrawGlyph1252(gx, gy, f, nxt, 0, hh, R, G, B);            // B: new top...
+                     dispDrawGlyph1252(gx, gy, f, cur, hh, f->height, R, G, B); }  //    ...old bottom
+  else              dispDrawGlyph1252(gx, gy, f, nxt, 0, f->height, R, G, B);      // C: whole new glyph
   panelHLine(cx, gy + hh, cw, 30, 30, 40);      // the split seam, a subtle dark line
 }
 
@@ -356,23 +341,30 @@ static void stepLife(int W, int H) {
   uint8_t* cur = lifeCur;
   uint8_t* nxt = (cur == fxBuf) ? fxBuf + W * H : fxBuf;
   uint32_t pop = 0;
-  for (int y = 0; y < H; y++)
+  // Toroidal wrap, hoisted: the wrapped x-neighbour index depends only on x and
+  // the wrapped row base only on y, so resolve each once instead of branching
+  // eight times per cell (~130k branches per generation on a 256x64 board).
+  static int16_t xm[FX_MAXW], xp[FX_MAXW];
+  for (int x = 0; x < W; x++) {
+    xm[x] = (int16_t)(x ? x - 1 : W - 1);
+    xp[x] = (int16_t)(x + 1 < W ? x + 1 : 0);
+  }
+  for (int y = 0; y < H; y++) {
+    const uint8_t* up = cur + (y ? y - 1 : H - 1) * W;
+    const uint8_t* md = cur + y * W;
+    const uint8_t* dn = cur + (y + 1 < H ? y + 1 : 0) * W;
     for (int x = 0; x < W; x++) {
-      int n = 0;
-      for (int dy = -1; dy <= 1; dy++)
-        for (int dx = -1; dx <= 1; dx++) {
-          if (!dx && !dy) continue;
-          int xx = x + dx, yy = y + dy;                 // toroidal wrap
-          if (xx < 0) xx = W - 1; else if (xx >= W) xx = 0;
-          if (yy < 0) yy = H - 1; else if (yy >= H) yy = 0;
-          if (cur[yy * W + xx]) n++;
-        }
-      uint8_t a = cur[y * W + x], na;
+      const int l = xm[x], r = xp[x];
+      int n = (up[l] ? 1 : 0) + (up[x] ? 1 : 0) + (up[r] ? 1 : 0)
+            + (md[l] ? 1 : 0)                   + (md[r] ? 1 : 0)
+            + (dn[l] ? 1 : 0) + (dn[x] ? 1 : 0) + (dn[r] ? 1 : 0);
+      uint8_t a = md[x], na;
       if (a) na = (n == 2 || n == 3) ? (uint8_t)(a < 255 ? a + 1 : 255) : 0;   // survive (age) / die
       else   na = (n == 3) ? 1 : 0;                                            // birth
       nxt[y * W + x] = na;
       if (na) pop++;
     }
+  }
   lifeCur = nxt;                                          // swap generations -- no board-sized memcpy
   // A settled or dead board is dull -- reseed once it stops changing for a while.
   if (pop == 0 || pop == lifePop) { if (++lifeStale > 40) { seedLife(W, H); lifeStale = 0; } }
@@ -385,16 +377,20 @@ static void renderLife(int W, int H) {
   int gate = 8 - gEffectSpeed / 2; if (gate < 1) gate = 1;
   if (fxTick % gate == 0) stepLife(W, H);
   const uint8_t* cells = lifeCur;
+  // Read the volatile hue ONCE per frame and resolve its RGB once -- not per live
+  // pixel, which recomputed the same hsv() up to 16k times a frame.
+  const int hue = gEffectHue;
+  uint8_t hr = 0, hg = 0, hb = 0;
+  if (hue >= 0) hsv((uint8_t)hue, hr, hg, hb);
   for (int y = 0; y < H; y++)
     for (int x = 0; x < W; x++) {
       uint8_t a = cells[y * W + x];
       if (!a) { panelPixel(x, y, 0, 0, 0); continue; }
-      if (gEffectHue < 0) {                                      // classic green colouring
+      if (hue < 0) {                                             // classic green colouring
         if (a <= 2) panelPixel(x, y, 180, 255, 190);            // newborn: bright white-green
         else { uint8_t g = (uint8_t)(120 + (a > 135 ? 135 : a)); // older: steadier green, glowing
                panelPixel(x, y, 0, g, a > 90 ? 60 : 0); }
       } else {                                                   // tinted by hue, brightness by age
-        uint8_t hr, hg, hb; hsv((uint8_t)gEffectHue, hr, hg, hb);
         if (a <= 2) panelPixel(x, y, (uint8_t)(128 + hr / 2), (uint8_t)(128 + hg / 2), (uint8_t)(128 + hb / 2));
         else { uint8_t lv = (uint8_t)(120 + (a > 135 ? 135 : a));
                panelPixel(x, y, (uint8_t)(hr * lv / 255), (uint8_t)(hg * lv / 255), (uint8_t)(hb * lv / 255)); }
@@ -409,12 +405,16 @@ void effectReset(uint8_t type) {
   fxBuildLUTs();
   fxFrame = 0; fxTick = 0;
   const int W = gPanel.panelW, H = gPanel.panelH;
-  const int need = 2 * W * H;
-  if (fxCap < need) {                     // (re)allocate the shared grid in PSRAM
-    if (fxBuf) free(fxBuf);
-    fxBuf = (uint8_t*)ps_malloc(need);
-    if (!fxBuf) fxBuf = (uint8_t*)malloc(need);
-    fxCap = fxBuf ? need : 0;
+  // Only fire and Life use the shared grid -- don't allocate 2*W*H (32 KB on a
+  // 256x64 panel) for plasma/matrix/clock/fliporama, which never touch it.
+  if (type == EFFECT_FIRE || type == EFFECT_LIFE) {
+    const int need = 2 * W * H;
+    if (fxCap < need) {                   // (re)allocate the shared grid in PSRAM
+      if (fxBuf) free(fxBuf);
+      fxBuf = (uint8_t*)ps_malloc(need);
+      if (!fxBuf) fxBuf = (uint8_t*)malloc(need);
+      fxCap = fxBuf ? need : 0;
+    }
   }
   switch (type) {
     case EFFECT_FIRE:
@@ -438,6 +438,7 @@ void effectReset(uint8_t type) {
 static void renderPlasma() {
   const int W = gPanel.panelW, H = gPanel.panelH;
   const uint32_t t = fxFrame;
+  const int hue = gEffectHue;             // one volatile read per frame, not per pixel
   for (int y = 0; y < H; y++)
     for (int x = 0; x < W; x++) {
       uint8_t a = sinT[(uint8_t)(x * 2 + t)];
@@ -445,7 +446,7 @@ static void renderPlasma() {
       uint8_t c = sinT[(uint8_t)((x + y) + (t >> 1))];
       uint8_t d = sinT[(uint8_t)((x - y) + t)];
       uint8_t idx = (uint8_t)(((int)a + b + c + d) >> 2);
-      if (gEffectHue >= 0) idx = (uint8_t)(idx + gEffectHue);   // tint: rotate the palette
+      if (hue >= 0) idx = (uint8_t)(idx + hue);                 // tint: rotate the palette
       panelPixel(x, y, plasmaPal[idx][0], plasmaPal[idx][1], plasmaPal[idx][2]);
     }
   panelShow();

@@ -1,8 +1,9 @@
 // font1252.h -- bitmap glyphs for the printable Windows-1252 flap set.
 //
-// The virtual reels carry every printable CP1252 glyph (216 of them; see
-// isFlapByte in charset.h) plus seven colour flaps. Colour flaps are painted as
-// solid swatches and need no glyph, so only the 216 characters live here.
+// The virtual reel carries every printable CP1252 glyph (216 of them; see
+// isFlapByte in charset.h) plus seven colour flaps and the pictographs. Colour
+// flaps are painted as solid swatches and need no glyph, so the tables hold the
+// 216 characters plus the FONT_EXTRA_* pictographs appended after them.
 //
 // Adafruit_GFX's built-in face was CP437 and its GFXfonts are ASCII-range, so the
 // tables are generated instead -- by tools/genfont.py, from the public-domain
@@ -10,7 +11,7 @@
 //
 //     python3 tools/genfont.py
 //
-// Four sizes are bundled. The cell size falls out of the panel geometry and the
+// Seven sizes are bundled. The cell size falls out of the panel geometry and the
 // module grid (see display.h), so the renderer asks font1252Best() for the
 // largest face that fits and the same binary drives an 8x10 cell on a 128x32
 // panel or an 8x21 cell on a 128x64 one.
@@ -45,10 +46,10 @@ extern const char* const FONT_EXTRA_NAME[FONT_EXTRA_COUNT];    // "heart", ...
 // duty on a HUB75 panel, so a mere 64 counts of blue dragged a near-red to magenta.
 extern const int8_t      FONT_EXTRA_COLOUR[FONT_EXTRA_COUNT];
 
-// One bitmap face. `rows` is FONT1252_GLYPHS * height bytes, glyph-major; within
-// a glyph, one byte per row top-to-bottom, bit 7 = leftmost column. `ascent` is
-// the number of rows above the baseline -- the renderer only needs it to sit
-// accented capitals and descenders correctly inside a cell.
+// One bitmap face. `rows` is FONT1252_TOTAL * height uint16 entries, glyph-major;
+// within a glyph, one row per entry top-to-bottom, bit 15 = leftmost column.
+// `ascent` is the number of rows above the baseline -- the renderer only needs it
+// to sit accented capitals and descenders correctly inside a cell.
 // Rows are 16-BIT, bit 15 = leftmost column. One byte per row used to be enough, and it
 // silently capped every face at 8 pixels wide -- which is the real reason nothing bigger
 // than 6x13 was ever bundled, however much room a cell had.

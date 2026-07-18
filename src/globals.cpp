@@ -10,8 +10,8 @@
 // loadConfig() and handleApiConfigSettings().
 volatile bool gSerialDebug = false;
 // Maintenance mode: when true, external commands arriving via MQTT are ignored
-// and not relayed to the RS-485 bus. The web UI / REST API (the gateway itself)
-// continue to work normally. Always OFF at boot -- never persisted -- so a
+// and not relayed to the virtual modules. The web UI / REST API (the gateway
+// itself) continue to work normally. Always OFF at boot -- never persisted -- so a
 // reboot is a guaranteed return to normal operation.
 volatile bool gMaintenanceMode = false;
 // Quiet Time: when true the gateway still accepts and acknowledges every command,
@@ -25,7 +25,7 @@ volatile bool gMaintenanceMode = false;
 // suppression above would otherwise swallow the very home frame that blanks the
 // wall. What each module was showing is snapshotted first, so the falling-edge
 // resync puts the wall back. The reels are virtual here, but the frame is real: it
-// goes out as m*h through rs485Send -> vbus -> vmodule, so the panel visibly flips
+// goes out as m*h through busSend -> vbus -> vmodule, so the panel visibly flips
 // down to blank.
 //
 // Runtime-only -- OFF at boot, never persisted -- like maintenance mode.
@@ -39,9 +39,9 @@ char gCompanionTabs[COMPANION_TABS_MAX] = "";
 volatile unsigned long gCompanionSeenMs = 0;
 volatile bool          gCompanionUrlDirty   = false;   // URL changed, not yet in flash
 volatile unsigned long gCompanionUrlDirtyMs = 0;       // millis() of the LAST change
-// Set when the wall changes (in rs485Send); the network task publishes
+// Set when the wall changes (in busSend); the network task publishes
 // the HA display-state topic (rate-limited) so HA reflects what's shown without
-// spamming. rs485Send sets it; the network task (tasks.cpp) reads and clears it.
+// spamming. busSend sets it; the network task (tasks.cpp) reads and clears it.
 volatile bool gDisplayDirty = false;
 // Set for the duration of a web OTA upload. While true the network task skips
 // MQTT status/display/discovery publishes so the upload has the heap and CPU it
@@ -72,7 +72,7 @@ GwConfig cfg;
 SemaphoreHandle_t     timeMutex     = NULL;
 StaticSemaphore_t     timeMutexBuf;
 // Watchdog timestamps -- each task writes millis() here every iteration
-volatile unsigned long wdgRS485Ms   = 0;
+volatile unsigned long wdgBusMs     = 0;
 volatile unsigned long gLastRxMs    = 0;  // millis() of last byte received on the bus
 int                    mqttFailCount = 0;  // consecutive MQTT connect failures
 volatile unsigned long wdgNetMs     = 0;
@@ -80,9 +80,9 @@ volatile unsigned long wdgWebMs     = 0;
 volatile unsigned long wdgDispMs    = 0;
 // Task handles -- used for uxTaskGetStackHighWaterMark on the Status page so
 // stack pressure is visible BEFORE it becomes a canary crash.
-TaskHandle_t hTaskRTC = NULL, hTaskRS485 = NULL, hTaskOTA = NULL,
+TaskHandle_t hTaskRTC = NULL, hTaskBus = NULL, hTaskOTA = NULL,
                     hTaskWeb = NULL, hTaskNet = NULL, hTaskDisp = NULL;
-// MQTT outbound queue -- RS485/web tasks enqueue; network task publishes
+// MQTT outbound queue -- bus/web tasks enqueue; network task publishes
 
 // Outbound MQTT publish queue (~25 KB). Lives in PSRAM -- it's drained by the
 // network task and written under mqttQMutex, never from an ISR or DMA, so the
@@ -93,22 +93,22 @@ volatile int          mqttQHead     = 0;
 volatile int          mqttQTail     = 0;
 SemaphoreHandle_t     mqttQMutex    = NULL;
 StaticSemaphore_t     mqttQMutexBuf;
-// Scheduled outbound frame ring (paces /api/rs485/batch off taskWeb -- see rs485.h).
-// PSRAM: written by taskWeb, drained by taskRS485, never from an ISR or DMA.
+// Scheduled outbound frame ring (paces /api/bus/batch off taskWeb -- see bus.h).
+// PSRAM: written by taskWeb, drained by taskBus, never from an ISR or DMA.
 TxQItem*              txQueue       = NULL;
 volatile int          txQHead       = 0;
 volatile int          txQTail       = 0;
 SemaphoreHandle_t     txQMutex      = NULL;
 StaticSemaphore_t     txQMutexBuf;
-// Serializes the bus-touching section of rs485Send. There is no UART to garble any
+// Serializes the module-touching section of busSend. There is no UART to garble any
 // more, but the section is still shared mutable RAM: a static scratch buffer, the
-// txCount counter, vbusDeliver's mutation of the module array, and the monitor-ring
-// push. taskWeb (REST, core 0), taskNetwork (MQTT, core 1) and taskRS485 (discovery,
-// core 0) all call rs485Send, so it is genuinely concurrent and genuinely cross-core.
-// Lock order is ALWAYS txMutex -> vmMutex (rs485Send -> vbusDeliver -> vmDispatch): never
-// call rs485Send while holding vmMutex, or vbusDeliver re-takes it and self-deadlocks. The
-// rule used to name the module registry's lock. The registry is gone; the rule is not --
-// it now guards the thing that was the truth all along.
+// txCount counter, vbusDeliver's mutation of the module array, and the MQTT mirror.
+// taskWeb (REST, core 0), taskNetwork (MQTT, core 1) and taskBus (scheduled batch
+// frames, core 0) all call busSend, so it is genuinely concurrent and genuinely
+// cross-core. Lock order is ALWAYS txMutex -> vmMutex (busSend -> vbusDeliver ->
+// vmDispatch): never call busSend while holding vmMutex, or vbusDeliver re-takes it
+// and self-deadlocks. The rule used to name the module registry's lock. The registry
+// is gone; the rule is not -- it now guards the thing that was the truth all along.
 SemaphoreHandle_t txMutex = NULL;
 StaticSemaphore_t txMutexBuf;
 bool          ntpSynced   = false; // true once NTP sync succeeds (in taskNetwork)
@@ -116,12 +116,12 @@ bool          ntpSynced   = false; // true once NTP sync succeeds (in taskNetwor
    Persistent configuration stored in NVS
 ---------------------------------------------------------- */
 Preferences prefs;
-// The bus-monitor ring (64 x ~296 bytes ~= 19 KB) lives in PSRAM, not internal
+// The command log (64 x ~168 bytes ~= 11 KB) lives in PSRAM, not internal
 // RAM. It's a diagnostic log on no hot path, so the slightly slower PSRAM is
-// fine, and freeing ~19 KB of internal DRAM gives the WiFi/TCP stack the
+// fine, and freeing that internal DRAM gives the WiFi/TCP stack the
 // headroom it needs during a large web-OTA upload (which otherwise exhausts the
-// heap as receive buffers pile up). Allocated in setup() via ringInit(); falls
-// back to internal RAM if PSRAM is unavailable. Never freed.
+// heap as receive buffers pile up). Allocated in setup() via psramAllocInit();
+// falls back to internal RAM if PSRAM is unavailable. Never freed.
 GwLogEntry*       logRing       = NULL;
 volatile int      logHead       = 0;
 volatile int      logPollCursor = 0;
@@ -154,8 +154,6 @@ VModule*              vmods     = NULL;
 int                   vmCount   = 0;
 SemaphoreHandle_t     vmMutex   = NULL;
 StaticSemaphore_t     vmMutexBuf;
-volatile bool          vmDirty   = false;   // pending /vmods.dat save
-volatile unsigned long vmDirtyMs = 0;       // millis() when first dirtied
 WiFiClient   mqttWifiClient;        // persistent client for PubSubClient
 PubSubClient mqtt(mqttWifiClient);  // mqttInit() configures timeouts on this
 

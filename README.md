@@ -24,7 +24,7 @@ module registry. See **New in 1.10**.)
      ┌──────────────────────────────────────────────┐
      │  web UI · REST API · MQTT · OTA · monitor     │   unchanged from Gateway 3.1
      ├──────────────────────────────────────────────┤
-     │  rs485Send()  framing · sanitization · Quiet  │   unchanged
+     │  busSend()    framing · sanitization · Quiet  │   unchanged
      ├──────────────────────────────────────────────┤
      │  vbus         deliver frames · queue replies  │   new
      ├──────────────────────────────────────────────┤
@@ -37,6 +37,42 @@ module registry. See **New in 1.10**.)
 ```
 
 ---
+
+## New in 1.20
+
+- **The last "RS-485" is out of the code.** There is no RS-485 transceiver on this board, and
+  now there is no `rs485` in the source either: `src/rs485.*` is **`src/bus.*`**, `rs485Send()`
+  is `busSend()`, `taskRS485` is `taskBus`, `/api/status` reports the task's stack as
+  `stk.bus`, and the Home Assistant stack sensor is `stkbus` (the legacy `stk485` discovery
+  topic is deleted on connect, so HA is not left holding a ghost sensor). The REST endpoints
+  are canonically **`/api/bus/send`** and **`/api/bus/batch`**; `/api/rs485/send` and
+  `/api/rs485/batch` stay as compatibility aliases, because the companion app still POSTs to
+  them. "RS-485" survives in prose exactly where it should: when it names the *other* product,
+  the physical gateway.
+
+- **Virtual-module persistence is gone — nothing it stored could vary.** Every field of
+  `/vmods.dat` is deterministic: a module's id *is* its wall slot, its serial derives from the
+  board's MAC, and the reel homes at boot. A physical module needs its EEPROM; a drawn one
+  re-derives everything in `vmInit()`, which now also deletes a leftover `/vmods.dat`. FATFS
+  holds exactly one file: the companion's settings blob, `/compset.gz`.
+
+- **The frame sanitizer's grammar was trimmed to the commands this product speaks:** `-`, `+`,
+  `h`, `v` and `A`, plus the by-serial `mX…` passthrough — what the companion, the web UI and
+  MQTT emit. The physical gateway's calibration/dump family is no longer modelled: those
+  frames pass through untrimmed, and the virtual modules silently ignore them.
+
+- **`POST /api/flap/index` accepts the whole reel — `0`…`236`.** It previously stopped at 63,
+  a leftover of the 64-flap reel: the lowercase and pictograph flaps were reachable through
+  `/api/display/cells` but not by bare index, even though they are the *reason* index
+  addressing exists.
+
+- **`sfSendText` no longer sleeps 10 ms per character.** That delay was physical-bus pacing;
+  on the emulated bus a send is a function call, so the sleep only froze the calling HTTP or
+  MQTT task — up to 2.5 s per text. The visible cascade was never the delay's job: the flip
+  animation provides it.
+
+- **MQTT publishes now happen outside the queue mutex**, and the Home Assistant device
+  reports its manufacturer.
 
 ## New in 1.19
 
@@ -401,8 +437,8 @@ array of them *is* the state of the wall. They still answer `m*v` with a firmwar
 serial number — the protocol is emulated faithfully — but nobody has to ask.
 
 From then on, everything works. Send `m5-A` and module 5's reel flips forward until it lands
-on `A`. Send text from the Display tab and it cascades across the wall. Reconfigure a
-module's flap count and character set. The bus monitor shows every frame in both directions.
+on `A`. Send text from the Display tab and it cascades across the wall. The Monitor logs
+every command the gateway receives.
 
 The difference is that nothing is moving. The modules are software, and the panel is where
 they live.
@@ -411,8 +447,8 @@ they live.
 
 ## The reel
 
-Each virtual module carries **163 flaps**: every printable Windows-1252 glyph the font can
-draw, then the seven colours.
+Each virtual module carries **237 flaps**: 156 Windows-1252 glyphs, the seven colours, the
+60 lowercase letters and the 14 pictographs.
 
 A physical reel has 64 leaves because it is a physical object. These modules are *drawn*, so
 there is nothing to ration — the reel simply carries **one flap for every character**, and any
@@ -539,20 +575,22 @@ works unchanged** — while 99 characters that used to come out blank now displa
 ## What is and is not emulated
 
 **The protocol is emulated where it is used.** The firmware speaks the subset of the module
-v31 command set the gateway still needs: display (`-`, `+`), homing (`h`), the flap-set
-config (`N`), and the queries (`v`, `A`) — plus the `mX…` by-serial forms `mXA` and `mXN`.
-Broadcasts, the two-star v6 form, and the ranged `m*v0-49` / `m*A0-49` batch queries all work.
+v31 command set the gateway still needs: display (`-`, `+`), homing (`h`), and the queries
+(`v`, `A`) — plus the by-serial form `mXA`. Broadcasts, the two-star v6 form, and the ranged
+`m*v0-49` / `m*A0-49` batch queries all work. The calibration/dump family is *accepted* —
+those frames pass through the sanitizer untrimmed — but the modules silently ignore them:
+there is nothing to calibrate and nothing to dump.
 
 **The mechanism is not emulated at all.** There is no stepper, no Hall sensor and no EEPROM.
 Nothing can be out of tune, so nothing needs tuning: the calibration, diagnostics, provisioning
-and backup commands have all been removed rather than faked. `h` simply shows flap 0, and the
-`A` reply reports the nominal `homeOffset=2832` / `totalSteps=4096` with an empty flap map.
+and backup commands are ignored rather than faked — no reply, no state. `h` simply shows flap
+0, and the `A` reply reports the nominal `homeOffset=2832` / `totalSteps=4096` with an empty
+flap map.
 
 **The bus is not emulated either.** A real RS-485 bus at 9600 baud is half-duplex and slow; a
 broadcast `m*v` across 45 modules takes four seconds of staggered reply slots. Here replies
-come back promptly, in module-ID order, spaced just enough to stay legible in the monitor. The
-`baud`, `dataBits`, `parity` and `stopBits` settings survive in the UI and the API so a config
-round-trips between the two firmwares, but nothing reads them.
+come back promptly, in module-ID order, spaced just enough that a broadcast train stays
+legible in the MQTT wire mirror.
 
 Collisions therefore do not happen. Two modules given the same ID will both obey a command, but
 they answer one after the other rather than on top of each other, so the gateway's duplicate-ID
@@ -603,20 +641,22 @@ native 128×32. Fifteen columns need 120 px, so this wall does not fit a 64-wide
 | **256 × 64** | **15 × 3** | **17 × 21** | **10×20** | **the biggest, most detailed flaps this firmware can draw.** Depth 3 |
 | 256 × 64 | 32 × 5 | 8 × 12 | 6×10 | 160 modules — a dense wall two panels wide. Depth 3 |
 
-**A 256px chain must run at colour depth 3.** At depth 4 the framebuffer needs 145 KB of
-internal DMA RAM, over the 120 KB budget, and `panelBegin()` refuses it (it logs exactly why
-and runs headless — you are never locked out). Depth 3 needs 102 KB and refreshes at **~85 Hz**,
-which is actually *better* than a 128 × 64 wall at depth 4 (79 Hz). The geometry presets carry
-the depth for you, so you cannot pick a layout that gets refused.
+**A 256px chain must run at colour depth 3.** At depth 4 the framebuffer needs 144 KB of
+internal DMA RAM, over the 120 KB budget — and since 1.17.1 `panelBegin()` **clamps the depth
+down** to the deepest that fits (256 × 64 lands on depth 3) rather than refusing and running
+headless; it logs the clamp, and `GET /api/status` reports the depth actually running. Depth 3
+needs 102 KB and refreshes at **~85 Hz**, which is actually *better* than a 128 × 64 wall at
+depth 4 (79 Hz). The geometry presets carry the depth for you, so the clamp never has to fire.
 
 Settings → *Geometry preset* offers each of these; picking one fills the Panel and Module Wall
 cards and saves them. Power-cycle to apply (geometry is read once at boot).
 
 **A 64-row panel halves the refresh rate**, because the same pixel clock now has twice the rows
 to scan: ~157 Hz at 128 × 32 becomes **~78 Hz at 128 × 64**, and the framebuffer grows from 38 KB
-to 77 KB of internal DMA RAM. Both are within budget — `panelBegin()` refuses anything that would
-starve WiFi of internal SRAM (see [Known limitations](#known-limitations)) — but if you see
-flicker, drop `panelBitDepth` to 3, which buys back refresh at the cost of colour depth.
+to 77 KB of internal DMA RAM. Both are within budget — `panelBegin()` steps the bit depth down
+until the framebuffer no longer starves WiFi of internal SRAM, refusing outright only if even
+depth 1 will not fit (see [Known limitations](#known-limitations)) — but if you see flicker,
+drop `panelBitDepth` to 3, which buys back refresh at the cost of colour depth.
 
 The ceiling on the emulated wall is **`VM_MAX_MODULES` = 192** (`src/vmodule.h`), and the bus's
 reply queue is sized to match, so a 32 × 5 = 160-module wall on a 256px chain still has room to spare. A grid that
@@ -660,7 +700,8 @@ it to your panel.
 Changing the displayed flap cascades forward through the reel one flap at a time. This is a
 *rendering effect*, not a simulation.
 
-`flapMax` caps one change at **64 flips** (a whole reel's worth); a longer jump starts its walk
+`flapMax` caps one change at **64 flips** (a physical reel's full revolution, kept as the cap
+even though this reel has 237 flaps); a longer jump starts its walk
 `flapMax` flaps short of the destination. At the default 60 ms per flap, the longest cascade
 takes about 3.8 seconds. Set `flapMax` to `1` for an instant cut.
 
@@ -751,7 +792,8 @@ Never edit `src/web_ui.h` by hand — the next `build_ui.py` overwrites it.
 
 Strings are keyed by their **English text**, so the markup needs no `data-i18n` tagging: a DOM
 walk plus a `MutationObserver` translates the static page *and* whatever the JS builds later
-(module cards, the flap wall). Messages the JS *composes* (`"Error: " + e`) are wrapped in
+(the flap wall, the monitor rows, the quiet-day checkboxes). Messages the JS *composes*
+(`"Error: " + e`) are wrapped in
 `t()`, because a walk only ever sees the finished string. The bus monitor is deliberately
 skipped — it shows protocol, not chrome.
 
@@ -777,7 +819,9 @@ The companion app talks to the gateway over exactly seven HTTP endpoints and mod
 about a module — not the flap count, not the character set, not serial numbers. The
 reel and the `FA5E…` serials are invisible to it. Those seven are
 `GET /api/config`, `GET /api/status`, `POST /api/rs485/send`, `POST /api/rs485/batch`,
-`POST /api/companion`, and `GET`/`PUT /api/companion/settings`.
+`POST /api/companion`, and `GET`/`PUT /api/companion/settings`. (The `/api/rs485/*` pair are
+compatibility aliases — the canonical paths are `/api/bus/send` and `/api/bus/batch`, but the
+companion is frozen on the physical gateway's names and both reach the same handlers.)
 
 Two things do matter, and both are handled:
 
@@ -786,7 +830,7 @@ Two things do matter, and both are handled:
    exactly, so it answers `3.1.0` and puts its own version in `fwVersion`.
 2. **`POST /api/rs485/send` and `/api/rs485/batch` must forward frame bytes verbatim.** The
    companion sends `m00-A\n` style frames as `windows-1252`, one byte per glyph. They are not
-   transcoded.
+   transcoded — on either path, alias or canonical.
 
 The gateway's own MQTT surface, Home Assistant discovery and the `/api/companion/settings` gzip
 blob store are carried over untouched.
@@ -797,18 +841,26 @@ blob store are carried over untouched.
 
 ```
 src/common.h        board config, panel defaults, buffer sizes, shared types
+src/gateway.h       umbrella header: common.h plus every subsystem's public API
 src/globals.cpp     single definition site for every shared global
 src/config.*        runtime configuration (GwConfig) persisted in NVS
 src/rtc.*           wall-clock time: the ESP32's internal RTC + NTP
 src/charset.*       UTF-8 <-> Windows-1252 flap-byte transcoding
-src/font1252.*      GENERATED bitmap glyphs for the 216 printable CP1252 flaps
-src/rs485.*         bus framing, sanitization, TX choke point, monitor ring
+src/reel.h          the 237-flap reel and its two resolvers — Arduino-free, so
+                    tools/reel_test.cpp compiles the same code
+src/font1252.*      GENERATED bitmap glyphs: the 216 printable CP1252 flaps + 14 pictographs
+src/aafont.h        GENERATED by tools/genaafont.py — Orbitron faces for the clock effect
+src/bus.*           frame sanitization, the command log, the busSend() choke point,
+                    scheduled batch pacing
 src/vbus.*          the emulated bus: frame delivery + the reply queue
-src/vmodule.*       the virtual split-flap modules: protocol, reel, persistence
+src/vmodule.*       the virtual split-flap modules: protocol dispatch, the shared reel,
+                    the synthesized replies
 src/display.*       flap-wall geometry and the flap renderer (calls panel.*)
+src/canvas.*        raw canvas: frames, rects, QOI decode, draw ops, on-device animation + ticker
+src/effects.*       on-device effects: plasma, fire, matrix, flip-o-rama, clock, Life
 src/panel.*         the low-level HUB75 driver: ESP32-S3 LCD_CAM + GDMA, no library
-src/modules.*       the gateway's module REGISTRY and reply parser   (unchanged)
-src/mqtt.*          MQTT client, publish queue, HA discovery         (unchanged)
+src/modules.*       high-level protocol send helpers (text/char/home) + FATFS mount
+src/mqtt.*          MQTT client, publish queue, HA discovery
 src/web.*           HTTP server: dashboard (web_ui.h) + REST API + GET /lang/<code>
 src/web_ui.h        GENERATED by tools/build_ui.py — do not edit
 src/ota.*           firmware update: ArduinoOTA + browser upload     (unchanged)
@@ -826,6 +878,8 @@ tools/i18n_check.py    validates the dictionaries (stale keys, lost product name
 tools/i18n_context.py  builds CONTEXT.md
 tools/i18n_test.js     regression test for language resolution and t()
 tools/genfont.py    regenerates src/font1252.cpp from the vendored BDFs
+tools/genaafont.py  regenerates src/aafont.h from Orbitron (the clock effect's faces)
+tools/Orbitron.ttf  vendored Orbitron variable font (SIL Open Font License)
 tools/bdf/          public-domain X11 "misc-fixed" fonts (10x20, 9x18, 8x13, 6x13, 6x10, 6x9, 5x8)
 tools/reel_test.cpp native regression test for the reel and the 'A' reply format
 
@@ -866,7 +920,8 @@ python3 tools/genfont.py
 Run the reel regression test on the host:
 
 ```sh
-c++ -std=c++17 -Isrc tools/reel_test.cpp src/charset.cpp -o /tmp/reel_test && /tmp/reel_test
+c++ -std=c++17 -Isrc tools/reel_test.cpp src/charset.cpp src/font1252.cpp \
+    -o /tmp/reel_test && /tmp/reel_test
 ```
 
 ---
@@ -882,7 +937,8 @@ c++ -std=c++17 -Isrc tools/reel_test.cpp src/charset.cpp -o /tmp/reel_test && /t
 - **The framebuffer cannot go in PSRAM.** This board's 2 MB is *quad* SPI, far too slow to feed
   a panel, so `panel.cpp` allocates the double-buffered framebuffer and the DMA descriptor chain
   from internal DMA-capable RAM (`MALLOC_CAP_DMA`). That bounds panel size and colour depth
-  together, and `panelBegin()` refuses a geometry that would starve WiFi of that pool. The
+  together, and `panelBegin()` clamps the bit depth down until the framebuffer stops starving
+  WiFi of that pool — refusing only a geometry that will not fit even at depth 1. The
   virtual-module array is pinned to internal RAM too — `taskDisplay` walks it 100×/s on the core
   the refresh runs on, and quad PSRAM there causes a shimmer. (The monitor ring, the MQTT queue
   and the scheduled-TX ring *are* in PSRAM; nothing in the refresh path touches them.)

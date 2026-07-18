@@ -46,9 +46,37 @@ static void sendJsonError(int code, const char* msg);
    Web server
 ---------------------------------------------------------- */
 static void sendJsonError(int code, const char* msg) {
-  char buf[128];
-  snprintf(buf, sizeof(buf), "{\"error\":\"%s\"}", msg);
+  // JSON-escape msg: some callers interpolate client-supplied text into it (an
+  // unknown colour name, for one), and an unescaped quote or backslash would
+  // make the error body invalid JSON.
+  char esc[192];
+  size_t o = 0;
+  for (const char* p = msg; *p && o < sizeof(esc) - 7; p++) {
+    unsigned char c = (unsigned char)*p;
+    if (c == '"' || c == '\\')      { esc[o++] = '\\'; esc[o++] = (char)c; }
+    else if (c < 0x20)              { o += snprintf(esc + o, 7, "\\u%04x", c); }
+    else                            { esc[o++] = (char)c; }
+  }
+  esc[o] = 0;
+  char buf[256];
+  snprintf(buf, sizeof(buf), "{\"error\":\"%s\"}", esc);
   server.send(code, "application/json", buf);
+}
+
+// One build-time ETag for every immutable asset (the page, favicon, logo, /lang
+// dictionaries): they all live in the firmware image, so a reflash -- which
+// changes __TIME__ -- is exactly when they change.
+static const char BUILD_ETAG[] = "\"" __DATE__ "-" __TIME__ "\"";
+
+// Parse the JSON request body into `doc`, answering the 400 itself when the body
+// is missing or malformed. The same preamble was previously copy-pasted into
+// every POST handler.
+static bool readJsonBody(JsonDocument& doc) {
+  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return false; }
+  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
+    sendJsonError(400, "Bad JSON"); return false;
+  }
+  return true;
 }
 
 // -- GET /  (main dashboard)
@@ -60,16 +88,16 @@ const char FAVICON_SVG[] =
   "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' role='img' aria-label='Split-Flap Gateway'><defs><linearGradient id='sfTop' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#3c424c'/><stop offset='1' stop-color='#2d323b'/></linearGradient><linearGradient id='sfBot' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#272b32'/><stop offset='1' stop-color='#181b20'/></linearGradient><clipPath id='sfTile'><rect x='7' y='7' width='50' height='50' rx='10'/></clipPath></defs><rect x='7' y='8.5' width='50' height='50' rx='10' fill='#000' opacity='0.35'/><g clip-path='url(#sfTile)'><rect x='7' y='7' width='50' height='25' fill='url(#sfTop)'/><rect x='7' y='32' width='50' height='25' fill='url(#sfBot)'/><text x='32' y='46' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='40' fill='#f3eee3'>S</text><rect x='7' y='30.9' width='50' height='2.2' fill='#0c0d10'/><rect x='7' y='33.1' width='50' height='0.8' fill='#565c68' opacity='0.7'/></g><rect x='4.5' y='29.5' width='4' height='5' rx='1.6' fill='#0c0d10'/><rect x='55.5' y='29.5' width='4' height='5' rx='1.6' fill='#0c0d10'/><rect x='7' y='7' width='50' height='50' rx='10' fill='none' stroke='#0a0b0d' stroke-width='1'/></svg>";
 // GET /favicon.svg
 static void handleFavicon() {
-  static const char* ETAG = "\"" __DATE__ "-" __TIME__ "\"";
-  server.sendHeader("ETag", ETAG);
+  server.sendHeader("ETag", BUILD_ETAG);
   server.sendHeader("Cache-Control", "no-cache");
-  if (server.header("If-None-Match") == ETAG) { server.send(304, "image/svg+xml", ""); return; }
+  if (server.header("If-None-Match") == BUILD_ETAG) { server.send(304, "image/svg+xml", ""); return; }
   server.send(200, "image/svg+xml", FAVICON_SVG);
 }
 
-// Web UI wordmark (header logo): the app name on a split-flap board -- the same
-// two-flap tiles, seam and pivots as the favicon, one cell per character. Served
-// at /logo.svg and used in <h1> in place of the title text.
+// Web UI wordmark: the app name on a split-flap board -- the same two-flap
+// tiles, seam and pivots as the favicon, one cell per character. The dashboard
+// itself draws its header in CSS; /logo.svg is served for the COMPANION, whose
+// gwproxy fetches it to brand its gateway page.
 const char LOGO_SVG[] =
   "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 44' role='img' aria-label='Split-Flap'><defs><linearGradient id='sfTop' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#3c424c'/><stop offset='1' stop-color='#2d323b'/></linearGradient><linearGradient id='sfBot' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#272b32'/><stop offset='1' stop-color='#181b20'/></linearGradient></defs><rect x='3' y='2' width='250' height='40' rx='6' fill='#000' opacity='0.30'/><clipPath id='clip1'><rect x='3' y='0' width='250' height='40' rx='6'/></clipPath><g clip-path='url(#clip1)'><rect x='3' y='0' width='250' height='20' fill='url(#sfTop)'/><rect x='3' y='20' width='250' height='20' fill='url(#sfBot)'/><rect x='27.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='28.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='52.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='53.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='77.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='78.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='102.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='103.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='127.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='128.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='152.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='153.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='177.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='178.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='202.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='203.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='227.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='228.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><text x='15.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>S</text><text x='40.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>P</text><text x='65.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>L</text><text x='90.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>I</text><text x='115.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>T</text><text x='140.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>-</text><text x='165.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>F</text><text x='190.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>L</text><text x='215.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>A</text><text x='240.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>P</text><rect x='3' y='18.9' width='250' height='2.2' fill='#0c0d10'/><rect x='3' y='21.1' width='250' height='0.8' fill='#565c68' opacity='0.7'/></g><rect x='1.2' y='17.5' width='3.6' height='5' rx='1.4' fill='#0c0d10'/><rect x='251.2' y='17.5' width='3.6' height='5' rx='1.4' fill='#0c0d10'/><rect x='3' y='0' width='250' height='40' rx='6' fill='none' stroke='#0a0b0d' stroke-width='0.8'/></svg>";
 // GET /logo.svg
@@ -77,10 +105,9 @@ static void handleLogo() {
   // ETag = build time, revalidated every request (like the page and /lang). A plain 7-day
   // max-age with NO validator was a bug: when the logo changed, the browser kept serving its
   // OLD cached copy for a week -- the header text updated but the wordmark did not.
-  static const char* ETAG = "\"" __DATE__ "-" __TIME__ "\"";
-  server.sendHeader("ETag", ETAG);
+  server.sendHeader("ETag", BUILD_ETAG);
   server.sendHeader("Cache-Control", "no-cache");
-  if (server.header("If-None-Match") == ETAG) { server.send(304, "image/svg+xml", ""); return; }
+  if (server.header("If-None-Match") == BUILD_ETAG) { server.send(304, "image/svg+xml", ""); return; }
   server.send(200, "image/svg+xml", LOGO_SVG);
 }
 
@@ -114,10 +141,9 @@ static void handleLang(size_t idx) {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   // Dictionaries live in the firmware image, so they change only on reflash -- the same
   // ETag as the page busts them at exactly the right moment.
-  static const char* LANG_ETAG = "\"" __DATE__ "-" __TIME__ "\"";
-  server.sendHeader("ETag", LANG_ETAG);
+  server.sendHeader("ETag", BUILD_ETAG);
   server.sendHeader("Cache-Control", "no-cache");
-  if (server.header("If-None-Match") == LANG_ETAG) { server.send(304, "application/json", ""); return; }
+  if (server.header("If-None-Match") == BUILD_ETAG) { server.send(304, "application/json", ""); return; }
   server.sendHeader("Content-Encoding", "gzip");
   server.setContentLength(L.len);
   server.send(200, "application/json", "");
@@ -138,10 +164,9 @@ static void handleRoot() {
   // and honour If-None-Match: navigating away and back then costs a tiny 304 instead
   // of re-downloading the whole ~65 KB page, while a reflash still busts the cache and
   // delivers the new UI. (The old no-store forced a full re-download on every visit.)
-  static const char* PAGE_ETAG = "\"" __DATE__ "-" __TIME__ "\"";
-  server.sendHeader("ETag", PAGE_ETAG);
+  server.sendHeader("ETag", BUILD_ETAG);
   server.sendHeader("Cache-Control", "no-cache");   // revalidate, but cheaply (304)
-  if (server.header("If-None-Match") == PAGE_ETAG) { server.send(304, "text/html", ""); return; }
+  if (server.header("If-None-Match") == BUILD_ETAG) { server.send(304, "text/html", ""); return; }
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
   server.send(200, "text/html", "");
   // Stream the static page (web_ui.h), substituting the single {FWVER} token
@@ -170,14 +195,11 @@ static void handleApiMessages() {
   server.sendContent("");   // terminate the chunked response
 }
 
-// POST /api/rs485/send
+// POST /api/bus/send  (alias: /api/rs485/send -- the path the companion still POSTs to)
 static void handleApiSend() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return;
-  }
+  if (!readJsonBody(doc)) return;
   const char* d = doc["data"] | "";
   bool raw = doc["raw"] | false;   // optional: send verbatim, bypassing sanitization
   uint8_t outBuf[TX_MAX_BYTES];
@@ -185,25 +207,22 @@ static void handleApiSend() {
   memcpy(outBuf, d, outLen);
   if (!outLen) { sendJsonError(400, "Empty data"); return; }
   { char cd[LOG_TEXT_MAX]; snprintf(cd, sizeof(cd), "send %s", d); logCommand('R', cd); }
-  rs485Send(outBuf, outLen, raw);
+  busSend(outBuf, outLen, raw);
   char resp[64];
   snprintf(resp, sizeof(resp), "{\"ok\":true,\"bytes\":%zu,\"raw\":%s}", outLen, raw ? "true" : "false");
   server.send(200, "application/json", resp);
 }
 
-// POST /api/rs485/batch  (v3.0) -- send many frames in one request.
+// POST /api/bus/batch  (v3.0; alias: /api/rs485/batch, which the companion POSTs to)
 // Body: {"frames":["m00-A\n","m01-B\n",...], "step_ms":15}. Each frame is sent
-// normalized (like /api/rs485/send); an optional step_ms paces the cascade
+// normalized (like /api/bus/send); an optional step_ms paces the cascade
 // device-side. Lets the companion draw a whole animated page in ONE HTTP call
 // instead of one request per module. Caps keep the request bounded and the web
 // watchdog fed.
 static void handleApiSendBatch() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return;
-  }
+  if (!readJsonBody(doc)) return;
   JsonArray frames = doc["frames"].as<JsonArray>();
   if (frames.isNull()) { sendJsonError(400, "'frames' array required"); return; }
   int step = doc["step_ms"] | 0;
@@ -224,12 +243,12 @@ static void handleApiSendBatch() {
     memcpy(outBuf, f, outLen);
     // Pace by SCHEDULING, never by delay(): this handler runs on taskWeb, and blocking
     // it freezes the one-connection HTTP server and piles up concurrent sockets (their
-    // TCP window buffers stack in internal RAM). taskRS485 sends each frame when due.
+    // TCP window buffers stack in internal RAM). taskBus sends each frame when due.
     // step==0 or a frame too long / a full queue falls back to an immediate send.
-    if (step > 0 && rs485SendScheduled(outBuf, outLen, due)) {
+    if (step > 0 && busSendScheduled(outBuf, outLen, due)) {
       due += (uint32_t)step;
     } else {
-      rs485Send(outBuf, outLen, false);
+      busSend(outBuf, outLen, false);
     }
     sent++;
     wdgWebMs = millis();             // this loop is now fast, but stay watchdog-safe
@@ -274,11 +293,8 @@ static void handleApiSendBatch() {
  */
 static void handleApiDisplayCells() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return;
-  }
+  if (!readJsonBody(doc)) return;
   JsonArray cells = doc["cells"].as<JsonArray>();
   if (cells.isNull()) { sendJsonError(400, "'cells' array required"); return; }
 
@@ -346,10 +362,10 @@ static void handleApiDisplayCells() {
     if (flap[i] < 0) continue;                       // skip: leave the module as it is
     char f[16];
     int len = snprintf(f, sizeof(f), "m%d+%d\n", start + i, (int)flap[i]);
-    if (step > 0 && rs485SendScheduled((const uint8_t*)f, (size_t)len, due)) {
+    if (step > 0 && busSendScheduled((const uint8_t*)f, (size_t)len, due)) {
       due += (uint32_t)step;
     } else {
-      rs485Send((const uint8_t*)f, (size_t)len, false);
+      busSend((const uint8_t*)f, (size_t)len, false);
     }
     sent++;
     wdgWebMs = millis();
@@ -484,11 +500,8 @@ static void handleApiDisplayState() {
 // POST /api/flap/char   {"id":5,"char":"A"}   id=-1 for broadcast
 static void handleApiChar() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return;
-  }
+  if (!readJsonBody(doc)) return;
   int id = doc["id"] | -1;
   const char* ch = doc["char"] | "";
   if (!ch[0]) { sendJsonError(400, "Missing char"); return; }
@@ -508,14 +521,17 @@ static void handleApiChar() {
 // POST /api/flap/index  {"id":5,"index":3}
 static void handleApiIndex() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return;
-  }
+  if (!readJsonBody(doc)) return;
   int id  = doc["id"]    | -1;
   int idx = doc["index"] | -1;
-  if (idx < 0 || idx >= 64) { sendJsonError(400, "Invalid index (0-63)"); return; }
+  // The whole reel is addressable -- the lowercase and pictograph sections included:
+  // this is the same m<id>+<n> command /api/display/cells sends.
+  if (idx < 0 || idx >= SF_MAX_FLAPS) {
+    char e[48];
+    snprintf(e, sizeof(e), "Invalid index (0-%d)", SF_MAX_FLAPS - 1);
+    sendJsonError(400, e); return;
+  }
   { char cd[LOG_TEXT_MAX];
     if (id < 0) snprintf(cd, sizeof(cd), "index %d -> all modules", idx);
     else        snprintf(cd, sizeof(cd), "index %d -> module %d", idx, id);
@@ -527,17 +543,14 @@ static void handleApiIndex() {
 // POST /api/flap/text   {"text":"HELLO","start":0}
 static void handleApiText() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return;
-  }
+  if (!readJsonBody(doc)) return;
   const char* text = doc["text"] | "";
   int start = doc["start"] | 0;
   if (!text[0]) { sendJsonError(400, "Empty text"); return; }
   { char cd[LOG_TEXT_MAX]; snprintf(cd, sizeof(cd), "text from module %d: \"%.60s\"", start, text);
     logCommand('R', cd); }
-  sfSendText(start, text, false);
+  sfSendText(start, text);
   char resp[64];
   snprintf(resp, sizeof(resp), "{\"ok\":true,\"chars\":%zu}", strlen(text));
   server.send(200, "application/json", resp);
@@ -546,11 +559,8 @@ static void handleApiText() {
 // POST /api/flap/home   {"id":5}  or  {"id":-1}
 static void handleApiHome() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return;
-  }
+  if (!readJsonBody(doc)) return;
   int id = doc["id"] | -1;
   { char cd[LOG_TEXT_MAX];
     if (id < 0) snprintf(cd, sizeof(cd), "home all modules");
@@ -713,7 +723,7 @@ static void handleApiStatus() {
   IPAddress lip = WiFi.localIP(), aip = WiFi.softAPIP();
   // Per-task minimum-ever free stack (bytes). A value trending toward 0 is an
   // early warning of the stack-canary crash class.
-  unsigned stk485 = hTaskRS485 ? uxTaskGetStackHighWaterMark(hTaskRS485) : 0;
+  unsigned stkBus = hTaskBus ? uxTaskGetStackHighWaterMark(hTaskBus) : 0;
   unsigned stkWeb = hTaskWeb   ? uxTaskGetStackHighWaterMark(hTaskWeb)   : 0;
   unsigned stkNet = hTaskNet   ? uxTaskGetStackHighWaterMark(hTaskNet)   : 0;
   unsigned stkOta = hTaskOTA   ? uxTaskGetStackHighWaterMark(hTaskOTA)   : 0;
@@ -726,7 +736,7 @@ static void handleApiStatus() {
     "{\"uptime\":%lu,\"rx\":%lu,\"tx\":%lu,"
     "\"wifi\":%s,\"ip\":\"%d.%d.%d.%d\",\"apip\":\"%d.%d.%d.%d\","
     "\"heap\":%u,\"minheap\":%u,\"mqtt\":%s,\"modules\":%d,"
-    "\"stk\":{\"rs485\":%u,\"web\":%u,\"net\":%u,\"ota\":%u,\"rtc\":%u,\"disp\":%u},"
+    "\"stk\":{\"bus\":%u,\"web\":%u,\"net\":%u,\"ota\":%u,\"rtc\":%u,\"disp\":%u},"
     "\"panel\":{\"ok\":%s,\"w\":%u,\"h\":%u,\"cols\":%u,\"rows\":%u,"
     "\"cellW\":%u,\"cellH\":%u,\"depth\":%u,\"font\":\"%s\",\"vmods\":%d,\"drop\":%lu},"
     "\"time\":\"%s\",\"ntpSynced\":%s,\"maint\":%s,\"quiet\":%s,"
@@ -738,7 +748,7 @@ static void handleApiStatus() {
     (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
     mqtt.connected()?"true":"false",
     vmCount,
-    stk485, stkWeb, stkNet, stkOta, stkRtc, stkDsp,
+    stkBus, stkWeb, stkNet, stkOta, stkRtc, stkDsp,
     gPanel.ready?"true":"false", gPanel.panelW, gPanel.panelH,
     gPanel.cols, gPanel.rows, gPanel.cellW, gPanel.cellH, (unsigned)panelInfo().depth,
     dispFontName(), vmCount, vbusDropped,
@@ -788,7 +798,7 @@ static void handleApiConfigGet() {
   doc["flapMax"]       = cfg.flapMax;
   doc["gridColor"]     = cfg.gridColor;   // 0xRRGGBB seam colour
   doc["gridBright"]    = cfg.gridBright;   // 0 = grid off
-  doc["maxFlaps"]      = SF_MAX_FLAPS;   // 163: the reel carries every CP1252 glyph
+  doc["maxFlaps"]      = SF_MAX_FLAPS;   // 237: glyphs + colours + lowercase + pictographs
   char out[1280];   // headroom for identity + panel + JSON-escaped SSID/TZ/hostname
   serializeJson(doc, out, sizeof(out));
   server.send(200, "application/json", out);
@@ -797,11 +807,8 @@ static void handleApiConfigGet() {
 // POST /api/config/wifi
 static void handleApiConfigWifi() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return;
-  }
+  if (!readJsonBody(doc)) return;
   strlcpy(cfg.wifiSSID, doc["ssid"] | "", sizeof(cfg.wifiSSID));
   strlcpy(cfg.wifiPass, doc["pass"] | "", sizeof(cfg.wifiPass));
   saveConfig();
@@ -814,11 +821,8 @@ static void handleApiConfigWifi() {
 // POST /api/config/mqtt
 static void handleApiConfigMqtt() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return;
-  }
+  if (!readJsonBody(doc)) return;
   strlcpy(cfg.mqttHost,   doc["host"]   | "", sizeof(cfg.mqttHost));
   cfg.mqttPort          = doc["port"]   | DEFAULT_MQTT_PORT;
   strlcpy(cfg.mqttUser,   doc["user"]   | "", sizeof(cfg.mqttUser));
@@ -841,11 +845,8 @@ static void handleApiConfigMqtt() {
 // POST /api/config/settings  -- save all settings in one call
 static void handleApiConfigSettings() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return;
-  }
+  if (!readJsonBody(doc)) return;
   // WiFi
   if (doc["ssid"].is<const char*>()) strlcpy(cfg.wifiSSID, doc["ssid"] | "", sizeof(cfg.wifiSSID));
   if (doc["pass"].is<const char*>()) strlcpy(cfg.wifiPass, doc["pass"] | "", sizeof(cfg.wifiPass));
@@ -992,11 +993,6 @@ static void handleOptions() {
   server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
   server.send(204);
 }
-
-
-// ?? New command handlers ??????????????????????????????????????????
-
-
 
 
 
@@ -1366,7 +1362,9 @@ static void handleApiCompanionSettingsGet() {
   if (n == 0) { f.close(); sendJsonError(404, "No settings stored"); return; }
 
   wdgWebMs = millis();
-  server.client().setTimeout(3000);        // cap per-write blocking on a stalled client
+  // setConnectionTimeout(), NOT setTimeout() -- the latter is the Stream READ
+  // timeout and caps nothing here (see handleRoot).
+  server.client().setConnectionTimeout(3000);
   server.setContentLength(n);
   // Deliberately NOT "Content-Encoding: gzip": these bytes are the payload, not a
   // transfer encoding of it. Declaring the encoding would make HTTP clients gunzip
@@ -1429,13 +1427,7 @@ static void canvasText(int x, int y, const char* s, uint8_t r, uint8_t g, uint8_
                        const Font1252* f) {
   int cx = x;
   for (const uint8_t* p = (const uint8_t*)s; *p; ++p) {
-    uint8_t gi = FONT1252_INDEX[*p];
-    if (gi != 0xFF)
-      for (int row = 0; row < f->height; row++) {
-        uint16_t bits = font1252Row(*f, gi, row);
-        for (int col = 0; col < f->width; col++)
-          if (bits & (uint16_t)(0x8000 >> col)) panelPixel(cx + col, y + row, r, g, b);
-      }
+    dispDrawGlyph1252(cx, y, f, *p, 0, 255, r, g, b);
     cx += f->width;
   }
 }
@@ -1446,14 +1438,23 @@ static void canvasColor(JsonVariantConst c, uint8_t& r, uint8_t& g, uint8_t& b) 
   }
 }
 
+// Decode one accumulated pixel (rgb888 or rgb565 big-endian, by bpp) to r,g,b.
+// Shared by the full-frame and rect upload paths, which stream in arbitrary
+// chunk boundaries and so carry partial pixels between writes.
+static void pxDecode(const uint8_t* c, uint8_t bpp, uint8_t& r, uint8_t& g, uint8_t& b) {
+  if (bpp == 3) { r = c[0]; g = c[1]; b = c[2]; return; }
+  const uint16_t v = ((uint16_t)c[0] << 8) | c[1];
+  r = (uint8_t)(((v >> 11) & 0x1F) << 3);
+  g = (uint8_t)(((v >> 5)  & 0x3F) << 2);
+  b = (uint8_t)(( v        & 0x1F) << 3);
+}
+
 // GET  /api/canvas -> {active,width,height,formats}   POST {"active":bool} take over / release.
 static void handleApiCanvas() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   if (server.method() == HTTP_POST) {
     JsonDocument doc;
-    if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-      sendJsonError(400, "Invalid JSON"); return;
-    }
+    if (!readJsonBody(doc)) return;
     if (doc["active"] | false) canvasEnter(true); else canvasLeave();
     char buf[48];
     snprintf(buf, sizeof(buf), "{\"ok\":true,\"active\":%s}", gCanvasMode ? "true" : "false");
@@ -1478,11 +1479,14 @@ static void handleApiCanvasEffect() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   if (!gPanel.ready) { sendJsonError(503, "Panel not running"); return; }
   JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Invalid JSON"); return;
+  if (!readJsonBody(doc)) return;
+  uint8_t e = effectByName(doc["type"] | "none");
+  // Refuse BEFORE touching any parameter: a request rejected for Quiet Time must
+  // not leave its speed/hue/density behind for the next start to inherit.
+  if (e != EFFECT_NONE && gQuietTime) {
+    sendJsonError(409, "Quiet Time is active"); return;   // don't light the panel during quiet hours
   }
-  uint8_t e  = effectByName(doc["type"] | "none");
-  int     sp = doc["speed"] | (int)gEffectSpeed;
+  int sp = doc["speed"] | (int)gEffectSpeed;
   gEffectSpeed = (uint8_t)(sp < 1 ? 1 : sp > 10 ? 10 : sp);
   // Optional per-start overrides; absent -> -1 -> the effect keeps its own look (see effects.h).
   int hv = doc["hue"].is<int>()     ? (int)doc["hue"]     : -1;
@@ -1491,8 +1495,6 @@ static void handleApiCanvasEffect() {
   gEffectDensity = (dv < 0) ? -1 : (dv < 1 ? 1 : (dv > 100 ? 100 : dv));
   if (e == EFFECT_NONE) {
     dispReturnToWall();             // stop -> reel wall
-  } else if (gQuietTime) {
-    sendJsonError(409, "Quiet Time is active"); return;   // don't light the panel during quiet hours
   } else {
     gCanvasMode = false;            // an effect owns the panel via taskDisplay, which runs
     gEffectReq  = e;                // effectReset() + starts it -- no effect state touched off-core
@@ -1584,11 +1586,7 @@ static void handleApiCanvasFrameRaw() {
         if (canvasCarryN < canvasBpp) continue;
         canvasCarryN = 0;
         uint8_t r, g, b;
-        if (canvasBpp == 3) { r = canvasCarry[0]; g = canvasCarry[1]; b = canvasCarry[2]; }
-        else { uint16_t p = ((uint16_t)canvasCarry[0] << 8) | canvasCarry[1];
-               r = (uint8_t)(((p >> 11) & 0x1F) << 3);
-               g = (uint8_t)(((p >> 5)  & 0x3F) << 2);
-               b = (uint8_t)(( p        & 0x1F) << 3); }
+        pxDecode(canvasCarry, canvasBpp, r, g, b);
         panelPixel(canvasX, canvasY, r, g, b);      // panelPixel clamps, so an over-long body is safe
         if (++canvasX >= gPanel.panelW) { canvasX = 0; canvasY++; }
       }
@@ -1689,11 +1687,7 @@ static void handleApiCanvasRectRaw() {
         if (rectCarryN < rectBpp) continue;
         rectCarryN = 0;
         uint8_t r, g, b;
-        if (rectBpp == 3) { r = rectCarry[0]; g = rectCarry[1]; b = rectCarry[2]; }
-        else { uint16_t v = ((uint16_t)rectCarry[0] << 8) | rectCarry[1];
-               r = (uint8_t)(((v >> 11) & 0x1F) << 3);
-               g = (uint8_t)(((v >> 5)  & 0x3F) << 2);
-               b = (uint8_t)((v & 0x1F) << 3); }
+        pxDecode(rectCarry, rectBpp, r, g, b);
         if (rectRow < rectH) panelPixel(rectX + rectCol, rectY + rectRow, r, g, b);   // panelPixel clamps
         if (++rectCol >= rectW) { rectCol = 0; rectRow++; }
       }
@@ -1887,6 +1881,12 @@ void webInit() {
   server.on("/ota",                  HTTP_GET,     handleOTAPage);
   server.on("/api/ota/upload",       HTTP_POST,    sendOTAUploadResult, handleOTAUpload);
   server.on("/api/log",              HTTP_GET,     handleApiMessages);
+  server.on("/api/bus/send",         HTTP_POST,    handleApiSend);
+  server.on("/api/bus/send",         HTTP_OPTIONS, handleOptions);
+  server.on("/api/bus/batch",        HTTP_POST,    handleApiSendBatch);
+  server.on("/api/bus/batch",        HTTP_OPTIONS, handleOptions);
+  // Compatibility aliases: the companion app (splitflap-os side is frozen) still
+  // POSTs to the physical gateway's /api/rs485/* paths. Same handlers.
   server.on("/api/rs485/send",       HTTP_POST,    handleApiSend);
   server.on("/api/rs485/send",       HTTP_OPTIONS, handleOptions);
   server.on("/api/rs485/batch",      HTTP_POST,    handleApiSendBatch);

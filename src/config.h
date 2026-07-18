@@ -17,10 +17,6 @@ struct GwConfig {
   char          mqttUser[64];
   char          mqttPass[64];
   char          mqttPrefix[32];
-  // The emulated bus has no transceiver and no wire, so these four are inert.
-  // They are kept because the Settings page, the REST surface and the companion
-  // app all still carry them, and so a config from a real Split-Flap Gateway
-  // round-trips unchanged. Nothing reads them.
   char          posixTZ[64];   // POSIX TZ string e.g. "EST5EDT,M3.2.0,M11.1.0"
   char          ntpServer[64]; // NTP server hostname (default pool.ntp.org)
   bool          serialDebug;   // enable verbose serial output
@@ -45,7 +41,7 @@ struct GwConfig {
   // ---- HUB75 panel (Matrix Portal Gateway) ----
   // The driver takes its geometry and bit depth at construction, so the first three
   // only take effect on reboot. panelBright, flapMs and flapMax are live.
-  uint16_t      panelW;        // total chain width in px (64 / 128)
+  uint16_t      panelW;        // total chain width in px (32..256, multiple of 32)
   uint16_t      panelH;        // panel height in px (16 / 32 / 64)
   uint8_t       panelBitDepth; // bitplanes, 1..8 (RAM and refresh rate scale with it)
   bool          panelBGR;      // panel wired BGR, not RGB: swap red and blue on output

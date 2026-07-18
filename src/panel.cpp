@@ -24,10 +24,11 @@
 // ---------
 // For each row pair r and bitplane p there is one BLOCK of (width + TAIL) words:
 //
-//   body[0 .. width-1]  shift row r's plane-p pixels.  ADDR = r-1, because the panel is
-//                       still DISPLAYING the row latched at the end of the previous
-//                       block. OE is low for the first `onClocks` words -- that is the
-//                       brightness, and it costs no colour levels.
+//   body[0 .. width-1]  shift row r's plane-p pixels.  ADDR = the previously latched
+//                       row -- r-1 for each row's plane-0 block, r for the plane>=1
+//                       repeats (see writeControlBits) -- because the panel is still
+//                       DISPLAYING that row. OE is low for the first `onClocks` words
+//                       -- that is the brightness, and it costs no colour levels.
 //   tail[0 .. TAIL-1]   OE high (blanked), ADDR = r, and a LAT pulse in the middle so
 //                       row r's data moves into the output register while it is dark.
 //
@@ -38,7 +39,8 @@
 //
 // TUNING
 // ------
-// Verified on a 128x32 chain (two 64x32 panels) at depth 4, 315 Hz. If you change the
+// Verified on a 128x32 chain (two 64x32 panels) at depth 4, ~157 Hz at the current
+// 5 MHz LCD_CLK_HZ (the WiFi-coexistence cap below). If you change the
 // panel, two constants below are where reality bites, in order:
 //   1. TAIL_WORDS -- the blanking window, vs the panel's latch setup/hold.
 //   2. LCD_CLK_HZ -- drop it if the far end of a long chain ghosts.
@@ -359,8 +361,8 @@ bool panelBegin(uint16_t width, uint16_t height, uint8_t depth) {
     panelFreeAll(); return false;
   }
   gdma_connect(dma_chan, GDMA_MAKE_TRIGGER(GDMA_TRIG_PERIPH_LCD, 0));
-  // auto_update_desc: the engine follows desc->next by itself. That is the whole point --
-  // it is what lets the chain run forever with no interrupt.
+  // Link-following is inherent to GDMA linked-list mode -- that is what lets the
+  // chain run forever with no interrupt. These two flags are something else:
   // owner_check off (the chain never hands ownership back) and auto_update_desc off
   // (the engine must not write into descriptors we are about to re-point on a swap).
   gdma_strategy_config_t sc = {.owner_check = false, .auto_update_desc = false};
@@ -505,7 +507,8 @@ void panelShow() {
 
   // GDMA may still be reading the buffer we just handed back to the CPU, for up to one
   // pass of the chain. Yield rather than spin: this runs on taskDisplay, on the same
-  // core as the network stack, and a 3 ms busy-wait 33 times a second is 10% of it.
+  // core as the network stack, and busy-waiting a ~6 ms frame up to 50 times a second
+  // would eat a third of the core.
   if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
     vTaskDelay(pdMS_TO_TICKS(frameUs / 1000 + 1));
   else

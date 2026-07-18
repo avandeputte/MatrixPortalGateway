@@ -1,8 +1,7 @@
-// charset.h -- UTF-8 <-> flap-byte transcoding for the configurable flap set.
+// charset.h -- UTF-8 <-> flap-byte transcoding for the flap reel.
 //
 // The split-flap protocol carries exactly ONE byte per displayed character (the
-// `-<char>` command and the configurable flap set are byte arrays in the module
-// firmware). Browsers and JSON, however, speak UTF-8, where a euro sign is 3
+// `-<char>` command is a byte, and the reel's glyph section is a byte array). Browsers and JSON, however, speak UTF-8, where a euro sign is 3
 // bytes and accented letters are 2. To let people use euro signs and accented
 // characters on the flaps, the gateway bridges the two: it maps each UTF-8 code
 // point to a single flap byte on the way to the bus, and maps each stored flap
@@ -21,10 +20,10 @@
 // the C0/C1 control ranges. That leaves 216 printable glyphs -- exactly the
 // character part of a virtual reel.
 //
-// 0xFF (y-diaeresis) IS a flap byte here, unlike on the RS-485 gateway. The real
+// 0xFF (y-diaeresis) IS a flap byte here, unlike on the physical gateway. The real
 // module firmware reserves 0xFF as its "unused flap" EEPROM sentinel and so can
-// never show that glyph; the virtual modules keep an explicit flap-set length
-// instead (see vmodule.h) and carry it like any other character.
+// never show that glyph; the virtual reel has a fixed, known length (reel.h)
+// and carries it like any other character.
 
 #ifndef SFGW_CHARSET_H
 #define SFGW_CHARSET_H

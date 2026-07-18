@@ -117,7 +117,7 @@ void setup() {
   dispMarkDirty();
 
   // 7. The emulated bus
-  rs485Begin();
+  busBegin();
   vbusBegin();
 
   // 8. WiFi -- MUST be initialised here, on the main Arduino task.
@@ -155,10 +155,10 @@ void setup() {
   webInit();
 
   // 10. Tasks. Display sits on core 1 with the network stack, leaving core 0 for
-  //    the bus, the web server and the clock -- the same split the RS-485
+  //    the bus, the web server and the clock -- the same split the physical
   //    gateway uses, with the panel taking the slot the OTA task shares.
   xTaskCreatePinnedToCore(taskRTC,     "RTC",     2048, NULL, 2, &hTaskRTC,   0);
-  xTaskCreatePinnedToCore(taskRS485,   "Bus",     6144, NULL, 3, &hTaskRS485, 0);
+  xTaskCreatePinnedToCore(taskBus,     "Bus",     6144, NULL, 3, &hTaskBus,   0);
   xTaskCreatePinnedToCore(taskOTA,     "OTA",     4096, NULL, 1, &hTaskOTA,   1);
   xTaskCreatePinnedToCore(taskWeb,     "Web",     8192, NULL, 2, &hTaskWeb,   0);
   xTaskCreatePinnedToCore(taskNetwork, "Network", 8192, NULL, 1, &hTaskNet,   1);
@@ -191,12 +191,12 @@ void loop() {
     // Heap + min-ever heap + largest free block
     // (fragmentation: a big gap between freeHeap and maxAlloc is a common
     // pre-crash signature). Per-task stack high-water marks catch the
-    // canary-overflow class before it fires. rx/tx/reject/drop counters surface
+    // canary-overflow class before it fires. rx/tx/drop counters surface
     // bus health.
     unsigned freeHeap = (unsigned)ESP.getFreeHeap();
     unsigned minHeap  = (unsigned)ESP.getMinFreeHeap();
     unsigned maxBlk   = ESP.getMaxAllocHeap();
-    unsigned sBus = hTaskRS485 ? uxTaskGetStackHighWaterMark(hTaskRS485) : 0;
+    unsigned sBus = hTaskBus   ? uxTaskGetStackHighWaterMark(hTaskBus)   : 0;
     unsigned sWeb = hTaskWeb   ? uxTaskGetStackHighWaterMark(hTaskWeb)   : 0;
     unsigned sNet = hTaskNet   ? uxTaskGetStackHighWaterMark(hTaskNet)   : 0;
     unsigned sOta = hTaskOTA   ? uxTaskGetStackHighWaterMark(hTaskOTA)   : 0;
@@ -224,7 +224,7 @@ void loop() {
       // A heartbeat in the future (wdg > now) can only come from transient boot
       // skew -- treat it as healthy rather than letting the unsigned subtraction
       // underflow into a 49-day "stall".
-      bool okBus  = (wdgRS485Ms == 0 || wdgRS485Ms > now || now - wdgRS485Ms < 30000UL);
+      bool okBus  = (wdgBusMs == 0 || wdgBusMs > now || now - wdgBusMs < 30000UL);
       bool okWeb  = (wdgWebMs   == 0 || wdgWebMs   > now || now - wdgWebMs  < 120000UL);
       bool okNet  = (wdgNetMs   == 0 || wdgNetMs   > now || now - wdgNetMs  < 30000UL);
       bool okDisp = (wdgDispMs  == 0 || wdgDispMs  > now || now - wdgDispMs < 30000UL);

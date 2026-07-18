@@ -9,8 +9,8 @@
 
 #include "common.h"
 
-// FATFS mounted? Set by sfFsInit(). The filesystem now holds only the reels' persisted
-// state (/vmods.dat) and the companion's settings blob (/compset.gz).
+// FATFS mounted? Set by sfFsInit(). The filesystem now holds only the
+// companion's settings blob (/compset.gz).
 extern bool sfFsReady;
 
 void sfFsInit(bool forceFormat = false);
@@ -18,7 +18,7 @@ void sfFsInit(bool forceFormat = false);
 void sfSendChar(int addr, char c);       // legacy path: one CP1252 byte, folds lowercase
 void sfSendIndex(int addr, int idx);     // by flap index: exact, reaches every flap
 void sfHome(int addr);                   // flap 0 -- blank
-void sfSendText(int startAddr, const char* text, bool blankUnused);
+void sfSendText(int startAddr, const char* text);
 void sfSetQuietTime(bool on);
 
 #endif // SFGW_MODULES_H

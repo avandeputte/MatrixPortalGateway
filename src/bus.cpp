@@ -1,20 +1,18 @@
 #include "gateway.h"
-#include "vmodule.h"   // vmFlapCharAt: an index-addressed frame still has to track the wall
+#include "vmodule.h"   // vmFlapIndexOf: Quiet Time resolves captured frames to flap indices
 
-
-
-// rs485.cpp -- the bus layer.
-// Owns the single send choke point (rs485Send: strips/re-frames every outbound
-// command, enforces the bus-quiet guard and Quiet Time, and logs to the monitor
-// ring) and the PSRAM-backed diagnostic ring buffer the web Bus Monitor reads.
-// Frame-classification helpers here are file-private. rs485Send is serialized by
+// bus.cpp -- the protocol layer.
+// Owns the single send choke point (busSend: strips/re-frames every outbound
+// command, enforces the bus-quiet guard and Quiet Time, and mirrors the frame
+// to MQTT) and the PSRAM-backed command log the web Monitor reads.
+// Frame-classification helpers here are file-private. busSend is serialized by
 // txMutex across tasks.
 //
-// The only thing that changed from the RS-485 gateway is the last few inches:
-// where it wrote bytes to a UART, this hands them to vbusDeliver() and the
-// virtual modules parse them. Everything above -- framing, sanitization, the
-// display tracking, the monitor ring, the MQTT mirror -- is untouched, which is
-// exactly why the gateway above it cannot tell.
+// The wire protocol is unchanged from the physical RS-485 gateway -- framing,
+// sanitization, the MQTT mirror are all identical, which is exactly why the
+// companion app cannot tell. The only difference is the last few inches: where
+// the physical gateway wrote bytes to a UART, this hands them to vbusDeliver()
+// and the virtual modules parse them.
 // ---- file-private forward declarations ----
 static bool sfFrameIsDisplayMotion(const uint8_t* data, size_t len);
 static bool sfIsDirectVersionQuery(const uint8_t* data, size_t len);
@@ -51,9 +49,9 @@ void psramAllocInit() {
 }
 
 // Enqueue one frame for paced delivery at dueMs. SPSC ring: taskWeb is the only
-// producer, taskRS485 the only consumer, guarded by txQMutex (never held across the
-// actual rs485Send, which takes txMutex -- lock order txMutex is never nested under it).
-bool rs485SendScheduled(const uint8_t* data, size_t len, uint32_t dueMs) {
+// producer, taskBus the only consumer, guarded by txQMutex (never held across the
+// actual busSend, which takes txMutex -- lock order txMutex is never nested under it).
+bool busSendScheduled(const uint8_t* data, size_t len, uint32_t dueMs) {
   if (!txQueue || !txQMutex) return false;
   if (len == 0 || len > TXQ_FRAME_MAX) return false;   // too long -> caller sends inline
   bool ok = false;
@@ -72,9 +70,9 @@ bool rs485SendScheduled(const uint8_t* data, size_t len, uint32_t dueMs) {
 
 // Drain every frame whose due time has arrived, oldest first. Due times within a batch
 // are monotonic, so checking the tail is enough. The frame is copied out UNDER the lock
-// and sent AFTER releasing it: rs485Send takes txMutex, and holding txQMutex across it
+// and sent AFTER releasing it: busSend takes txMutex, and holding txQMutex across it
 // would stall the producer (taskWeb) for the whole send.
-void rs485PollScheduled(uint32_t now) {
+void busPollScheduled(uint32_t now) {
   if (!txQueue || !txQMutex) return;
   for (;;) {
     uint8_t buf[TXQ_FRAME_MAX];
@@ -87,7 +85,7 @@ void rs485PollScheduled(uint32_t now) {
     }
     xSemaphoreGive(txQMutex);
     if (!len) return;                                    // nothing due
-    rs485Send(buf, len, false);
+    busSend(buf, len, false);
   }
 }
 
@@ -125,7 +123,7 @@ void logDrainTo(void (*sink)(const char* frag)) {
   int i = logPollCursor;
   while (i != head) {
     const GwLogEntry& e = logRing[i];
-    // Render through the shared helper, exactly as the monitor ring does upstream.
+    // Render through the shared helper, exactly as the MQTT mirror does.
     // The hand-rolled loop this replaces escaped only " and \ -- but a logged frame
     // carries its terminator ("send m00-A\n"), and a RAW NEWLINE inside a JSON string
     // is invalid JSON. The browser's r.json() therefore threw on any poll that caught
@@ -143,11 +141,10 @@ void logDrainTo(void (*sink)(const char* frag)) {
   sink("]");
   logPollCursor = head;
 }
-// The emulated bus has no UART to configure. Kept as the same call site the boot
-// sequence and the /api/config/rs485 handler already make, so the baud/parity
-// settings continue to round-trip through the UI even though nothing reads them.
-void rs485Begin() {
-  DBG("[BUS] emulated bus -- there is no UART, and no serial parameters to set\n");
+// The emulated bus needs no bring-up: there is no UART and no transceiver. Kept as
+// a boot-log marker at the same call site the physical gateway's serial init had.
+void busBegin() {
+  DBG("[BUS] emulated bus -- frames are delivered in-process to the virtual modules\n");
 }
 
 
@@ -176,9 +173,9 @@ static char sfFrameCmd(const uint8_t* data, size_t len, int* outAddr) {
 }
 
 // True if the frame is normal display motion that Quiet Time should suppress:
-// show character ('-'), show index ('+'), or home ('h'). Deliberate calibration
-// moves (calibrate 'c', goto 'g', nudge 's') are intentionally NOT suppressed,
-// since they only originate from an operator actively calibrating.
+// show character ('-'), show index ('+'), or home ('h'). The queries ('v', 'A')
+// pass -- they move nothing -- and anything else is ignored by the modules
+// anyway, so there is no motion to suppress.
 static bool sfFrameIsDisplayMotion(const uint8_t* data, size_t len) {
   int addr;
   char cmd = sfFrameCmd(data, len, &addr);
@@ -259,10 +256,12 @@ static bool sfIsDirectVersionQuery(const uint8_t* data, size_t len) {
 // Bytes beyond that are extraneous and the caller may trim them -- so "m4vDSassa"
 // collapses to "m4v" instead of leaning on the module to ignore the junk. This is
 // grammar ENFORCEMENT, not guessing: each command's payload shape is fixed by the
-// (frozen) protocol. Frames we can't model confidently -- by-serial "mX.." frames
-// and any unrecognized command char -- return the full length UNCHANGED, so a
-// long restore map or a future command is never truncated. The raw-send bypass
-// skips this entirely.
+// (frozen) protocol. Only the commands this product actually speaks are modelled
+// ('-', '+', 'h', 'v', 'A' -- what the companion, the web UI and MQTT emit); the
+// physical gateway's calibration/dump family is not, so those frames -- like
+// by-serial "mX.." frames and any unrecognized command char -- return the full
+// length UNCHANGED and reach the modules untrimmed, which ignore them. The
+// raw-send bypass skips this entirely.
 static size_t sfKnownCommandLen(const uint8_t* data, size_t len) {
   if (len < 2 || data[0] != 'm') return len;        // not an m-frame: leave as-is
   if (data[1] == 'X') return len;                   // by-serial frame: pass through untouched
@@ -282,8 +281,8 @@ static size_t sfKnownCommandLen(const uint8_t* data, size_t len) {
   char cmd = (char)data[i];
   i++;                                                // consume the command char
   switch (cmd) {
-    // Zero-payload commands: complete the instant the command char is read.
-    case 'h': case 'c': case 'd':
+    // Home: zero payload, complete the instant the command char is read.
+    case 'h':
       return i;                                       // trim anything after
     // Version query and combined all-fields dump ('A', v25+): zero-payload when
     // addressed by a numeric id, but a wildcard broadcast may carry an optional
@@ -294,29 +293,18 @@ static size_t sfKnownCommandLen(const uint8_t* data, size_t len) {
     case '-':
       if (i < len) i++;
       return i;
-    // Numeric-payload commands: keep the leading run of digits.
-    case '+': case 'o': case 't': case 's':
-    case 'g': case 'a': case 'i': {
+    // Show flap index: keep the leading run of digits.
+    case '+': {
       size_t d = i;
       while (d < len && data[d] >= '0' && data[d] <= '9') d++;
       return (d == i) ? len : d;                      // no digits where expected: leave as-is
-    }
-    // Write calibrated position "<index>:<pos>" -- two numeric fields.
-    case 'w': {
-      size_t d = i;
-      while (d < len && data[d] >= '0' && data[d] <= '9') d++;        // index
-      if (d == i || d >= len || data[d] != ':') return len;          // malformed: leave as-is
-      d++;                                                            // ':'
-      size_t p = d;
-      while (d < len && data[d] >= '0' && data[d] <= '9') d++;        // position
-      return (d == p) ? len : d;                                      // no position digits: leave
     }
     default:
       return len;                                     // unknown command: pass through
   }
 }
 
-void rs485Send(const uint8_t* data, size_t len, bool raw) {
+void busSend(const uint8_t* data, size_t len, bool raw) {
   if (!len || len > TX_MAX_BYTES) return;
 
   // --- Wire framing + sanitization (single choke point for every send path) --
@@ -331,13 +319,12 @@ void rs485Send(const uint8_t* data, size_t len, bool raw) {
   //      "m1vJUNK" all leave as bare "m1v", while "m5-A" and "m9o2832" leave
   //      correctly newline-terminated (which also spares payload commands the
   //      module's 50 ms idle-timeout wait).
-  // Raw path (raw==true -- the Bus Monitor "Raw" toggle, or {"raw":true} on the
+  // Raw path (raw==true -- the Monitor "Raw" toggle, or {"raw":true} on the
   // REST/MQTT send): transmit the caller's exact bytes verbatim, with no trim and
-  // no terminator change -- a deliberate debugging escape hatch. Bus-collision
-  // guarding, Quiet Time, tracking, logging, and the monitor ring still apply.
+  // no terminator change -- a deliberate debugging escape hatch. The bus-quiet
+  // guard, Quiet Time, tracking, and the MQTT mirror still apply.
   size_t bare;
   bool   appendNL;
-  bool   sanitized = false;     // true if sfKnownCommandLen trimmed trailing junk
   if (raw) {
     bare     = len;     // verbatim -- no stripping, no sanitizing
     appendNL = false;   // no terminator added
@@ -345,16 +332,14 @@ void rs485Send(const uint8_t* data, size_t len, bool raw) {
     bare = len;
     while (bare > 0 && (data[bare-1] == '\n' || data[bare-1] == '\r')) bare--;
     if (!bare) return;                                  // nothing but terminators
-    size_t preSan = bare;
     bare      = sfKnownCommandLen(data, bare);          // trim trailing junk
-    sanitized = (bare < preSan);                        // bytes past a complete command were dropped
     appendNL  = !sfIsDirectVersionQuery(data, bare);    // version query => ship bare
   }
   if (!bare) return;
 
   // Quiet Time: swallow normal display-motion frames so the flaps stay still.
   // The request is acknowledged (we return as if sent) and the desired display
-  // is remembered for resync; nothing reaches the bus and tracking is unchanged.
+  // is remembered for resync; nothing reaches the modules and tracking is unchanged.
   if (gQuietTime && sfFrameIsDisplayMotion(data, bare)) {
     sfQuietCapturePending(data, bare);
     DBG("[QUIET] suppressed display frame (%u bytes)\n", (unsigned)bare);
@@ -363,18 +348,18 @@ void rs485Send(const uint8_t* data, size_t len, bool raw) {
   // Bus-quiet guard: if modules are
   // mid-response (the reply train after a broadcast m*v), hold off until the bus
   // has been quiet for TX_BUS_GUARD_MS, bounded by TX_BUS_WAIT_CAP_MS so we
-  // always make progress. On the emulated bus this can no longer corrupt a frame
+  // always make progress. On the emulated bus this cannot corrupt a frame
   // -- replies are queued, not clocked out -- but it keeps command and reply
-  // frames from interleaving in the monitor, and it keeps this path identical to
-  // the one the RS-485 gateway runs.
+  // frames from interleaving in the MQTT mirror, and it keeps this path identical
+  // to the one the physical gateway runs.
   //
-  // From here through the monitor-ring push is the critical section: a static scratch
-  // buffer, txCount, vbusDeliver's writes to the module array, and the ring push.
-  // txMutex serializes it across taskWeb / taskNetwork / taskRS485 so two senders
-  // cannot interleave. There are no early returns inside, so the mutex is always
+  // From here through mqttPublishMsg is the critical section: a static scratch
+  // buffer, txCount, and vbusDeliver's writes to the module array. txMutex
+  // serializes it across taskWeb / taskNetwork / taskBus so two senders cannot
+  // interleave. There are no early returns inside, so the mutex is always
   // released. Lock order is txMutex -> {msgMutex, vmMutex}, never inverted: nothing takes
   // txMutex while holding either of those. vbusDeliver takes vmMutex from in here, which is
-  // exactly why no caller may hold vmMutex across rs485Send.
+  // exactly why no caller may hold vmMutex across busSend.
   if (txMutex) xSemaphoreTake(txMutex, portMAX_DELAY);
   {
     unsigned long waitStart = millis();
@@ -385,38 +370,28 @@ void rs485Send(const uint8_t* data, size_t len, bool raw) {
   }
   // Deliver the finished frame to the virtual modules. They strip any trailing
   // terminator themselves, so `bare` is handed over as-is and `appendNL` only
-  // affects what the monitor ring records as the on-wire bytes.
+  // affects what the MQTT mirror records as the on-wire bytes.
   vbusDeliver(data, bare);
   txCount = txCount + 1;
-  // Update per-module display tracking from this frame. Doing it here -- the
-  // single point every outbound frame passes through -- means raw sends are
-  // tracked exactly like the high-level helpers, with no per-path duplication.
   gDisplayDirty = true;   // HA display sensor refresh (network task, rate-limited)
-  // Log the transmitted frame (the command without a trailing terminator, for
-  // readability -- the raw path may carry one). The monitor ring below keeps the
-  // No [TX] serial line. There is no wire, so 'transmitting' a frame is just a call into
-  // vbusDeliver -- and one REST batch would spray 45 of them past the log. The command
-  // that produced them is printed once, by logCommand().
-  RS485Msg m;
+  // Mirror the frame to MQTT (<prefix>/tx) -- that surface is about the wire
+  // format, which the companion app really does speak. It does NOT go to the web
+  // Monitor: 45 identical 'm00-' rows per page are noise, and there is no wire
+  // for them to be "transmitted" on. The command that produced them is logged
+  // once, by logCommand().
+  BusMsg m;
   m.timestamp = millis();
   m.dir = 'T';
-  m.origin = 0;
-  m.sanitized = sanitized;
-  // The frame still goes to the MQTT protocol mirror (<prefix>/tx) -- that surface is
-  // about the wire format, which the companion app really does speak. It does NOT go to
-  // the web Monitor: 45 identical 'm00-' rows per page are noise, and there is no bus
-  // for them to be "transmitted" on. The Monitor logs the command that produced them.
   size_t ringLen = (bare > MSG_MAX_BYTES) ? MSG_MAX_BYTES : bare;
   memcpy(m.data, data, ringLen);
   if (appendNL && ringLen < MSG_MAX_BYTES) m.data[ringLen++] = '\n';
   m.len = ringLen;
   rtcFormatTime(m.wallTime, sizeof(m.wallTime));
-  m.epoch = rtcEpochNow();
   mqttPublishMsg(m);
   if (txMutex) xSemaphoreGive(txMutex);
 }
 
-// Send a null-terminated ASCII string on RS485
-void rs485SendStr(const char* s) {
-  rs485Send((const uint8_t*)s, strlen(s));
+// Send a null-terminated ASCII command string through busSend.
+void busSendStr(const char* s) {
+  busSend((const uint8_t*)s, strlen(s));
 }

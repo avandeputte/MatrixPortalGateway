@@ -61,7 +61,7 @@ void otaInit() {
 }
 
 // OTA runs in its own task so ArduinoOTA.handle() is called frequently
-// without blocking the web server or RS485 tasks.
+// without blocking the web server or bus tasks.
 void taskOTA(void* pv) {
   while (true) {
     if (WiFi.status() == WL_CONNECTED) {
@@ -77,8 +77,10 @@ void taskOTA(void* pv) {
 // ---------------------------------------------------------------------------
 void handleOTAPage() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
-  // Served as a standalone page at /ota so the upload iframe works cleanly
-  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+  // Served as a standalone page at /ota so the upload iframe works cleanly.
+  // A compile-time constant, streamed with send_P: the old code copied it into
+  // a heap String on every request for no benefit.
+  static const char html[] = "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<title>Firmware Update</title>"
     "<link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
@@ -123,7 +125,7 @@ void handleOTAPage() {
     "xhr.send(fd);"
     "}"
     "</script></body></html>";
-  server.send(200, "text/html", html);
+  server.send_P(200, "text/html", html);
 }
 
 // Bring the fallback SoftAP up or down, switching WiFi mode accordingly.
@@ -206,13 +208,13 @@ void handleOTAUpload() {
       otaUploadFailed = true;
       gOtaInProgress = false;
       otaRestoreWifi();
-      dispResume();      // upload failed: restart the refresh ISR and repaint
+      dispResume();      // upload failed: resume the panel refresh and repaint
       printf("[OTA] Begin failed (%s) -- aborting upload\n", Update.errorString());
     }
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     // handleClient() does not return during a multipart upload, so the web task
     // can't touch its watchdog from its loop -- feed it here on every chunk so a
-    // large/slow upload can't trip the 30s web-stall reboot.
+    // large/slow upload can't trip the 120 s web-stall reboot.
     wdgWebMs = millis();
     // Skip writing once we've failed, so we don't keep feeding a dead Update.
     if (!otaUploadFailed) {
@@ -227,7 +229,7 @@ void handleOTAUpload() {
       Update.abort();
       gOtaInProgress = false;
       otaRestoreWifi();
-      dispResume();      // upload failed: restart the refresh ISR and repaint
+      dispResume();      // upload failed: resume the panel refresh and repaint
       printf("[OTA] Upload ended in failed state -- image discarded\n");
       // Response is sent by the POST body handler (sendOTAUploadResult).
     } else if (Update.end(true)) {   // true = set the new image as bootable
@@ -238,7 +240,7 @@ void handleOTAUpload() {
       otaUploadFailed = true;
       gOtaInProgress = false;
       otaRestoreWifi();
-      dispResume();      // upload failed: restart the refresh ISR and repaint
+      dispResume();      // upload failed: resume the panel refresh and repaint
       printf("[OTA] Update.end failed (%s) -- incomplete or corrupt image\n",
              Update.errorString());
     }
@@ -247,7 +249,7 @@ void handleOTAUpload() {
     gOtaInProgress = false;
     Update.abort();
     otaRestoreWifi();
-    dispResume();      // upload aborted: restart the refresh ISR and repaint
+    dispResume();      // upload aborted: resume the panel refresh and repaint
     printf("[OTA] Upload aborted by client -- image discarded\n");
   }
 }

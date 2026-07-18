@@ -56,8 +56,9 @@ void panelCloneToBack();
 // bit depth (a true screenshot); brightness is not reflected. Read-only. out must hold W*H*(2 or 3).
 void panelReadback(uint8_t* out, bool rgb565);
 
-// Halt output. Used before writing flash: the instruction cache goes away on both cores
-// and a half-driven HUB75 latches garbage. panelResume() undoes it.
+// Halt output (dark panel). Used during OTA flash writes -- not because the GDMA
+// refresh needs the CPU (it does not), but for the panel-current and bus headroom
+// while the upload runs. panelResume() undoes it.
 void panelStop();
 void panelResume();
 

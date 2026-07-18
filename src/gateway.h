@@ -10,22 +10,21 @@
 //   rtc.*       wall-clock time: the ESP32's internal RTC + NTP
 //   charset.*   UTF-8 <-> Windows-1252 flap-byte transcoding
 //   font1252.*  GENERATED bitmap glyphs for the 216 printable CP1252 flaps
-//   rs485.*     bus framing, sanitization, TX choke point, monitor ring
-//   vbus.*      the emulated bus underneath rs485Send: delivery + reply queue
+//   bus.*       frame sanitization, TX choke point, command log
+//   vbus.*      the emulated bus underneath busSend: delivery + reply queue
 //   vmodule.*   the virtual split-flap modules: protocol, reel, persistence
 //   display.*   HUB75 panel geometry and the flap renderer
 //   panel.*     the HUB75 driver itself (LCD_CAM + GDMA)
-//   modules.*   split-flap module REGISTRY, protocol commands, reply parser,
-//               FATFS persistence  (the gateway's view of the modules)
+//   modules.*   high-level protocol send helpers (text/char/home) + FATFS mount
 //   mqtt.*      MQTT client, outbound publish queue, Home Assistant discovery
 //   web.*       HTTP server: dashboard page (web_ui.h) + REST API handlers
 //   ota.*       firmware update: ArduinoOTA + browser upload
 //   tasks.*     the FreeRTOS task loops (Bus / RTC / Web / Network / Display)
 //   main.cpp    setup() boot sequence + loop() watchdog supervisor
 //
-// Note the two "module" layers, which the RS-485 gateway also has: modules.* is
-// the gateway's REGISTRY of whatever answers on the bus, and it is unchanged from
-// upstream. vmodule.* is what answers. They talk only through protocol frames.
+// Note the two "module" layers: modules.* is the gateway side (it builds and
+// sends protocol frames), vmodule.* is what answers them. They talk only through
+// protocol frames -- the same seam the physical gateway has with real modules.
 
 #ifndef MPGW_GATEWAY_H
 #define MPGW_GATEWAY_H
@@ -35,7 +34,7 @@
 #include "charset.h"
 #include "font1252.h"
 #include "rtc.h"
-#include "rs485.h"
+#include "bus.h"
 #include "vbus.h"
 #include "vmodule.h"
 #include "display.h"

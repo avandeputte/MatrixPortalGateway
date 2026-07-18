@@ -32,7 +32,7 @@ static void mqttEnqueue(const char* topic, const char* payload, size_t len) {
   xSemaphoreGive(mqttQMutex);
 }
 
-void mqttPublishMsg(const RS485Msg& m) {
+void mqttPublishMsg(const BusMsg& m) {
   if (!mqtt.connected()) return;
   // Build the JSON with snprintf + a direct transcode -- no JsonDocument heap
   // allocation in this hot path. One worst-case buffer holds the whole message
@@ -40,7 +40,7 @@ void mqttPublishMsg(const RS485Msg& m) {
   // is at most MSG_MAX_BYTES*3 (every flap byte -> a 3-byte UTF-8 glyph), and
   // the "} suffix is 2 -- all inside MSG_MAX_BYTES*3 + 80. A single buffer (vs a
   // separate transcode scratch) keeps stack use modest: mqttPublishMsg runs on
-  // taskRS485 and taskNetwork, both of which have only a 6KB stack.
+  // taskBus (6 KB stack) and taskNetwork (8 KB).
   char buf[MSG_MAX_BYTES * 3 + 80];
   int pre = snprintf(buf, sizeof(buf),
     "{\"ts\":%lu,\"wt\":\"%s\",\"command\":\"", m.timestamp, m.wallTime);
@@ -69,12 +69,12 @@ void mqttPublishStatus() {
   snprintf(ip, sizeof(ip), "%u.%u.%u.%u", lip[0], lip[1], lip[2], lip[3]);
   int rssi = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0;
   // Full diagnostic set -- mirrors the [WDG] heartbeat so Home Assistant can
-  // surface the same health signals (min heap, largest block, fragmentation,
-  // parse rejects, and per-task stack high-water marks).
+  // surface the same health signals (heap, min heap, largest block, and the
+  // per-task stack high-water marks).
   unsigned freeHeap = ESP.getFreeHeap();
   unsigned minHeap  = ESP.getMinFreeHeap();
   unsigned maxBlk   = ESP.getMaxAllocHeap();
-  unsigned s485 = hTaskRS485 ? uxTaskGetStackHighWaterMark(hTaskRS485) : 0;
+  unsigned sBus = hTaskBus   ? uxTaskGetStackHighWaterMark(hTaskBus)   : 0;
   unsigned sWeb = hTaskWeb   ? uxTaskGetStackHighWaterMark(hTaskWeb)   : 0;
   unsigned sNet = hTaskNet   ? uxTaskGetStackHighWaterMark(hTaskNet)   : 0;
   unsigned sOta = hTaskOTA   ? uxTaskGetStackHighWaterMark(hTaskOTA)   : 0;
@@ -85,13 +85,13 @@ void mqttPublishStatus() {
     "{\"uptime\":%lu,\"rx\":%lu,\"tx\":%lu,\"modules\":%d,"
     "\"time\":\"%s\",\"ntpSynced\":%s,\"heap\":%u,\"minheap\":%u,"
     "\"maxblk\":%u,\"psram\":%u,\"rssi\":%d,\"wifi\":%s,"
-    "\"stk485\":%u,\"stkweb\":%u,\"stknet\":%u,\"stkota\":%u,\"stkrtc\":%u,\"stkdisp\":%u,"
+    "\"stkbus\":%u,\"stkweb\":%u,\"stknet\":%u,\"stkota\":%u,\"stkrtc\":%u,\"stkdisp\":%u,"
     "\"ip\":\"%s\",\"url\":\"http://%s/\",\"version\":\"%s\","
     "\"maintenance\":%s,\"quiet\":%s}",
     millis()/1000, rxCount, txCount, vmCount,
     timeBuf, ntpSynced?"true":"false", freeHeap, minHeap,
     maxBlk, (unsigned)ESP.getFreePsram(), rssi, (WiFi.status()==WL_CONNECTED)?"true":"false",
-    s485, sWeb, sNet, sOta, sRtc, sDsp,
+    sBus, sWeb, sNet, sOta, sRtc, sDsp,
     ip, ip, FW_VERSION, gMaintenanceMode?"true":"false", gQuietTime?"true":"false");
   if (n >= sizeof(buf)) n = sizeof(buf) - 1;
   char _t[80];
@@ -119,7 +119,7 @@ bool mqttPublishDisplayState() {
   // If the lock can't be taken, DON'T publish: flap[] would still hold the previous snapshot
   // (or, on the first-ever call, all zeros -- flap index 0, i.e. a blank wall). Publishing that
   // reports a stale or blank display to Home Assistant as if it were current. vmMutex is
-  // contended by taskDisplay (dispRender snapshots every frame) and vmSave, so a bounded take
+  // contended by taskDisplay (dispRender snapshots every frame), so a bounded take
   // genuinely can time out. Returning false leaves gDisplayDirty set so the next tick retries.
   if (!vmMutex || xSemaphoreTake(vmMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
   for (int i = 0; i < cells; i++) flap[i] = vmods[i].curIndex;
@@ -169,7 +169,7 @@ void haPublishDiscovery(bool enable) {
   // Kept compact; HA merges the device block across entities by identifier.
   char dev[200];
   snprintf(dev, sizeof(dev),
-    "\"dev\":{\"ids\":[\"%s\"],\"name\":\"Matrix Portal Gateway\",\"mf\":\"Anthropic SFGW\",\"mdl\":\"MatrixPortal S3 + HUB75\",\"sw\":\"%s\"},"
+    "\"dev\":{\"ids\":[\"%s\"],\"name\":\"Matrix Portal Gateway\",\"mf\":\"Alex Van de Putte\",\"mdl\":\"MatrixPortal S3 + HUB75\",\"sw\":\"%s\"},"
     "\"avty_t\":\"%s/availability\"", node, FW_VERSION, pfx);
 
   // Helper macro-like lambda is not available; emit each entity inline.
@@ -201,7 +201,7 @@ void haPublishDiscovery(bool enable) {
   } else mqttEnqueue(topic, "", 0);
 
   // 4) Diagnostic sensors -- all read the <prefix>/status JSON via value_template.
-  //    Mirrors the [WDG] heartbeat: heap/min/maxblk/psram, the five
+  //    Mirrors the [WDG] heartbeat: heap/min/maxblk/psram, the six
   //    per-task stack high-water marks, plus connectivity and identity.
   struct DiagS { const char* obj; const char* name; const char* fld; const char* unit; const char* dc; const char* ic; };
   static const DiagS diags[] = {
@@ -214,7 +214,7 @@ void haPublishDiscovery(bool enable) {
     {"rx",      "Frames Received","rx",      NULL,  NULL,              "mdi:download-network"},
     {"tx",      "Frames Sent",    "tx",      NULL,  NULL,              "mdi:upload-network"},
     {"psram",   "Free PSRAM",     "psram",   "B",   NULL,              "mdi:memory"},
-    {"stk485",  "Stack RS485",    "stk485",  "B",   NULL,              "mdi:layers"},
+    {"stkbus",  "Stack Bus",      "stkbus",  "B",   NULL,              "mdi:layers"},
     {"stkweb",  "Stack Web",      "stkweb",  "B",   NULL,              "mdi:layers"},
     {"stknet",  "Stack Network",  "stknet",  "B",   NULL,              "mdi:layers"},
     {"stkota",  "Stack OTA",      "stkota",  "B",   NULL,              "mdi:layers"},
@@ -239,6 +239,12 @@ void haPublishDiscovery(bool enable) {
       mqttEnqueue(topic, pl, strlen(pl));
     } else mqttEnqueue(topic, "", 0);
   }
+
+  // v1.20: the bus task's stack sensor moved from object id "stk485" to "stkbus".
+  // Delete the old retained discovery config so a broker that saw earlier
+  // firmware does not keep a dead sensor around.
+  snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/stk485/config", node);
+  mqttEnqueue(topic, "", 0);
 
   printf("[HA] Discovery %s (node %s)\n", enable ? "published" : "removed", node);
 }
@@ -291,8 +297,8 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (length >= MQTT_BUF_SIZE) return;
   // static (not stack): mqttCallback is invoked only from mqtt.loop() in
   // taskNetwork (single caller, no reentrancy). Three ~768-byte stack buffers
-  // here plus the rs485Send/mqttPublishMsg call chain would push taskNetwork's
-  // 6KB stack toward overflow -- the same failure mode that crashed taskRS485.
+  // here plus the busSend/mqttPublishMsg call chain would push the task stack
+  // toward overflow -- the failure mode that once crashed the bus task.
   static char buf[MQTT_BUF_SIZE + 1];
   memcpy(buf, payload, length);
   buf[length] = 0;
@@ -314,7 +320,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     // The log line is bounded ON PURPOSE -- it is a monitor row, not the payload. Say so
     // with a precision rather than leaving the compiler to warn about a truncation we want.
     { char cd[LOG_TEXT_MAX]; snprintf(cd, sizeof(cd), "display %.*s", (int)sizeof(cd) - 12, buf); logCommand('M', cd); }
-    sfSendText(0, buf, false);
+    sfSendText(0, buf);
     mqttPublishDisplayState();
     return;
   }
@@ -345,7 +351,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
       memcpy(outBuf, d, outLen);
       // Bounded on purpose: a monitor row, not the payload.
       { char cd[LOG_TEXT_MAX]; snprintf(cd, sizeof(cd), "send %.*s", (int)sizeof(cd) - 8, d); logCommand('M', cd); }
-      rs485Send(outBuf, outLen, raw);
+      busSend(outBuf, outLen, raw);
     }
     return;
   }
@@ -362,7 +368,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (strlen(text) > 0) {
       int start = doc["start"] | id;
       { char cd[LOG_TEXT_MAX]; snprintf(cd, sizeof(cd), "text@%d %s", start, text); logCommand('M', cd); }
-      sfSendText(start, text, false);
+      sfSendText(start, text);
       return;
     }
     // Single char (UTF-8 -> one Windows-1252 byte for euro/accented glyphs)
