@@ -38,6 +38,15 @@ module registry. See **New in 1.10**.)
 
 ---
 
+## New in 1.23
+
+- **BREAKING: the frame-mirror and raw-send MQTT topics moved under `frames/`**, mirroring
+  the v1.22 REST rename: the wire mirror publishes on `<prefix>/frames/tx` and
+  `<prefix>/frames/rx` (was `<prefix>/tx` / `<prefix>/rx`), and raw frames are accepted on
+  `<prefix>/frames/send` (was `<prefix>/send`). The other topics (`flap/*`, `display/*`,
+  `quiet/*`, `status`, `availability`) are unchanged. Anything subscribed or publishing to
+  the old names — the MQTT serial bridge included — must follow.
+
 ## New in 1.22
 
 - **BREAKING: the send endpoints are `POST /api/frames/send` and `POST /api/frames/batch` —

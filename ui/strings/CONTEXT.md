@@ -131,7 +131,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Power-cycle the gateway to apply.` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()) |
 | `Protects ArduinoOTA (IDE/command-line) uploads. The web updater above is always accessible.` | Settings tab | HELP TEXT (a full sentence) |
 | `Protocol` | Status tab (diagnostics) | HEADING |
-| `Pub: .../rx   .../tx   .../status   .../display/state` | — | (built at runtime) |
+| `Pub: .../frames/rx   .../frames/tx   .../status   .../display/state` | — | (built at runtime) |
 | `QUIET TIME - the display is blanked and flaps will not move. It is restored when Quiet Time ends` | — | TEXT |
 | `Quiet Time Schedule` | Settings tab | HEADING (card title -- a noun phrase) |
 | `Reboot (power-cycle) to apply.` | Settings tab | EMPHASIS |
@@ -167,7 +167,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Stack Min (task)` | Status tab (diagnostics) | TEXT |
 | `Start Module ID` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Status` | — | TAB / LINK LABEL (a noun) |
-| `Sub: .../send   .../flap/set   .../flap/home   .../display/set   .../maintenance/set   .../quiet/set` | — | (built at runtime) |
+| `Sub: .../frames/send   .../flap/set   .../flap/home   .../display/set   .../quiet/set` | — | (built at runtime) |
 | `Sydney (UTC+10/+11)` | Settings tab | DROPDOWN OPTION |
 | `Synced` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
 | `System Health` | Status tab (diagnostics) | HEADING |

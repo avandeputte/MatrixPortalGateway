@@ -1,5 +1,19 @@
 # Matrix Portal Gateway — Release Notes
 
+## v1.23.0 — 2026-07-18
+
+### Breaking
+
+- **The MQTT frame topics moved under `frames/`**, completing the symmetry with the REST
+  rename: the wire mirror publishes on **`<prefix>/frames/tx`** and **`<prefix>/frames/rx`**
+  (was `<prefix>/tx` / `<prefix>/rx`), and raw protocol frames are accepted on
+  **`<prefix>/frames/send`** (was `<prefix>/send`). All other topics are unchanged
+  (`flap/set|home`, `display/set|state`, `quiet/set|state`, `status`, `availability`, HA
+  discovery). Clients on the old names — the MQTT serial bridge
+  (`sfgw_serial_bridge.py` publishes `<prefix>/send`, subscribes `<prefix>/rx`) — must be
+  updated. The dashboard's MQTT help text follows, and also drops the removed
+  `maintenance/set` it still listed.
+
 ## v1.22.0 — 2026-07-18
 
 The last of the bus. This product has no RS-485 transceiver and no bus of any kind, and

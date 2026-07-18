@@ -63,7 +63,7 @@ static void frameIngestByte(uint8_t c) {
   m.len = ringLen;
   memcpy(m.data, frameLineBuf, ringLen);
   rtcFormatTime(m.wallTime, sizeof(m.wallTime));
-  // Mirrored to MQTT (<prefix>/rx) but NOT to the web Monitor and NOT parsed:
+  // Mirrored to MQTT (<prefix>/frames/rx) but NOT to the web Monitor and NOT parsed:
   // these replies were synthesized by the virtual modules a microsecond ago, in
   // this same process. Echoing them as 'received' was theatre, and the module
   // registry the parse used to feed is gone. The MQTT wire mirror is the only

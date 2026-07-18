@@ -56,7 +56,7 @@ void mqttPublishMsg(const FrameMsg& m) {
   buf[n++] = '}';
   buf[n]   = '\0';
   char _t[80];
-  snprintf(_t, sizeof(_t), "%s/%s", cfg.mqttPrefix, m.dir=='R'?"rx":"tx");
+  snprintf(_t, sizeof(_t), "%s/frames/%s", cfg.mqttPrefix, m.dir=='R'?"rx":"tx");
   mqttEnqueue(_t, buf, n);
 }
 
@@ -284,7 +284,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   // Compare topic using char* to avoid heap String allocation on every message
   char sendTopic[80], setTopic[80], homeTopic[80];
-  snprintf(sendTopic, sizeof(sendTopic), "%s/send",           cfg.mqttPrefix);
+  snprintf(sendTopic, sizeof(sendTopic), "%s/frames/send",    cfg.mqttPrefix);
   snprintf(setTopic,  sizeof(setTopic),  "%s/flap/set",       cfg.mqttPrefix);
   snprintf(homeTopic, sizeof(homeTopic), "%s/flap/home",      cfg.mqttPrefix);
   char dispTopic[80];
@@ -415,7 +415,7 @@ void mqttConnect() {
     mqtt.publish(availT, "online", true);
     // Use char arrays not String to avoid heap fragmentation
     char t[80];
-    snprintf(t,sizeof(t),"%s/send",           cfg.mqttPrefix); mqtt.subscribe(t);
+    snprintf(t,sizeof(t),"%s/frames/send",    cfg.mqttPrefix); mqtt.subscribe(t);
     snprintf(t,sizeof(t),"%s/flap/set",       cfg.mqttPrefix); mqtt.subscribe(t);
     snprintf(t,sizeof(t),"%s/flap/home",      cfg.mqttPrefix); mqtt.subscribe(t);
     snprintf(t,sizeof(t),"%s/display/set",    cfg.mqttPrefix); mqtt.subscribe(t);

@@ -367,7 +367,7 @@ void frameSend(const uint8_t* data, size_t len, bool raw) {
   vlinkDeliver(data, bare);
   txCount = txCount + 1;
   gDisplayDirty = true;   // HA display sensor refresh (network task, rate-limited)
-  // Mirror the frame to MQTT (<prefix>/tx) -- that surface is about the wire
+  // Mirror the frame to MQTT (<prefix>/frames/tx) -- that surface is about the wire
   // format, which the companion app really does speak. It does NOT go to the web
   // Monitor: 45 identical 'm00-' rows per page are noise, and there is no wire
   // for them to be "transmitted" on. The command that produced them is logged
