@@ -15,23 +15,28 @@ settings blob are all inherited verbatim and are still true.
 The single most important structural decision. `frameSend()` (`src/frames.*` — the physical
 gateway's send choke point, renamed because there is no serial transceiver here) — which strips
 terminators, trims anything past a complete well-formed command, re-frames, enforces Quiet
-Time and mirrors to MQTT — is otherwise untouched. Its last three lines call `vlinkDeliver()`
-instead of writing the frame to a UART.
+Time and mirrors to MQTT — is otherwise untouched. Where the physical gateway wrote the
+finished bytes to a UART, it hands them to `vmDispatch()`.
 
-Everything above that line is the gateway, unmodified. Everything below is new. The virtual
-modules receive the same bytes a real module would have received, and reply with frames that go
-back up through the *same* byte accumulator the UART fed (`taskFrames`) and out through the same
-MQTT wire mirror, `mqttPublishMsg`.
+That is the whole seam, and since v1.24 it is **one-way**: sanitize under `txMutex`, dispatch
+under `vmMutex`, and nothing comes back. The virtual modules receive the same bytes a real
+module would have received and act on the display commands (`-`, `+`, `h`); everything else in
+the grammar is silently ignored, and nothing ever replies. (Through v1.23 the modules also
+answered the `v`/`A` queries through a reply pipeline, `src/vlink.*`, that fed the same byte
+accumulator the UART once fed. Nothing consumed those replies — every value in them was a
+compile-time constant, and clients read the wall through `/api/display/state`,
+`/api/flap/modules` and `/api/capabilities` — so v1.24 deleted the queries, the pipeline and
+the accumulator; `taskFrames` now only drains the scheduled-batch ring.)
 
 The alternative — short-circuiting at the API layer, so `POST /api/flap/char` directly sets a
 cell — would have been a tenth of the code and would have tested nothing. The gateway's framing,
-sanitization, collision guard and staggered-broadcast handling would all have
-become dead code, and the first real firmware change upstream would
-have silently diverged. Emulating at the protocol level keeps every one of those paths live.
+sanitization and Quiet Time enforcement would all have become dead code, and the first real
+firmware change upstream would have silently diverged. Emulating at the protocol level keeps
+every one of those paths live.
 
 It also means the two "module" layers of the original survive intact and never touch each other
 directly: `modules.*` is the gateway's side of the module protocol; `vmodule.*` is
-what answers. They communicate only in ASCII frames.
+what acts on it. They communicate only in ASCII frames.
 
 ## Why the mechanism is not emulated
 
@@ -42,27 +47,16 @@ simulated calibration would converge on the constant we seeded it with.
 
 So the calibration, diagnostics, provisioning and backup commands are ignored rather than
 faked — the sanitizer passes them through untrimmed, `vmDispatch()` has no case for them, and
-they draw no reply — and the surviving `A` reply always reports the nominal values with an
-**empty flap map**. Reading back what you wrote would have meant storing it, and storing it
-would have meant a 64-entry `uint16_t` map per module.
+nothing replies. (The last synthesized answers — the `v` version reply with its fabricated
+`FA5E…` serial and the `A` reply with its nominal `homeOffset`/`totalSteps` and empty flap
+map — went with the queries in v1.24. They only ever reported constants, and a `VModule` is
+now ~16 bytes: an id and its runtime flip state.)
 
-Even with the empty map, the frames are what size the buffers:
-
-| | physical gateway (64 flaps, real map) | here (237 flaps, empty map) |
-|---|---|---|
-| worst-case `A` reply | ~570 B | **~225 B** |
-| `TX_MAX_BYTES` | 768 | **512** |
-| `MSG_MAX_BYTES` | 256 | **320** |
-| `MQTT_BUF_SIZE` | 1024 | **1280** |
-
-The `A` reply carries no flap map but does carry the 163-byte legacy `flapChars` tail (below),
-which dominates its ~225 B worst case — `tools/reel_test.cpp` measures it. A real module's is
-~570 B because it also serialises the 64-entry position map. `TX_MAX_BYTES` (512) is
-kept generous for raw frame sends, and `MSG_MAX_BYTES` (320) is large enough that a whole `A`
-reply lands in one `FrameMsg` untruncated, which is the frame you most want to read.
-
+With no replies, buffer sizing is simple: `TX_MAX_BYTES` (512) is kept generous for raw frame
+sends, and `MSG_MAX_BYTES` (320) caps what the MQTT wire mirror records per frame.
 `MSG_MAX_BYTES` also sizes `mqttPublishMsg`'s stack buffer (`MSG_MAX_BYTES * 3 + 80`, since a
-flap byte can expand to a 3-byte UTF-8 glyph). Raise one, check the other.
+flap byte can expand to a 3-byte UTF-8 glyph), which `MQTT_BUF_SIZE` (1280) must be able to
+hold. Raise one, check the other.
 
 ## The reel: 237 flaps, sectioned
 
@@ -106,54 +100,47 @@ Two details are not what they look like:
   an eszett; `÷` is not a letter and `ß` has no CP1252 uppercase, so both keep flaps of their
   own; `œ`, `š` and `ž` uppercase nowhere near a `0x20` offset.
 
-**The `A` reply reports `flapCount` = 163 (`SF_LEGACY_FLAPS`) and carries only the legacy
-tail.** It must stop there, and not merely as a matter of taste: a pictograph has no CP1252
-byte, so serialising the whole reel would splice fourteen NUL bytes into the middle of an
-ASCII frame and truncate it at the receiver. Reporting 163 buys one **deliberately accepted
-incompatibility**: splitflap-os gates `flapCount` on 1..64, so it refuses this reel and falls
-back to its own map. That costs nothing here — it addresses flaps **by character** (`-`),
-never by index, so all of its text still displays exactly as before.
+**The legacy sections must stay byte-clean.** A pictograph has no CP1252 byte, which is why
+the pictograph flaps live *past* `SF_LEGACY_FLAPS` (163): any byte-shaped surface that walks
+the legacy sections — the legacy resolver's scan, or a client holding the classic reel — must
+never meet a NUL in the middle of them.
 
 `tools/reel_test.cpp` compiles the real `reel.h`, `charset.cpp` and `font1252.cpp` and asserts
 all of it — the section bases, the colour-first resolution, every folding trap, that every
-printable CP1252 character resolves to a flap, and that the `A` reply is byte-clean and fits
-`TX_MAX_BYTES`.
+printable CP1252 character resolves to a flap, and that no NUL byte hides inside the 163
+legacy flaps.
 
-## Why the wire timing is *not* faithful
+## There is no wire timing to emulate
 
-The virtual link is deliberately **not** metered at a serial baud rate, held half-duplex, or
-staggered at the protocol's 100 ms / 700 ms reply slots.
+The physical wire's whole character is timing: half-duplex serial at 9600 baud, 100 ms /
+700 ms reply slots, broadcast trains that stagger over seconds, collisions when two modules
+share an ID. None of it survives here, because since v1.24 **nothing replies at all**: a
+frame is a function call into `vmDispatch()`, delivery is instant and one-way, and there is
+no reply to meter, stagger or collide. (Through v1.23 the reply pipeline reproduced the
+*ordering* of the wire — replies in module-ID order, `VLINK_SLOT_MS` apart — purely so a
+broadcast train stayed legible in the MQTT mirror. With the queries gone that machinery had
+nothing left to order, and it went too, along with `frameSend()`'s reply-quiet guard.)
 
-At 9600 baud even a short reply takes tens of milliseconds to clock out, and a broadcast `m*v`
-across 45 modules would stagger over several seconds of reply slots — faithful, and pure cost.
-Nothing is learned by making a virtual wire slow.
-
-What remains is the ordering, not the pacing: replies are queued as *intents* (not text), and
-`vlinkPoll()` renders the earliest-due one into a single shared buffer. A broadcast still produces
-one frame per module in module-ID order, `VLINK_SLOT_MS` apart, and ranged batch queries
-(`m*v0-49`) are still honoured. `frameSend()`'s reply-quiet guard still runs — it can no longer
-prevent a corruption that cannot happen, but it keeps command and reply frames from interleaving
-in the MQTT mirror, and it keeps the code path identical to the one upstream runs.
-
-Queueing intents rather than rendered text is what makes a broadcast `m*A` cheap: 45 rendered
-replies held resident would be several KB, and more on a larger wall.
-
-The one thing genuinely lost is **collisions**. Two modules sharing an ID answer one after the
-other instead of on top of each other, so the gateway's duplicate-ID heuristic — which keys off
-garbled serial numbers surviving intact framing — never fires. Every other consequence of a
-duplicate ID is reproduced.
+The one piece of wire pacing that remains is deliberate and outbound: `/api/frames/batch`'s
+`step_ms` staggers a cascade through the scheduled-TX ring, drained by `taskFrames` on a 5 ms
+tick, because the companion's animation styles rely on frames landing spread out in time.
+That is display choreography, not wire emulation — and the MQTT mirror
+(`<prefix>/frames/tx`) is now the complete wire trace, because outbound frames are the whole
+of the traffic.
 
 ## Locking
 
 Six mutexes exist. Four are inherited (`msgMutex`, `timeMutex`, `mqttQMutex`, `txMutex`); two
-are this product's: **`vmMutex`**, guarding the virtual-module array and the reply queue, and
+are this product's: **`vmMutex`**, guarding the virtual-module array, and
 **`txQMutex`**, guarding the scheduled-TX ring that paces `/api/frames/batch` off the web task.
-(`sfMutex` went with the module registry in 1.10.)
+(`sfMutex` went with the module registry in 1.10; the reply queue `vmMutex` also guarded went
+with the reply pipeline in 1.24.)
 
-Lock order is `txMutex → vmMutex`, never inverted. Nothing takes `txMutex`
-while holding any of the others, which is what makes `vlinkDeliver()` safe to wait on `vmMutex`
-with `portMAX_DELAY` — and it must wait, because timing out there would drop a command off the
-wall with no error anywhere.
+Lock order is `txMutex → vmMutex`, never inverted: `frameSend()` holds `txMutex` for the whole
+send and takes `vmMutex` just around `vmDispatch()`. Nothing takes `txMutex` while holding any
+of the others — which is why no caller may hold `vmMutex` across `frameSend()`, and what makes
+it safe for `frameSend()` to wait on `vmMutex` with `portMAX_DELAY` — and it must wait, because
+timing out there would drop a command off the wall with no error anywhere.
 
 One consequence worth remembering:
 
@@ -216,8 +203,9 @@ whole protocol emulation still work; refusing to boot over a display fault would
 ### Geometry falls out of the grid
 
 `cellW = panelW / gridCols`, `cellH = panelH / gridRows`, and then `font1252Best()` returns the
-roomiest bundled face that fits with a one-pixel gutter on each axis. That gutter is the seam
-drawn between adjacent flaps; without it neighbouring glyphs touch.
+roomiest bundled face that fits with a one-pixel gutter on each axis. The gutter is empty
+spacing between adjacent flaps (nothing is drawn in it since the decorative grid seam went in
+v1.24); without it neighbouring glyphs touch.
 
 `dispPlan()` is pure — no hardware touched — so `setup()` can call it *before* `vmInit()`. That
 ordering matters: the plan may shrink the grid (a 15-column wall does not fit a 64 px panel), and

@@ -20,7 +20,7 @@ volatile bool gSerialDebug = false;
 // suppression above would otherwise swallow the very home frame that blanks the
 // wall. What each module was showing is snapshotted first, so the falling-edge
 // resync puts the wall back. The reels are virtual here, but the frame is real: it
-// goes out as m*h through frameSend -> vlink -> vmodule, so the panel visibly flips
+// goes out as m*h through frameSend -> vmDispatch, so the panel visibly flips
 // down to blank.
 //
 // Runtime-only -- OFF at boot, never persisted -- so a reboot is a guaranteed
@@ -69,7 +69,6 @@ SemaphoreHandle_t     timeMutex     = NULL;
 StaticSemaphore_t     timeMutexBuf;
 // Watchdog timestamps -- each task writes millis() here every iteration
 volatile unsigned long wdgFramesMs     = 0;
-volatile unsigned long gLastRxMs    = 0;  // millis() of the last reply byte received
 int                    mqttFailCount = 0;  // consecutive MQTT connect failures
 volatile unsigned long wdgNetMs     = 0;
 volatile unsigned long wdgWebMs     = 0;
@@ -98,12 +97,12 @@ SemaphoreHandle_t     txQMutex      = NULL;
 StaticSemaphore_t     txQMutexBuf;
 // Serializes the module-touching section of frameSend. There is no UART to garble any
 // more, but the section is still shared mutable RAM: a static scratch buffer, the
-// txCount counter, vlinkDeliver's mutation of the module array, and the MQTT mirror.
+// txCount counter, vmDispatch's mutation of the module array, and the MQTT mirror.
 // taskWeb (REST, core 0), taskNetwork (MQTT, core 1) and taskFrames (scheduled batch
 // frames, core 0) all call frameSend, so it is genuinely concurrent and genuinely
-// cross-core. Lock order is ALWAYS txMutex -> vmMutex (frameSend -> vlinkDeliver ->
-// vmDispatch): never call frameSend while holding vmMutex, or vlinkDeliver re-takes it
-// and self-deadlocks. The rule used to name the module registry's lock. The registry
+// cross-core. Lock order is ALWAYS txMutex -> vmMutex (frameSend takes vmMutex around
+// vmDispatch): never call frameSend while holding vmMutex, or it re-takes it and
+// self-deadlocks. The rule used to name the module registry's lock. The registry
 // is gone; the rule is not -- it now guards the thing that was the truth all along.
 SemaphoreHandle_t txMutex = NULL;
 StaticSemaphore_t txMutexBuf;
@@ -124,11 +123,9 @@ volatile int      logPollCursor = 0;
 StaticSemaphore_t msgMutexBuf;
 SemaphoreHandle_t msgMutex = NULL;
 /* ----------------------------------------------------------
-   Frame counters
+   Frame counter
 ---------------------------------------------------------- */
-volatile unsigned long rxCount = 0;
 volatile unsigned long txCount = 0;
-volatile unsigned long vlinkDropped   = 0;   // module replies lost to a full queue
 bool sfFsReady = false;   // set true once FFat is mounted
 
 /* ----------------------------------------------------------

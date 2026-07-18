@@ -67,15 +67,12 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Failed:` | — | RUNTIME MESSAGE (shown after an action, in testMqtt()) |
 | `Flap Index (0-236)` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Flip speed (ms per flap)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
-| `Frames RX` | Status tab (diagnostics) | TEXT |
 | `Frames TX` | Status tab (diagnostics) | TEXT |
 | `Free Heap` | Status tab (diagnostics) | TEXT |
 | `From` | — | (built at runtime) |
 | `GATEWAY` | — | INLINE TEXT |
 | `Gateway Time` | Status tab (diagnostics) | TEXT |
 | `Grid` | — | RUNTIME MESSAGE (shown after an action, in buildWall()) |
-| `Grid brightness (0=off)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
-| `Grid color` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `HELLO WORLD` | Display tab (send text/characters to the wall) | INPUT PLACEHOLDER (example text) |
 | `HUB75 geometry and reel speed.` | — | (built at runtime) |
 | `Helsinki/Athens (UTC+2/+3)` | Settings tab | DROPDOWN OPTION |

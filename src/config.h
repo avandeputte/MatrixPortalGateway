@@ -48,9 +48,6 @@ struct GwConfig {
   uint8_t       panelBright;   // 1..255, multiplied into every colour before it reaches the panel
   uint16_t      flapMs;        // ms per flap step -- the reel's speed
   uint8_t       flapMax;       // flips drawn for one change, 1..FLAP_ANIM_MAX
-  uint32_t      gridColor;     // 0xRRGGBB seam colour drawn around each module cell
-  uint8_t       gridBright;    // 0..255 seam intensity; 0 = no grid. Faintness lives here,
-                               //   not in panelBright -- see DEFAULT_GRID_BRIGHT. Live.
 };
 
 // ---- owned globals (defined in globals.cpp) ----

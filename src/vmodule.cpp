@@ -5,24 +5,23 @@
 // vmodule.cpp -- the emulated split-flap modules. See vmodule.h for the reel
 // layout and for what is deliberately NOT emulated (everything mechanical).
 //
-// Three concerns: (1) building the reel and the bogus serial numbers;
-// (2) vmDispatch, which parses a protocol frame and applies it to every addressed
-// module; (3) vmRenderReply, which turns a queued reply intent back into
-// protocol bytes.
+// Two concerns: (1) building the reel; (2) vmDispatch, which parses a protocol
+// frame and moves the addressed reels. Nothing answers: the query commands
+// ('v'/'A') and their reply pipeline were removed in v1.24 -- no client ever
+// sent them, and a drawn wall self-describes through /api/capabilities.
 //
 // There is NO persistence. Every field of every module is deterministic from
-// the configured grid (id = wall slot, serial derived from the MAC, reel homed
-// at boot), so /vmods.dat -- which the physical modules need for their ids and
-// calibration -- stored nothing here that could actually vary. vmInit deletes
-// a leftover file from older firmware.
+// the configured grid (id = wall slot, reel homed at boot), so /vmods.dat --
+// which the physical modules need for their ids and calibration -- stored
+// nothing here that could actually vary. vmInit deletes a leftover file from
+// older firmware.
 //
 // Concurrency: everything here runs under vmMutex, taken by the caller
-// (vlinkDeliver, vlinkPoll) or by vmTick itself. vmDispatch is reached
+// (frameSend) or by vmTick itself. vmDispatch is reached
 // only from frameSend, which holds txMutex, so its static scratch buffer has a
 // single writer.
 
 // ---- file-private forward declarations ----
-static void   vmMakeSerial(int index, char* out);
 static void   vmSetTarget(VModule& m, int idx);
 
 
@@ -52,27 +51,6 @@ int  vmFlapTint(int i)        { return reelTint(i); }
 // The index-addressed path, for POST /api/display/cells: no folding, no colour-stealing,
 // and it reaches the lowercase and pictograph flaps the legacy protocol cannot name.
 int  vmFlapIndexOfCodepoint(uint32_t cp) { return reelIndexOfCodepoint(sReel, cp); }
-
-// A deterministic, obviously-fake serial number: 20 uppercase hex chars over
-// {0xFA, 0x5E, <the board's 6 MAC bytes>, <module index>, <crc8>}. It reads
-// "FA5E..." -- fabricated -- so a serial from this emulator is never mistaken for
-// an ATtiny SIGROW read, while still being unique per board and stable across reboots.
-// Reported by the 'v' and 'A' replies, exactly as a real module reports its own.
-static void vmMakeSerial(int index, char* out) {
-  uint8_t mac[6] = {0};
-  esp_read_mac(mac, ESP_MAC_WIFI_STA);
-  uint8_t b[10] = { 0xFA, 0x5E, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-                    (uint8_t)index, 0 };
-  uint8_t crc = 0;                         // CRC-8/ATM (poly 0x07)
-  for (int i = 0; i < 9; i++) {
-    crc ^= b[i];
-    for (int k = 0; k < 8; k++) crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07)
-                                                   : (uint8_t)(crc << 1);
-  }
-  b[9] = crc;
-  for (int i = 0; i < 10; i++) sprintf(out + i * 2, "%02X", b[i]);
-  out[VM_SN_CHARS] = 0;
-}
 
 /* ----------------------------------------------------------
    The flip
@@ -150,9 +128,7 @@ void vmInit(int count) {
     // Every module carries its wall position as its ID, from the moment the board
     // is flashed. There is no advertise/adopt protocol any more, so this is the
     // only place an ID is ever assigned.
-    m.id          = (uint8_t)i;
-    m.provisioned = true;
-    vmMakeSerial(i, m.sn);
+    m.id         = (uint8_t)i;
     m.target     = -1;
     m.pendFlap   = -1;
     m.flipPhase  = 0;
@@ -166,37 +142,16 @@ void vmInit(int count) {
   // Older firmware persisted module state to /vmods.dat. Every field is
   // deterministic now, so the file is meaningless -- delete a leftover one.
   if (sfFsReady && FFat.exists("/vmods.dat")) FFat.remove("/vmods.dat");
-  printf("[VM] %d virtual modules, %d flaps each (%d glyphs + %d colours + %d lowercase + %d pictographs), sn %s..\n",
+  printf("[VM] %d virtual modules, %d flaps each (%d glyphs + %d colours + %d lowercase + %d pictographs)\n",
          vmCount, SF_MAX_FLAPS, SF_CHAR_FLAPS, SF_COLOUR_FLAPS, SF_LOWER_FLAPS,
-         SF_EMOJI_FLAPS, vmods[0].sn);
+         SF_EMOJI_FLAPS);
 }
 
 /* ----------------------------------------------------------
    Command dispatch
 ---------------------------------------------------------- */
 
-// By-serial frames: "mX<letter><serial>[...]". Every module inspects them and only
-// the one whose serial matches acts.
-static void vmDispatchBySerial(const char* p, size_t len, uint32_t now) {
-  if (!len) return;
-  char cmd = p[0];
-  const char* sn = p + 1;
-  // Every mX command carries the 20-char serial first; anything shorter is not a
-  // command at all.
-  if (strlen(sn) < VM_SN_CHARS) return;
-
-  for (int i = 0; i < vmCount; i++) {
-    VModule& m = vmods[i];
-    if (strncmp(sn, m.sn, VM_SN_CHARS) != 0) continue;
-    switch (cmd) {
-      case 'A': vlinkQueue((uint8_t)i, VR_ALL, now + VLINK_REPLY_MS); return;
-      // 'N' (set the flap set) is gone: the reel is shared, complete and fixed.
-      default: return;
-    }
-  }
-}
-
-void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
+void vmDispatch(const uint8_t* frame, size_t len) {
   if (!vmods || len < 2 || frame[0] != 'm') return;
 
   // Single writer: frameSend serialises every send through txMutex, and that is
@@ -209,7 +164,6 @@ void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
   if (n < 2) return;
 
   const char* p = buf + 1;
-  if (*p == 'X') { vmDispatchBySerial(p + 1, n - 2, now); return; }
 
   bool bcast = false;
   int  addr  = -1;
@@ -232,15 +186,6 @@ void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
   // (one volatile compare) unless one is actually running; only the first frame of a cascade acts.
   if (cmd == '-' || cmd == '+' || cmd == 'h') dispReturnToWall();
 
-  // 'v' and 'A' accept an optional "<lo>-<hi>" id range on a broadcast, so a
-  // controller can poll a large wall in retryable batches.
-  int lo = 0, hi = 254;
-  if (bcast && (cmd == 'v' || cmd == 'A') && isdigit((unsigned char)*payload)) {
-    char* e;
-    long a = strtol(payload, &e, 10);
-    if (*e == '-') { lo = (int)a; hi = (int)strtol(e + 1, NULL, 10); }
-  }
-
   // Resolve the display payload ONCE, outside the module loop: on a broadcast the
   // reel scan / strtol are loop-invariant, and this runs under both txMutex and
   // vmMutex. -1 means "no valid payload -> the case below does nothing".
@@ -254,8 +199,7 @@ void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
 
   for (int i = 0; i < vmCount; i++) {
     VModule& m = vmods[i];
-    if (bcast) { if (!m.provisioned) continue; }
-    else       { if (!m.provisioned || m.id != addr) continue; }
+    if (!bcast && m.id != addr) continue;
 
     switch (cmd) {
       // ---- display ----
@@ -264,73 +208,8 @@ void vmDispatch(const uint8_t* frame, size_t len, uint32_t now) {
         if (showIdx >= 0) vmSetTarget(m, showIdx);
         break;
       case 'h': vmSetTarget(m, 0); break;
-
-      // ---- queries ----
-      // 'v' and 'A' answer a broadcast too. Each module gets its own slot so the
-      // train stays in ID order; the slots are milliseconds, not the hundreds the
-      // physical half-duplex wire needs to dodge collisions.
-      case 'v':
-        if (bcast && (m.id < lo || m.id > hi)) break;
-        vlinkQueue((uint8_t)i, VR_VER,
-                  now + VLINK_REPLY_MS + (bcast ? (uint32_t)(m.id - lo) * VLINK_SLOT_MS : 0));
-        break;
-      case 'A':
-        if (bcast && (m.id < lo || m.id > hi)) break;
-        vlinkQueue((uint8_t)i, VR_ALL,
-                  now + VLINK_REPLY_MS + (bcast ? (uint32_t)(m.id - lo) * VLINK_SLOT_MS : 0));
-        break;
       default: break;                    // unknown command: silently ignored
     }
     if (!bcast) break;                   // a direct frame targets exactly one module
   }
-}
-
-/* ----------------------------------------------------------
-   Replies
-   ----------------------------------------------------------
-   Only two reply kinds exist -- 'v' (version) and 'A' (all fields) -- and both
-   report a flawless module: the nominal home offset and steps-per-revolution,
-   auto-home on, and an empty flap map (uncalibrated, which is what a module
-   with no fine calibration reports).
----------------------------------------------------------- */
-
-size_t vmRenderReply(uint8_t mod, VmReplyKind kind, uint8_t* out, size_t outSize) {
-  if (mod >= vmCount || outSize < 32) return 0;
-  const VModule& m = vmods[mod];
-  char*  o = (char*)out;
-  size_t n = 0;
-
-  switch (kind) {
-    case VR_VER:
-      n = snprintf(o, outSize, "m%dv:%d:%d:%s\n", m.id, VM_FW_VERSION, m.id, m.sn);
-      break;
-
-    case VR_ALL: {
-      // m<id>A:<ver>:<id>:<sn>:<ho>:<ts>:<autoHome>:<curIndex>:<map>:<count>:<chars>
-      // with <map> empty.
-      n = snprintf(o, outSize, "m%dA:%d:%d:%s:%d:%d:1:%d::%u:",
-                   m.id, VM_FW_VERSION, m.id, m.sn, VM_HOME_OFFSET, VM_TOTAL_STEPS,
-                   m.curIndex, SF_LEGACY_FLAPS);
-      // Report the LEGACY reel only -- the 163 flaps this protocol can actually name.
-      //
-      // It must stop there, and not merely as a matter of taste: the flaps past 163 are
-      // the lowercase letters and the pictographs, and a pictograph HAS NO BYTE. Copying
-      // the whole reel would splice fourteen NUL bytes into the middle of an ASCII frame
-      // and the parser at the other end would read a truncated string. The extra flaps are
-      // simply not part of this protocol; they are reachable by index, and a controller
-      // that wants them uses the index-addressed API.
-      //
-      // The 163 bytes bring the frame to ~225 -- well inside TX_MAX_BYTES. The clamp stays
-      // regardless: never half-write a reel.
-      size_t cl = SF_LEGACY_FLAPS;
-      if (n + cl + 2 > outSize) cl = (outSize > n + 2) ? outSize - n - 2 : 0;
-      memcpy(o + n, vmReel(), cl);
-      n += cl;
-      if (n + 1 < outSize) o[n++] = '\n';
-      break;
-    }
-    default: return 0;
-  }
-  if (n >= outSize) n = outSize - 1;
-  return n;
 }

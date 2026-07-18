@@ -19,7 +19,7 @@ RTC_NOINIT_ATTR static uint32_t sfPanicBoots;
 //   * dispPlan() must precede vmInit(): the plan says how many modules exist,
 //     because a cell too small to hold a glyph is not a module.
 //   * sfFsInit() must precede vmInit(), which restores /vmods.dat.
-//   * vmInit() must precede dispInit() and vlinkBegin(), both of which read vmCount.
+//   * vmInit() must precede dispInit(), which reads vmCount.
 //   * dispInit() runs before WiFi so the panel driver gets first claim on the
 //     internal SRAM its DMA framebuffer needs (quad PSRAM is far too slow).
 
@@ -116,9 +116,6 @@ void setup() {
   dispInit();
   dispMarkDirty();
 
-  // 7. The frame link to the virtual modules
-  vlinkBegin();
-
   // 8. WiFi -- MUST be initialised here, on the main Arduino task.
   // The SoftAP is a FALLBACK only: start in station mode and connect to the
   // configured network. With no network configured, bring the AP up immediately
@@ -205,11 +202,11 @@ void loop() {
     if (maxBlk < minBlkEver) minBlkEver = maxBlk;
     printf("[WDG] up=%lus heap=%u min=%u maxblk=%u minblk=%u "
            "stk(frames/web/net/ota/rtc/disp)=%u/%u/%u/%u/%u/%u "
-           "rx=%lu tx=%lu drop=%lu psram=%u panel=%d "
+           "tx=%lu psram=%u panel=%d "
            "wifi=%d ap=%d rssi=%d mqtt=%d mods=%d\n",
            now/1000, freeHeap, minHeap, maxBlk, minBlkEver,
            sFrm, sWeb, sNet, sOta, sRtc, sDsp,
-           rxCount, txCount, vlinkDropped,
+           txCount,
            (unsigned)ESP.getFreePsram(), (int)gPanel.ready,
            (int)(WiFi.status()==WL_CONNECTED),
            (int)gApActive,

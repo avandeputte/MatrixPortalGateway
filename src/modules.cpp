@@ -91,8 +91,9 @@ void sfSendText(int startAddr, const char* text) {
 // pictograph, which has no byte at all, did not come back at all. A byte cannot name a flap
 // on a 237-flap reel. An index can.
 //
-// Safe to call from any task. vmMutex is NEVER held across frameSend: vlinkDeliver re-takes
-// it and would self-deadlock. Snapshot under the lock, send outside it.
+// Safe to call from any task. vmMutex is NEVER held across frameSend: it re-takes
+// the lock around vmDispatch and would self-deadlock. Snapshot under the lock, send
+// outside it.
 void sfSetQuietTime(bool on) {
   const bool was = gQuietTime;
 

@@ -10,9 +10,9 @@ A split-flap display with no split flaps.
 
 This is the [Split-Flap Gateway](../../SplitFlapGateway/3.1) v3.1 firmware, ported to an
 **Adafruit MatrixPortal ESP32-S3** driving a HUB75 RGB LED matrix. The physical gateway's
-serial transceiver is gone. In its place is a virtual link and a wall of *virtual* split-flap
-modules, each one emulating the real module firmware's wire protocol byte for byte and
-rendering itself as a flapping character cell on the panel.
+serial transceiver is gone. In its place is a wall of *virtual* split-flap modules, each one
+receiving the same protocol frames a real module would, acting on the display commands
+(`-`, `+`, `h`), and rendering itself as a flapping character cell on the panel.
 
 Everything above the protocol seam is unchanged: the web UI, the REST API, MQTT and Home
 Assistant discovery, OTA, the command log. The
@@ -26,8 +26,6 @@ module registry. See **New in 1.10**.)
      ├──────────────────────────────────────────────┤
      │  frameSend()  framing · sanitization · Quiet  │   unchanged
      ├──────────────────────────────────────────────┤
-     │  vlink        deliver frames · queue replies  │   new
-     ├──────────────────────────────────────────────┤
      │  vmodule      45 virtual split-flap modules   │   new
      ├──────────────────────────────────────────────┤
      │  display      HUB75 flap renderer             │   new
@@ -37,6 +35,35 @@ module registry. See **New in 1.10**.)
 ```
 
 ---
+
+## New in 1.24
+
+- **Nothing replies any more — frames flow one way.** The virtual modules act on exactly three
+  commands: `-` (show character), `+` (show index) and `h` (home). The `v`/`A` queries, the
+  by-serial `mX…` addressing and the entire reply pipeline behind them (`src/vlink.*`) are
+  gone: `frameSend()` now hands the sanitized frame straight to the modules, and `taskFrames`'
+  only remaining job is draining the scheduled-batch ring. Nothing ever consumed the replies —
+  every value in them was a compile-time constant — and clients read the wall through
+  `/api/display/state`, `/api/flap/modules` and `/api/capabilities`, not protocol queries.
+
+- **BREAKING if anything listened: the MQTT topic `<prefix>/frames/rx` no longer exists** —
+  with no replies there is nothing to publish on it. `<prefix>/frames/tx` remains as the
+  outbound wire mirror. The `rx` counter is gone from `/api/status` and the MQTT status JSON,
+  the Home Assistant **Frames Received** sensor is gone (its retained discovery config is
+  deleted on connect, so HA is not left holding a ghost sensor), and the `drop` field in the
+  status `panel` object went with the reply queue it counted.
+
+- **BREAKING if anything read them: the fake serial numbers are gone.** `GET /api/flap/modules`
+  rows are now `{id, flapIndex, flapChar}` — the `sn`, `provisioned` and `fwVersion` fields
+  were dropped. No consumer existed: the companion drives the wall through
+  `/api/display/cells` and reads its capabilities from `/api/capabilities`, and neither ever
+  looked at a serial. A `VModule` is now ~16 bytes — an id and its runtime flip state.
+
+- **The grid seam is gone.** The faint decorative border drawn between module cells never
+  looked good, and now it is not drawn at all: no more `gridColor`/`gridBright` in
+  `GET /api/config` or `POST /api/config/settings`, no Grid colour / Grid brightness inputs in
+  the dashboard's LED Panel card, `drawGrid()` deleted. (Not to be confused with
+  `gridRows`/`gridCols`, the module wall's *layout* — those are unchanged.)
 
 ## New in 1.23
 
@@ -436,7 +463,6 @@ module registry. See **New in 1.10**.)
 - [The flip](#the-flip)
 - [Configuration](#configuration)
 - [Language](#language)
-- [Serial numbers](#serial-numbers)
 - [Compatibility](#compatibility)
 - [Repository contents](#repository-contents)
 - [Building](#building)
@@ -449,8 +475,9 @@ module registry. See **New in 1.10**.)
 On boot the firmware creates one virtual split-flap module per cell of the module wall
 (15 × 3 = **45 modules** by default), with IDs `0`…`44` fixed by wall position. There is no
 discovery, because there is nothing to discover: every module exists by construction, and the
-array of them *is* the state of the wall. They still answer `m*v` with a firmware version and
-serial number — the protocol is emulated faithfully — but nobody has to ask.
+array of them *is* the state of the wall. Nobody has to ask, and (since v1.24) nobody *can*
+ask over the protocol — the wall self-describes through `/api/display/state`,
+`/api/flap/modules` and `/api/capabilities` instead.
 
 From then on, everything works. Send `m5-A` and module 5's reel flips forward until it lands
 on `A`. Send text from the Display tab and it cascades across the wall. Every command the
@@ -590,27 +617,25 @@ works unchanged** — while 99 characters that used to come out blank now displa
 
 ## What is and is not emulated
 
-**The protocol is emulated where it is used.** The firmware speaks the subset of the module
-v31 command set the gateway still needs: display (`-`, `+`), homing (`h`), and the queries
-(`v`, `A`) — plus the by-serial form `mXA`. Broadcasts, the two-star v6 form, and the ranged
-`m*v0-49` / `m*A0-49` batch queries all work. The calibration/dump family is *accepted* —
-those frames pass through the sanitizer untrimmed — but the modules silently ignore them:
-there is nothing to calibrate and nothing to dump.
+**The protocol is emulated where it is used.** The firmware acts on the three commands the
+gateway still emits: display (`-`, `+`) and homing (`h`), addressed to one module or broadcast
+(`m*`, and the two-star v6 form). Everything else in the physical grammar — the
+calibration/dump family, the removed `v`/`A` queries, by-serial `mX…` addressing — passes
+through the sanitizer untrimmed and is silently ignored: there is nothing to calibrate,
+nothing to dump, and (since v1.24) nothing that answers a question the REST API does not
+already answer better.
 
 **The mechanism is not emulated at all.** There is no stepper, no Hall sensor and no EEPROM.
 Nothing can be out of tune, so nothing needs tuning: the calibration, diagnostics, provisioning
 and backup commands are ignored rather than faked — no reply, no state. `h` simply shows flap
-0, and the `A` reply reports the nominal `homeOffset=2832` / `totalSteps=4096` with an empty
-flap map.
+0, the blank.
 
 **The wire is not emulated either.** The physical gateway's half-duplex serial wire at
-9600 baud is slow; a broadcast `m*v` across 45 modules takes four seconds of staggered reply
-slots. Here replies come back promptly, in module-ID order, spaced just enough that a
-broadcast train stays legible in the MQTT wire mirror.
-
-Collisions therefore do not happen. Two modules given the same ID will both obey a command, but
-they answer one after the other rather than on top of each other, so the gateway's duplicate-ID
-heuristic — which keys off garbled serial numbers — never fires.
+9600 baud is slow — a broadcast query across 45 modules once took seconds of staggered reply
+slots. Here a frame is a function call: delivery is instant, one-way, and **nothing ever
+replies**, so there is no reply timing to emulate and no collisions to worry about. The MQTT
+wire mirror (`<prefix>/frames/tx`) carries the outbound frames, which are the whole of the
+traffic.
 
 ---
 
@@ -674,9 +699,9 @@ until the framebuffer no longer starves WiFi of internal SRAM, refusing outright
 depth 1 will not fit (see [Known limitations](#known-limitations)) — but if you see flicker,
 drop `panelBitDepth` to 3, which buys back refresh at the cost of colour depth.
 
-The ceiling on the emulated wall is **`VM_MAX_MODULES` = 192** (`src/vmodule.h`), and the
-virtual link's reply queue is sized to match, so a 32 × 5 = 160-module wall on a 256px chain still has room to spare. A grid that
-exceeds the ceiling is quietly reduced, and the boot log says so.
+The ceiling on the emulated wall is **`VM_MAX_MODULES` = 192** (`src/vmodule.h`), so a
+32 × 5 = 160-module wall on a 256px chain still has room to spare. A grid that exceeds the
+ceiling is quietly reduced, and the boot log says so.
 
 ### If every colour is wrong
 
@@ -814,25 +839,11 @@ walk plus a `MutationObserver` translates the static page *and* whatever the JS 
 
 ---
 
-## Serial numbers
-
-Each module gets a deterministic, obviously-fake 20-character serial:
-
-```
-FA5E  <the board's 6 MAC bytes>  <module index>  <crc8>
-└──┘
-"fabricated"
-```
-
-Stable across reboots, unique per board, and never mistakable for a real ATtiny SIGROW read.
-
----
-
 ## Compatibility
 
 The companion app talks to the gateway over exactly seven HTTP endpoints and models *nothing*
 about a module — not the flap count, not the character set, not serial numbers. The
-reel and the `FA5E…` serials are invisible to it. Those seven are
+reel is invisible to it. Those seven are
 `GET /api/config`, `GET /api/status`, `POST /api/frames/send`, `POST /api/frames/batch`,
 `POST /api/companion`, and `GET`/`PUT /api/companion/settings`. (Since v1.22.0 the
 `/api/frames/*` pair is the only send surface — the physical gateway's paths it once aliased
@@ -868,9 +879,7 @@ src/font1252.*      GENERATED bitmap glyphs: the 216 printable CP1252 flaps + 14
 src/aafont.h        GENERATED by tools/genaafont.py — Orbitron faces for the clock effect
 src/frames.*        frame sanitization, the command log, the frameSend() choke point,
                     scheduled batch pacing
-src/vlink.*         the virtual link: frame delivery + the reply queue
-src/vmodule.*       the virtual split-flap modules: protocol dispatch, the shared reel,
-                    the synthesized replies
+src/vmodule.*       the virtual split-flap modules: protocol dispatch and the shared reel
 src/display.*       flap-wall geometry and the flap renderer (calls panel.*)
 src/canvas.*        raw canvas: frames, rects, QOI decode, draw ops, on-device animation + ticker
 src/effects.*       on-device effects: plasma, fire, matrix, flip-o-rama, clock, Life
@@ -897,7 +906,7 @@ tools/genfont.py    regenerates src/font1252.cpp from the vendored BDFs
 tools/genaafont.py  regenerates src/aafont.h from Orbitron (the clock effect's faces)
 tools/Orbitron.ttf  vendored Orbitron variable font (SIL Open Font License)
 tools/bdf/          public-domain X11 "misc-fixed" fonts (10x20, 9x18, 8x13, 6x13, 6x10, 6x9, 5x8)
-tools/reel_test.cpp native regression test for the reel and the 'A' reply format
+tools/reel_test.cpp native regression test for the reel and its two resolvers
 
 platformio.ini      build/upload configuration
 ARCHITECTURE.md     why the non-obvious decisions were made
@@ -905,7 +914,7 @@ openapi.yaml        REST API reference
 ```
 
 `modules.*` is the gateway's side of the module protocol — how a character, an index or a home
-becomes a frame. `vmodule.*` is what answers those frames. They talk only through protocol
+becomes a frame. `vmodule.*` is what acts on those frames. They talk only through protocol
 frames, which is exactly why the port works. (Upstream, `modules.*` also holds a *registry* of
 whatever is out on its serial wire. That has no meaning on a drawn wall and was removed in 1.10.)
 
@@ -960,7 +969,6 @@ c++ -std=c++17 -Isrc tools/reel_test.cpp src/charset.cpp src/font1252.cpp \
   and the scheduled-TX ring *are* in PSRAM; nothing in the refresh path touches them.)
 - **No battery-backed RTC.** Wall-clock time is invalid from power-on until the first NTP sync.
   Every caller already handles that state; frame timestamps show `HH:MM:SS` uptime until then.
-- **No collision emulation**, so the duplicate-ID heuristic never fires.
 
 ---
 

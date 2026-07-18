@@ -32,18 +32,16 @@
  *   Address:      decimal (zero-padded 2-digit v6 style, or variable-length v7+)
  *                 broadcast: m** (v6) or m* (v7+), optional range m*v<lo>-<hi>
  *                 by serial: mX...
- *   Commands the virtual modules ANSWER (vmDispatch):
+ *   Commands the virtual modules ACT ON (vmDispatch):
  *                 m<id>-<char>    display character
  *                 m<id>+<n>       display by flap index
  *                 m<id>h          home
- *                 m<id>v          get version   -> m<id>v:<ver>:<id>:<sn>\n
- *                 m<id>A          all fields    -> ...:<map>:<flapCount>:<flapChars>\n
- *                 mXA<sn>         'A' addressed by serial number
- *   The physical gateway's calibration/dump grammar (calibrate 'c', dump 'd',
- *   goto 'g', nudge 's', ...) is NOT modelled: neither the companion (which
- *   only ever sends m<id>-<char>) nor the web UI emits it. Such frames pass
- *   the sanitizer untrimmed and the virtual modules silently ignore them,
- *   exactly like any unknown command.
+ *   Nothing replies. The physical protocol's query commands ('v' version,
+ *   'A' all-fields) and by-serial addressing were removed in v1.24 -- no
+ *   client ever sent them, and the wall self-describes through
+ *   /api/capabilities and /api/display/state. The calibration/dump grammar
+ *   is likewise unmodelled. All such frames pass the sanitizer untrimmed and
+ *   the virtual modules silently ignore them, like any unknown command.
  *
  * Board: Adafruit MatrixPortal ESP32-S3 (8MB flash, 2MB *quad* PSRAM)
  * Libraries: none for the panel -- see panel.cpp, a direct LCD_CAM + GDMA driver.
@@ -138,7 +136,7 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
    "RTC not valid yet" path the frame timestamps handle. */
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "1.23.0"   // this product's version (UI + boot log)
+#define FW_VERSION           "1.24.0"   // this product's version (UI + boot log)
 // The gateway REST/MQTT surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it
@@ -194,12 +192,6 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define DEFAULT_BIT_DEPTH    4      // bitplanes, 1..8 (RAM and refresh rate scale with it)
 #define DEFAULT_PANEL_BGR    false  // true if the panel is wired BGR (see panelSetColourOrder)
 #define DEFAULT_BRIGHTNESS   160    // 1..255, scales every colour before output
-// The faint seam drawn around each module -- the split-flap gap. This is NOT the module
-// layout (that is GRID_COLS/ROWS above); it is the decoration between cells. Its dimness
-// is the colour times the brightness, NOT the panel brightness -- the panel dims the seam
-// and the glyphs together, so the seam has to be faint on its own to read as a hairline.
-#define DEFAULT_GRID_COLOR   0xFFFFFFUL // 0xRRGGBB; white reads as neutral grey once dimmed
-#define DEFAULT_GRID_BRIGHT  32     // 0..255 seam intensity; 0 = no grid at all
 // A real module flips a handful of flaps per second, not fifty. This also sets the
 // repaint rate: one flap is two half-steps, so the panel redraws at 2000/flapMs Hz
 // while a reel is turning (DISP_MIN_FRAME_MS in display.cpp caps it regardless).
@@ -258,15 +250,6 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define DEFAULT_FLAP_MAX     64     // flips drawn for one character change
 #define FLAP_ANIM_MAX        64     // hard ceiling on flapMax
 
-/* ---- Reply timing ----
-   Carried over from the physical gateway. The frame link is not metered at
-   a baud rate -- replies come back promptly (see vlink.*), staggered only by
-   VLINK_SLOT_MS so a broadcast stays legible in the MQTT mirror. What remains is
-   the reply-quiet guard: frameSend still waits until no replies are in flight
-   before it transmits, which keeps command and reply frames from interleaving and
-   keeps the gateway's collision-avoidance code path identical to upstream's. */
-#define TX_REPLY_GUARD_MS      12
-#define TX_REPLY_WAIT_CAP_MS   400
 
 /* ---- Flap set sizing ----
    A physical reel has 64 leaves because it is a physical object. These modules are DRAWN,
@@ -296,17 +279,10 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define SF_MAX_TEXT          256   // longest text sfSendText will lay across modules
 
 /* ---- Buffer / queue sizes ----
-   The virtual modules are perfectly calibrated, so they carry no flap-position
-   map and every dump reports an empty one. The longest frame is the 'A' reply,
-   whose 163-byte legacy flapChars tail dominates at ~225 bytes total
-   (tools/reel_test.cpp measures it). TX_MAX_BYTES (512) is kept generous for raw
-   frame sends -- comfortably more than any reply needs.
-
-   MSG_MAX_BYTES is 320 rather than the physical gateway's 256 so a full 'A'
-   reply fits in one FrameMsg untruncated -- it is the frame you most want to
-   read. It also sizes mqttPublishMsg's stack buffer (MSG_MAX_BYTES*3 + 80, since
-   a flap byte can expand to a 3-byte UTF-8 glyph), which MQTT_BUF_SIZE must be
-   able to hold. */
+   TX_MAX_BYTES (512) is kept generous for raw frame sends. MSG_MAX_BYTES caps
+   what the MQTT wire mirror records per frame; it also sizes mqttPublishMsg's
+   stack buffer (MSG_MAX_BYTES*3 + 80, since a flap byte can expand to a 3-byte
+   UTF-8 glyph), which MQTT_BUF_SIZE must be able to hold. */
 #define MSG_RING_SIZE        64    // command log: number of entries retained
 #define MSG_MAX_BYTES        320   // MQTT wire mirror: bytes stored per frame
 #define TX_MAX_BYTES         512   // max bytes frameSend will transmit in one frame
@@ -379,7 +355,6 @@ extern bool gApActive;
 extern SemaphoreHandle_t timeMutex;
 extern StaticSemaphore_t timeMutexBuf;
 extern volatile unsigned long wdgFramesMs;
-extern volatile unsigned long gLastRxMs;
 extern volatile unsigned long wdgNetMs;
 extern volatile unsigned long wdgWebMs;
 extern volatile unsigned long wdgDispMs;

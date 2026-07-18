@@ -28,7 +28,6 @@
 #include <cstring>
 #include <cstdint>
 
-#define TX_MAX_BYTES 512
 extern const Font1252* const FONT1252_ALL[FONT1252_COUNT];
 
 static int fails = 0;
@@ -211,22 +210,11 @@ int main() {
   ck(reelIndexOf(reel, 'A') < SF_CHAR_FLAPS,   "'A' is still in the glyph section");
   cki(SF_LEGACY_FLAPS, 163, "the legacy reel is still 163 flaps");
 
-  printf("\nthe 'A' reply carries the LEGACY reel -- does it fit, and is it byte-clean?\n");
+  printf("\nthe legacy byte sections stay byte-clean (a NUL would truncate any byte API):\n");
   int nul = 0;
   for (int i = 0; i < SF_LEGACY_FLAPS; i++) if (reel[i] == 0) nul++;
   cki(nul, 0, "no NUL byte inside the 163 legacy flaps");
-  ck(reel[SF_EMOJI_BASE] == 0, "...while a pictograph flap HAS no byte (hence the cap)");
-
-  printf("\nthe 'A' reply now carries the whole reel -- does it still fit the wire?\n");
-  char frame[TX_MAX_BYTES + 1];
-  int n = snprintf(frame, sizeof(frame), "m%dA:%d:%d:%s:%d:%d:%d:%d::%u:",
-                   254, 31, 254, "FA5E4827E2205AC80010", 2832, 4096, 1, 162,
-                   (unsigned)SF_LEGACY_FLAPS);
-  memcpy(frame + n, reel, SF_LEGACY_FLAPS);
-  n += SF_LEGACY_FLAPS;
-  frame[n++] = '\n';
-  printf("        worst-case 'A' frame: %d bytes (TX_MAX_BYTES = %d)\n", n, TX_MAX_BYTES);
-  ck(n < TX_MAX_BYTES, "the 'A' reply fits inside TX_MAX_BYTES");
+  ck(reel[SF_EMOJI_BASE] == 0, "...while a pictograph flap HAS no byte, by design");
 
   if (fails) printf("\n%d FAILED\n", fails);
   else       printf("\nall passed\n");

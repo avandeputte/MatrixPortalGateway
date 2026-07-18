@@ -8,17 +8,14 @@
 // perfectly calibrated one, and that assumption is what makes the emulation
 // small:
 //
-//   * No calibration state. Home offset and steps-per-revolution are the
-//     compile-time nominal values below, the same for every module and never
-//     stored. The flap-position map is always empty, which is what a module with
-//     no fine calibration reports anyway. The calibration-family commands
-//     ('c', 'o', 't', 's', 'g', 'w') pass the frame sanitizer but vmDispatch
-//     has no case for them: they are silently discarded, with no reply. The 'A'
-//     dump always reports the nominal values and an empty map.
+//   * No calibration state, no identity beyond the wall slot, and no replies.
+//     The only commands that DO anything are '-' (show character), '+' (show
+//     flap index) and 'h' (home); everything else in the physical grammar
+//     (calibration, dumps, the 'v'/'A' queries, by-serial addressing) is
+//     silently ignored. The wall self-describes through /api/capabilities
+//     and /api/display/state instead of protocol queries.
 //   * No position to lose. The reel always knows where it is, so 'h' (home)
 //     simply shows flap 0, the blank.
-//   * The only commands ANSWERED are 'v' (version) and 'A' (all fields);
-//     '-', '+' and 'h' act silently, like the real module.
 //
 // What the reel does do is FLIP. Changing the displayed flap cascades forward
 // through the reel one flap at a time, so the panel shows the split-flap effect
@@ -61,13 +58,6 @@
 // ~7.7 KB here, which is affordable; it was not when a module carried its own 64-byte flap
 // table (see v1.5).
 #define VM_MAX_MODULES   192
-#define VM_FW_VERSION    31    // module firmware version the emulation reports
-#define VM_SN_CHARS      20    // serial number length, uppercase hex
-
-// What a perfectly tuned module reports. Constants, not state: these are the real
-// firmware's defaults, and no command can move them.
-#define VM_HOME_OFFSET   2832
-#define VM_TOTAL_STEPS   4096
 
 // The reel's colour flaps are addressed by the LOWERCASE letters r o y g b p w on the
 // legacy path, which is exactly why that path never scans the lowercase section -- see
@@ -78,20 +68,16 @@
 // thereafter.
 extern const char* vmReel();
 
-// A virtual module (~40 bytes). The array lives in INTERNAL RAM, not PSRAM:
+// A virtual module (~16 bytes). The array lives in INTERNAL RAM, not PSRAM:
 // taskDisplay walks it at 100 Hz and quad PSRAM is too slow to sit on that
 // path -- see vmInit().
 struct VModule {
-  // ---- identity (persisted) ----
-  uint8_t  id;                    // 0..254, or 255 when unprovisioned
-  bool     provisioned;
-  char     sn[VM_SN_CHARS + 1];   // 20 uppercase hex chars, NUL-terminated
+  uint8_t  id;                    // the wall slot, assigned once at vmInit
   // NOTE: there is no flap table here. Every module shows the SAME reel -- see
   // reel.h -- so it lives once, in a shared constant, instead of 163+ bytes per
   // module. A drawn reel can render everything, so there is nothing to configure
   // and nothing to store per module.
 
-  // ---- runtime ----
   int16_t  curIndex;              // the flap on show; always valid
   // Quiet Time: the flap the host asked for while the wall was suppressed, or -1.
   //
@@ -114,19 +100,17 @@ extern SemaphoreHandle_t vmMutex;
 extern StaticSemaphore_t vmMutexBuf;
 
 // Allocate and populate `count` modules (internal RAM -- see the struct note).
-// Every field is deterministic: IDs 0..count-1 by wall slot, a MAC-derived
-// serial number, and every reel homed. Nothing is persisted or restored.
-// Call after sfFsInit() (it deletes the legacy /vmods.dat if one exists).
+// Every field is deterministic: IDs 0..count-1 by wall slot, every reel homed.
+// Nothing is persisted or restored. Call after sfFsInit() (it deletes the
+// legacy /vmods.dat if one exists).
 void vmInit(int count);
 
-// Feed one complete frame to every module. Called by vlinkDeliver on the
-// sender's task, so it must not block. Replies are queued (see vlink.h), never
-// sent inline.
-void vmDispatch(const uint8_t* frame, size_t len, uint32_t now);
+// Feed one complete frame to every module. Called by frameSend under vmMutex,
+// so it must not block. Nothing replies.
+void vmDispatch(const uint8_t* frame, size_t len);
 
-// Advance every reel by at most one half-flap, and queue advertisements from any
-// unprovisioned module. Called from the display task ~ every frame. Returns true
-// if anything moved (so the panel needs a redraw).
+// Advance every reel by at most one half-flap. Called from the display task
+// ~ every frame. Returns true if anything moved (so the panel needs a redraw).
 bool vmTick(uint32_t now);
 
 // Build the shared reel. Call once, before vmInit(). Idempotent.

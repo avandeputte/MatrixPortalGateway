@@ -3,7 +3,7 @@
 
 
 // tasks.cpp -- the long-lived FreeRTOS task loops.
-// taskFrames (core 0): drains the virtual modules' replies and mirrors them to MQTT.
+// taskFrames (core 0): sends scheduled batch frames when they fall due.
 // taskRTC  (core 0): refreshes the wall clock once a second.
 // taskWeb  (core 0): services the HTTP server.
 // taskNetwork (core 1): WiFi/MQTT reconnect, status publishing, virtual-module and
@@ -14,72 +14,10 @@
    FreeRTOS tasks
 ---------------------------------------------------------- */
 
-// Reply receive (Core 0)
-//
-// The split-flap protocol uses newline-terminated ASCII messages that always
-// start with 'm'. Replies arrive from vlinkPoll() as whole frames, but they are
-// still fed through the same byte accumulator the UART fed: it is the accumulator
-// that guarantees every frame handed to the MQTT mirror is exactly one complete
-// protocol message, and running the synthesized replies down the identical path
-// is what keeps the gateway above it honest.
-
-// Frame accumulator. Written only by taskFrames, hence file-static rather than a
-// parameter. A frame from a virtual module is at most an 'A' reply (~225 bytes
-// with the 163-flap legacy tail); MSG_MAX_BYTES (320) is sized so it fits in one
-// FrameMsg untruncated.
-static uint8_t frameLineBuf[TX_MAX_BYTES];
-static size_t  frameLineLen = 0;
-
-// Feed one received byte to the accumulator; a completed frame is mirrored to MQTT.
-static void frameIngestByte(uint8_t c) {
-  // Touch the watchdog per byte: a sustained burst of reply traffic (each completed
-  // frame triggers rtcFormatTime + MQTT) could otherwise keep us in this
-  // loop past the 30 s frame-task watchdog threshold and trigger a false stall reboot.
-  wdgFramesMs  = millis();
-  gLastRxMs = wdgFramesMs;   // reply-activity marker for the TX reply-quiet guard
-
-  // If we see an 'm' and the buffer already holds something that doesn't start
-  // with 'm', discard the stale partial frame and start fresh.
-  if (c == 'm' && frameLineLen > 0 && frameLineBuf[0] != 'm') frameLineLen = 0;
-
-  // Start accumulating only once we've seen the leading 'm'.
-  if (frameLineLen == 0 && c != 'm') return;
-
-  if (frameLineLen < TX_MAX_BYTES - 1) {
-    frameLineBuf[frameLineLen++] = c;
-  } else {
-    frameLineLen = 0;   // full without a terminator -- oversized frame, discard
-    return;
-  }
-  if (c != '\n') return;
-
-  // Newline = end of message. Mirror it to MQTT.
-  rxCount = rxCount + 1;
-  FrameMsg m;
-  m.timestamp = millis();
-  m.dir       = 'R';
-  // The FrameMsg is fixed-size; store at most MSG_MAX_BYTES.
-  size_t ringLen = (frameLineLen > MSG_MAX_BYTES) ? MSG_MAX_BYTES : frameLineLen;
-  m.len = ringLen;
-  memcpy(m.data, frameLineBuf, ringLen);
-  rtcFormatTime(m.wallTime, sizeof(m.wallTime));
-  // Mirrored to MQTT (<prefix>/frames/rx) but NOT to the web Monitor and NOT parsed:
-  // these replies were synthesized by the virtual modules a microsecond ago, in
-  // this same process. Echoing them as 'received' was theatre, and the module
-  // registry the parse used to feed is gone. The MQTT wire mirror is the only
-  // consumer left.
-  mqttPublishMsg(m);
-  frameLineLen = 0;
-}
-
 void taskFrames(void* pv) {
-  static uint8_t rxFrame[TX_MAX_BYTES];   // one polled reply; this task is its only reader
-
-  // No startup discovery. There is nothing to discover: the wall IS the modules, all of them
-  // exist from vmInit(), and none can appear or vanish. The m*v broadcast, the registry
-  // reconciliation it fed, and the "45 known modules of 75" bug that came with it are all
-  // gone with the registry.
-
+  // Nothing arrives here any more: the modules stopped replying when the
+  // 'v'/'A' queries were removed (v1.24), so this task's whole job is the
+  // scheduled-batch drain below.
   while (true) {
     // Stand down while a firmware image is streaming: no frame traffic, no flash
     // contention. Feed the watchdog so the stall check stays happy.
@@ -89,15 +27,6 @@ void taskFrames(void* pv) {
     // cascade pacing actually happens -- moved off taskWeb so the HTTP server never
     // blocks on delay() (see frames.h). At most one 5 ms tick of latency per frame.
     framePollScheduled(millis());
-
-    // Drain what the modules have queued, bounded per iteration so a long
-    // broadcast reply train cannot monopolise the task -- the rest arrives on the
-    // next 5 ms tick.
-    for (int frames = 0; frames < 8; frames++) {
-      size_t rxLen = 0;
-      if (!vlinkPoll(millis(), rxFrame, sizeof(rxFrame), &rxLen)) break;
-      for (size_t i = 0; i < rxLen; i++) frameIngestByte(rxFrame[i]);
-    }
 
     wdgFramesMs = millis();
     vTaskDelay(pdMS_TO_TICKS(5));

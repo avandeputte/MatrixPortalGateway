@@ -11,7 +11,6 @@
 //   charset.*   UTF-8 <-> Windows-1252 flap-byte transcoding
 //   font1252.*  GENERATED bitmap glyphs for the 216 printable CP1252 flaps
 //   frames.*    frame sanitization, TX choke point, command log
-//   vlink.*     the seam underneath frameSend: delivery + reply queue
 //   vmodule.*   the virtual split-flap modules: protocol, reel, persistence
 //   display.*   HUB75 panel geometry and the flap renderer
 //   panel.*     the HUB75 driver itself (LCD_CAM + GDMA)
@@ -35,7 +34,6 @@
 #include "font1252.h"
 #include "rtc.h"
 #include "frames.h"
-#include "vlink.h"
 #include "vmodule.h"
 #include "display.h"
 #include "modules.h"

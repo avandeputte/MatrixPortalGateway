@@ -265,47 +265,6 @@ void dispDrawGlyph1252(int px, int py, const Font1252* f, uint8_t ch,
   }
 }
 
-// The faint seam around every module -- the emulated wall's split-flap gaps. Drawn BEFORE
-// the faces (see dispRender) so a glyph or a colour swatch always overwrites any pixel it
-// shares with a seam: the grid only ever fills the gutters between cells. Its faintness is
-// cfg.gridColor scaled by cfg.gridBright, deliberately NOT panelBright -- the backend's
-// global brightness dims the seam and the glyphs by the same factor, so the seam has to be
-// dim on its own to read as a hairline. gridBright 0 draws nothing.
-static void drawGrid() {
-  if (!cfg.gridBright) return;
-  const uint8_t rgb[3] = { (uint8_t)(cfg.gridColor >> 16),
-                           (uint8_t)(cfg.gridColor >> 8),
-                           (uint8_t)(cfg.gridColor) };
-  Ink k = fade(rgb, cfg.gridBright);
-  const int x0 = gPanel.originX, y0 = gPanel.originY;
-  const int wallW = gPanel.cols * gPanel.cellW;   // cells tile exactly; margins are outside
-  const int wallH = gPanel.rows * gPanel.cellH;
-  // Verticals: 2px straddling every cell boundary, so each glyph sits centred between a
-  // pair of them. The cell has a 1px gutter on each side (the glyph is centred with an
-  // even horizontal margin), and a boundary's two columns are the right gutter of the cell
-  // to its left and the left gutter of the cell to its right -- both glyph-free. The pair
-  // is what makes a character look centred; a single 1px line leaves it hugging one side.
-  // (Horizontals stay 1px below: the cell is only a pixel taller than the font, so there
-  // is just one gutter row to put them in.) Clamp keeps the outer pair on the panel.
-  for (int c = 0; c <= gPanel.cols; c++) {
-    int xb = x0 + c * gPanel.cellW;
-    for (int d = -1; d <= 0; d++) {
-      int x = xb + d;
-      if (x < 0) x = 0; else if (x >= gPanel.panelW) x = gPanel.panelW - 1;
-      panelVLine(x, y0, wallH, k.r, k.g, k.b);
-    }
-  }
-  // Horizontals: between-row seams sit on each cell's BOTTOM row -- the glyph is top-aligned
-  // when the cell is only a pixel taller than the font (padY rounds down), so its one spare
-  // row is at the bottom and the seam clears the glyph. The bottom frame is the last of
-  // those. The top frame has no such gutter above the first row, so put it one row up into
-  // the panel margin when there is one; that also makes the vertical rhythm regular (a line
-  // above and below every glyph). With no margin it falls back onto y0, hidden behind the
-  // glyphs it grazes.
-  panelHLine(x0, y0 > 0 ? y0 - 1 : y0, wallW, k.r, k.g, k.b);
-  for (int r = 1; r <= gPanel.rows; r++)
-    panelHLine(x0, y0 + r * gPanel.cellH - 1, wallW, k.r, k.g, k.b);
-}
 
 // A colour flap is its swatch; a pictograph is its own ink; everything else is the warm
 // split-flap white the letters are printed in.
@@ -375,7 +334,6 @@ bool dispRender() {
   if (want != lastBright) { panelSetBrightness(want); lastBright = want; }
 
   panelClear();
-  drawGrid();                           // behind the faces: it only fills the gutters
   for (int i = 0; i < n; i++) {
     int col = i % gPanel.cols;
     int row = i / gPanel.cols;

@@ -1,21 +1,20 @@
 #include "gateway.h"
-#include "vmodule.h"   // vmFlapIndexOf: Quiet Time resolves captured frames to flap indices
+#include "vmodule.h"   // vmDispatch + vmFlapIndexOf (Quiet Time resolves frames to flap indices)
 
 // frames.cpp -- the protocol frame layer.
 // Owns the single send choke point (frameSend: strips/re-frames every outbound
-// command, enforces the reply-quiet guard and Quiet Time, and mirrors the frame
-// to MQTT) and the PSRAM-backed command log.
+// command, enforces Quiet Time, and mirrors the frame to MQTT) and the
+// PSRAM-backed command log.
 // Frame-classification helpers here are file-private. frameSend is serialized by
 // txMutex across tasks.
 //
 // The wire protocol is unchanged from the physical Split-Flap Gateway -- framing,
 // sanitization, the MQTT mirror are all identical, which is exactly why the
 // companion app cannot tell. The only difference is the last few inches: where
-// the physical gateway wrote bytes to a UART, this hands them to vlinkDeliver()
+// the physical gateway wrote bytes to a UART, this hands them to vmDispatch()
 // and the virtual modules parse them.
 // ---- file-private forward declarations ----
 static bool sfFrameIsDisplayMotion(const uint8_t* data, size_t len);
-static bool sfIsDirectVersionQuery(const uint8_t* data, size_t len);
 static char sfFrameCmd(const uint8_t* data, size_t len, int* outAddr);
 static size_t sfKnownCommandLen(const uint8_t* data, size_t len);
 static void sfQuietCapturePending(const uint8_t* data, size_t len);
@@ -148,7 +147,6 @@ void logDrainTo(void (*sink)(const char* frag)) {
 static char sfFrameCmd(const uint8_t* data, size_t len, int* outAddr) {
   *outAddr = -2;
   if (len < 3 || data[0] != 'm') return 0;
-  if (data[1] == 'X') return 0;          // by-serial frame
   size_t i = 1;
   int addr;
   if (data[i] == '*') { addr = -1; i++; }
@@ -166,9 +164,8 @@ static char sfFrameCmd(const uint8_t* data, size_t len, int* outAddr) {
 }
 
 // True if the frame is normal display motion that Quiet Time should suppress:
-// show character ('-'), show index ('+'), or home ('h'). The queries ('v', 'A')
-// pass -- they move nothing -- and anything else is ignored by the modules
-// anyway, so there is no motion to suppress.
+// show character ('-'), show index ('+'), or home ('h'). Anything else is
+// ignored by the modules anyway, so there is no motion to suppress.
 static bool sfFrameIsDisplayMotion(const uint8_t* data, size_t len) {
   int addr;
   char cmd = sfFrameCmd(data, len, &addr);
@@ -226,42 +223,21 @@ static void sfQuietCapturePending(const uint8_t* data, size_t len) {
   xSemaphoreGive(vmMutex);
 }
 
-// True iff `data[0..len)` (caller strips trailing CR/LF first) is a DIRECT,
-// numeric-id firmware-version query "m<id>v" with no payload after the 'v'.
-// This is the one frame the gateway transmits WITHOUT a newline terminator: a real
-// module answers a direct version query the instant it parses the 'v', and on the
-// physical half-duplex wire the gateway is still driving the line (and deaf) for one
-// more byte-time if a '\n' follows -- so the reply's first bytes are lost. There is
-// no such race here, but the frame normaliser keeps the wire format faithful. Broadcast "m*v",
-// by-serial "mX.." frames, and anything with bytes after the 'v' are NOT matched
-// and so keep their terminator.
-static bool sfIsDirectVersionQuery(const uint8_t* data, size_t len) {
-  int addr;
-  if (sfFrameCmd(data, len, &addr) != 'v') return false;   // command must be 'v'
-  if (addr < 0) return false;                              // numeric id only (reject m*v)
-  size_t i = 1;                                            // locate the command char:
-  while (i < len && data[i] >= '0' && data[i] <= '9') i++; //   skip 'm', then the digits
-  return (i + 1 == len);                                   // 'v' must be the final byte
-}
-
 // Given a frame `data[0..len)` (caller strips trailing CR/LF first), return the
 // length of the longest prefix that forms a COMPLETE, well-formed known command.
 // Bytes beyond that are extraneous and the caller may trim them -- so "m4vDSassa"
 // collapses to "m4v" instead of leaning on the module to ignore the junk. This is
 // grammar ENFORCEMENT, not guessing: each command's payload shape is fixed by the
 // (frozen) protocol. Only the commands this product actually speaks are modelled
-// ('-', '+', 'h', 'v', 'A' -- what the companion, the web UI and MQTT emit); the
-// physical gateway's calibration/dump family is not, so those frames -- like
-// by-serial "mX.." frames and any unrecognized command char -- return the full
-// length UNCHANGED and reach the modules untrimmed, which ignore them. The
+// ('-', '+', 'h' -- what the companion, the web UI and MQTT emit); everything
+// else -- the physical gateway's calibration/dump family, the removed 'v'/'A'
+// queries, by-serial "mX.." frames, any unrecognized command -- returns the full
+// length UNCHANGED and reaches the modules untrimmed, which ignore it. The
 // raw-send bypass skips this entirely.
 static size_t sfKnownCommandLen(const uint8_t* data, size_t len) {
   if (len < 2 || data[0] != 'm') return len;        // not an m-frame: leave as-is
-  if (data[1] == 'X') return len;                   // by-serial frame: pass through untouched
   size_t i = 1;
-  bool wildcard = false;
   if (data[i] == '*') {                             // wildcard address
-    wildcard = true;
     i = i + 1;
   } else if (data[i] >= '0' && data[i] <= '9') {    // numeric id (0..254)
     long v = 0;
@@ -277,11 +253,6 @@ static size_t sfKnownCommandLen(const uint8_t* data, size_t len) {
     // Home: zero payload, complete the instant the command char is read.
     case 'h':
       return i;                                       // trim anything after
-    // Version query and combined all-fields dump ('A', v25+): zero-payload when
-    // addressed by a numeric id, but a wildcard broadcast may carry an optional
-    // "<lo>-<hi>" range (m*v0-49 / m*A0-49) -- pass those through untrimmed.
-    case 'v': case 'A':
-      return wildcard ? len : i;
     // Show one character: keep exactly one payload byte.
     case '-':
       if (i < len) i++;
@@ -306,16 +277,12 @@ void frameSend(const uint8_t* data, size_t len, bool raw) {
   //   2) trim anything past a complete, well-formed known command, so a stray
   //      "m4vDSassa" becomes "m4v" rather than relying on the module to ignore
   //      the junk (see sfKnownCommandLen), then
-  //   3) re-add exactly one '\n' terminator -- EXCEPT a direct numeric-id version
-  //      query "m<id>v", which must ship bare to dodge the half-duplex turnaround
-  //      collision (see sfIsDirectVersionQuery). So "m1v", "m1v\n", "m1v\r\n", and even
-  //      "m1vJUNK" all leave as bare "m1v", while "m5-A" and "m9o2832" leave
-  //      correctly newline-terminated (which also spares payload commands the
-  //      module's 50 ms idle-timeout wait).
-  // Raw path (raw==true -- the Monitor "Raw" toggle, or {"raw":true} on the
-  // REST/MQTT send): transmit the caller's exact bytes verbatim, with no trim and
-  // no terminator change -- a deliberate debugging escape hatch. The reply-quiet
-  // guard, Quiet Time, tracking, and the MQTT mirror still apply.
+  //   3) re-add exactly one '\n' terminator. (The physical wire's one exception
+  //      -- the bare direct version query -- left with the 'v' command in v1.24.)
+  // Raw path (raw==true -- {"raw":true} on the REST/MQTT send): transmit the
+  // caller's exact bytes verbatim, with no trim and no terminator change -- a
+  // deliberate debugging escape hatch. Quiet Time, tracking, and the MQTT
+  // mirror still apply.
   size_t bare;
   bool   appendNL;
   if (raw) {
@@ -326,7 +293,7 @@ void frameSend(const uint8_t* data, size_t len, bool raw) {
     while (bare > 0 && (data[bare-1] == '\n' || data[bare-1] == '\r')) bare--;
     if (!bare) return;                                  // nothing but terminators
     bare      = sfKnownCommandLen(data, bare);          // trim trailing junk
-    appendNL  = !sfIsDirectVersionQuery(data, bare);    // version query => ship bare
+    appendNL  = true;
   }
   if (!bare) return;
 
@@ -338,33 +305,22 @@ void frameSend(const uint8_t* data, size_t len, bool raw) {
     DBG("[QUIET] suppressed display frame (%u bytes)\n", (unsigned)bare);
     return;
   }
-  // Reply-quiet guard: if modules are
-  // mid-response (the reply train after a broadcast m*v), hold off until replies
-  // have been quiet for TX_REPLY_GUARD_MS, bounded by TX_REPLY_WAIT_CAP_MS so we
-  // always make progress. Nothing can be corrupted here
-  // -- replies are queued, not clocked out -- but it keeps command and reply
-  // frames from interleaving in the MQTT mirror, and it keeps this path identical
-  // to the one the physical gateway runs.
-  //
   // From here through mqttPublishMsg is the critical section: a static scratch
-  // buffer, txCount, and vlinkDeliver's writes to the module array. txMutex
-  // serializes it across taskWeb / taskNetwork / taskFrames so two senders cannot
-  // interleave. There are no early returns inside, so the mutex is always
-  // released. Lock order is txMutex -> {msgMutex, vmMutex}, never inverted: nothing takes
-  // txMutex while holding either of those. vlinkDeliver takes vmMutex from in here, which is
+  // buffer, txCount, and vmDispatch's writes to the module array. txMutex
+  // serializes it across taskWeb / taskNetwork / taskFrames so two senders
+  // cannot interleave. There are no early returns inside, so the mutex is
+  // always released. Lock order is txMutex -> {msgMutex, vmMutex}, never
+  // inverted: nothing takes txMutex while holding either of those -- which is
   // exactly why no caller may hold vmMutex across frameSend.
   if (txMutex) xSemaphoreTake(txMutex, portMAX_DELAY);
-  {
-    unsigned long waitStart = millis();
-    while (millis() - gLastRxMs < TX_REPLY_GUARD_MS &&
-           millis() - waitStart < TX_REPLY_WAIT_CAP_MS) {
-      vTaskDelay(pdMS_TO_TICKS(2));
-    }
-  }
   // Deliver the finished frame to the virtual modules. They strip any trailing
   // terminator themselves, so `bare` is handed over as-is and `appendNL` only
-  // affects what the MQTT mirror records as the on-wire bytes.
-  vlinkDeliver(data, bare);
+  // affects what the MQTT mirror records as the on-wire bytes. Wait for the
+  // lock rather than time out: dropping a command here would lose a character
+  // off the wall with no error anywhere.
+  if (vmMutex) xSemaphoreTake(vmMutex, portMAX_DELAY);
+  vmDispatch(data, bare);
+  if (vmMutex) xSemaphoreGive(vmMutex);
   txCount = txCount + 1;
   gDisplayDirty = true;   // HA display sensor refresh (network task, rate-limited)
   // Mirror the frame to MQTT (<prefix>/frames/tx) -- that surface is about the wire
@@ -374,7 +330,6 @@ void frameSend(const uint8_t* data, size_t len, bool raw) {
   // once, by logCommand().
   FrameMsg m;
   m.timestamp = millis();
-  m.dir = 'T';
   size_t ringLen = (bare > MSG_MAX_BYTES) ? MSG_MAX_BYTES : bare;
   memcpy(m.data, data, ringLen);
   if (appendNL && ringLen < MSG_MAX_BYTES) m.data[ringLen++] = '\n';

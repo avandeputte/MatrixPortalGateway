@@ -379,9 +379,9 @@ static void handleApiDisplayCells() {
 /* GET /api/flap/modules
  *
  * The wall IS the modules. There is no registry to consult: every cell of the wall is a
- * module, its id is its cell index, its serial is a deterministic function of the MAC and
- * that index, and its firmware version is a compile-time constant. This reads vmods[]
- * directly -- the one place that actually knows.
+ * module and its id is its cell index. This reads vmods[] directly -- the one
+ * place that actually knows. (The fake serial numbers and reported module
+ * firmware version left with the 'v'/'A' queries in v1.24.)
  *
  * (There used to be a shadow copy: a sticky SFModule registry, persisted to FATFS, with a
  * stale-probe pruner and a duplicate-ID heuristic. It existed to track modules that appear
@@ -402,11 +402,10 @@ static void handleApiModules() {
   for (int i = 0; i < n; i++) {
     // Snapshot one module under the lock, format outside it: the drawing task walks this
     // array at 100 Hz and must not wait on a socket write.
-    uint8_t id = 0; char sn[VM_SN_CHARS + 1] = ""; int flap = 0;
+    uint8_t id = 0; int flap = 0;
     if (vmMutex && xSemaphoreTake(vmMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
       id   = vmods[i].id;
       flap = vmods[i].curIndex;
-      strlcpy(sn, vmods[i].sn, sizeof(sn));
       xSemaphoreGive(vmMutex);
     }
     // flapChar reports the CODE POINT, like /api/display/state: a pictograph flap has no
@@ -424,11 +423,10 @@ static void handleApiModules() {
       if (c) { utf8[0] = c; utf8[1] = 0; }
     }
 
-    char row[160];
+    char row[96];
     snprintf(row, sizeof(row),
-             "%s{\"id\":%u,\"sn\":\"%s\",\"provisioned\":true,\"fwVersion\":\"%d\","
-             "\"flapIndex\":%d,\"flapChar\":\"%s\"}",
-             i ? "," : "", (unsigned)id, sn, VM_FW_VERSION, flap, utf8);
+             "%s{\"id\":%u,\"flapIndex\":%d,\"flapChar\":\"%s\"}",
+             i ? "," : "", (unsigned)id, flap, utf8);
     server.sendContent(row);
     wdgWebMs = millis();
   }
@@ -734,15 +732,15 @@ static void handleApiStatus() {
   unsigned stkDsp = hTaskDisp ? uxTaskGetStackHighWaterMark(hTaskDisp) : 0;
   char out[900];
   snprintf(out, sizeof(out),
-    "{\"uptime\":%lu,\"rx\":%lu,\"tx\":%lu,"
+    "{\"uptime\":%lu,\"tx\":%lu,"
     "\"wifi\":%s,\"ip\":\"%d.%d.%d.%d\",\"apip\":\"%d.%d.%d.%d\","
     "\"heap\":%u,\"minheap\":%u,\"mqtt\":%s,\"modules\":%d,"
     "\"stk\":{\"frames\":%u,\"web\":%u,\"net\":%u,\"ota\":%u,\"rtc\":%u,\"disp\":%u},"
     "\"panel\":{\"ok\":%s,\"w\":%u,\"h\":%u,\"cols\":%u,\"rows\":%u,"
-    "\"cellW\":%u,\"cellH\":%u,\"depth\":%u,\"font\":\"%s\",\"vmods\":%d,\"drop\":%lu},"
+    "\"cellW\":%u,\"cellH\":%u,\"depth\":%u,\"font\":\"%s\",\"vmods\":%d},"
     "\"time\":\"%s\",\"ntpSynced\":%s,\"quiet\":%s,"
     "\"companion\":{\"url\":\"%s\",\"status\":\"%s\",\"age\":%ld}}",
-    millis()/1000, rxCount, txCount,
+    millis()/1000, txCount,
     (WiFi.status()==WL_CONNECTED)?"true":"false",
     lip[0],lip[1],lip[2],lip[3],
     aip[0],aip[1],aip[2],aip[3],
@@ -752,7 +750,7 @@ static void handleApiStatus() {
     stkFrm, stkWeb, stkNet, stkOta, stkRtc, stkDsp,
     gPanel.ready?"true":"false", gPanel.panelW, gPanel.panelH,
     gPanel.cols, gPanel.rows, gPanel.cellW, gPanel.cellH, (unsigned)panelInfo().depth,
-    dispFontName(), vmCount, vlinkDropped,
+    dispFontName(), vmCount,
     rtcBuf,
     ntpSynced?"true":"false",
     gQuietTime?"true":"false",
@@ -796,8 +794,6 @@ static void handleApiConfigGet() {
   doc["panelBright"]   = cfg.panelBright;
   doc["flapMs"]        = cfg.flapMs;
   doc["flapMax"]       = cfg.flapMax;
-  doc["gridColor"]     = cfg.gridColor;   // 0xRRGGBB seam colour
-  doc["gridBright"]    = cfg.gridBright;   // 0 = grid off
   doc["maxFlaps"]      = SF_MAX_FLAPS;   // 237: glyphs + colours + lowercase + pictographs
   char out[1280];   // headroom for identity + panel + JSON-escaped SSID/TZ/hostname
   serializeJson(doc, out, sizeof(out));
@@ -944,11 +940,6 @@ static void handleApiConfigSettings() {
     if (v >= 2 && v <= 500) cfg.flapMs = (uint16_t)v; }
   if (doc["flapMax"].is<int>())       { int v = doc["flapMax"];
     if (v >= 1 && v <= FLAP_ANIM_MAX) cfg.flapMax = (uint8_t)v; }
-  // Grid seam colour + intensity. Both live (dispMarkDirty below repaints the wall).
-  if (doc["gridColor"].is<int>())     { long v = doc["gridColor"].as<long>();
-    if (v >= 0 && v <= 0xFFFFFF) cfg.gridColor = (uint32_t)v; }
-  if (doc["gridBright"].is<int>())    { int v = doc["gridBright"];
-    if (v >= 0 && v <= 255) cfg.gridBright = (uint8_t)v; }
   // Hostname. Lowercase first (DNS labels are case-insensitive but mDNS responders and
   // browsers are not always careful), then validate. An empty string means "go back to
   // deriving it from the MAC" -- that is how you un-pin a name. Takes effect on reboot.

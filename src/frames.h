@@ -4,8 +4,9 @@
 // is the physical Split-Flap Gateway's (the companion app speaks it verbatim),
 // but there is no transceiver here: frameSend() owns frame correctness
 // (strip terminators, trim junk past a complete command, re-frame, enforce
-// Quiet Time, mirror to MQTT) and hands the finished bytes to vlinkDeliver()
-// instead of a UART.
+// Quiet Time, mirror to MQTT) and hands the finished bytes straight to
+// vmDispatch() under vmMutex. Nothing replies -- the query commands went in
+// v1.24 -- so frames flow one way: in.
 
 #ifndef MPGW_FRAMES_H
 #define MPGW_FRAMES_H
@@ -13,11 +14,10 @@
 #include "common.h"
 
 /* ----------------------------------------------------------
-   Protocol frame passed to the MQTT wire mirror
+   Protocol frame passed to the MQTT wire mirror (<prefix>/frames/tx)
 ---------------------------------------------------------- */
 struct FrameMsg {
   unsigned long timestamp;
-  char          dir;            // 'T' delivered to the modules, 'R' synthesized module reply
   uint8_t       data[MSG_MAX_BYTES];
   size_t        len;
   char          wallTime[24];   // gateway-TZ string (MQTT / serial debug)
@@ -44,7 +44,6 @@ extern volatile int logHead;
 extern volatile int logPollCursor;
 extern StaticSemaphore_t msgMutexBuf;
 extern SemaphoreHandle_t msgMutex;
-extern volatile unsigned long rxCount;
 extern volatile unsigned long txCount;
 
 // Allocate `bytes` in PSRAM (preferred) or internal RAM, zeroed, logging where it

@@ -56,7 +56,7 @@ void mqttPublishMsg(const FrameMsg& m) {
   buf[n++] = '}';
   buf[n]   = '\0';
   char _t[80];
-  snprintf(_t, sizeof(_t), "%s/frames/%s", cfg.mqttPrefix, m.dir=='R'?"rx":"tx");
+  snprintf(_t, sizeof(_t), "%s/frames/tx", cfg.mqttPrefix);
   mqttEnqueue(_t, buf, n);
 }
 
@@ -82,13 +82,13 @@ void mqttPublishStatus() {
   unsigned sDsp = hTaskDisp  ? uxTaskGetStackHighWaterMark(hTaskDisp)  : 0;
   char buf[640];
   size_t n = (size_t)snprintf(buf, sizeof(buf),
-    "{\"uptime\":%lu,\"rx\":%lu,\"tx\":%lu,\"modules\":%d,"
+    "{\"uptime\":%lu,\"tx\":%lu,\"modules\":%d,"
     "\"time\":\"%s\",\"ntpSynced\":%s,\"heap\":%u,\"minheap\":%u,"
     "\"maxblk\":%u,\"psram\":%u,\"rssi\":%d,\"wifi\":%s,"
     "\"stkframes\":%u,\"stkweb\":%u,\"stknet\":%u,\"stkota\":%u,\"stkrtc\":%u,\"stkdisp\":%u,"
     "\"ip\":\"%s\",\"url\":\"http://%s/\",\"version\":\"%s\","
     "\"quiet\":%s}",
-    millis()/1000, rxCount, txCount, vmCount,
+    millis()/1000, txCount, vmCount,
     timeBuf, ntpSynced?"true":"false", freeHeap, minHeap,
     maxBlk, (unsigned)ESP.getFreePsram(), rssi, (WiFi.status()==WL_CONNECTED)?"true":"false",
     sFrm, sWeb, sNet, sOta, sRtc, sDsp,
@@ -200,7 +200,6 @@ void haPublishDiscovery(bool enable) {
     {"minheap", "Min Free Heap",  "minheap", "B",   NULL,              "mdi:memory"},
     {"maxblk",  "Max Alloc Block","maxblk",  "B",   NULL,              "mdi:memory"},
     {"rssi",    "WiFi Signal",    "rssi",    "dBm", "signal_strength", NULL},
-    {"rx",      "Frames Received","rx",      NULL,  NULL,              "mdi:download-network"},
     {"tx",      "Frames Sent",    "tx",      NULL,  NULL,              "mdi:upload-network"},
     {"psram",   "Free PSRAM",     "psram",   "B",   NULL,              "mdi:memory"},
     {"stkframes","Stack Frames",  "stkframes","B",  NULL,              "mdi:layers"},
@@ -238,6 +237,9 @@ void haPublishDiscovery(bool enable) {
   snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/stkbus/config", node);
   mqttEnqueue(topic, "", 0);
   snprintf(topic, sizeof(topic), "homeassistant/switch/%s/maintenance/config", node);
+  mqttEnqueue(topic, "", 0);
+  // v1.24: replies are gone, so the Frames Received sensor went with them.
+  snprintf(topic, sizeof(topic), "homeassistant/sensor/%s/rx/config", node);
   mqttEnqueue(topic, "", 0);
 
   printf("[HA] Discovery %s (node %s)\n", enable ? "published" : "removed", node);

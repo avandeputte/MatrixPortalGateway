@@ -10,7 +10,7 @@ info:
     **The `version` above is the gateway API level (3.1), not the firmware's version.** That is
     deliberate: the companion app gates its features on reading `>= 3.1` from `GET /api/config`,
     so this firmware answers `3.1.0` there and reports its own firmware version (currently
-    `1.22.0`) in `fwVersion`, next to `product`. See ARCHITECTURE.md → "Firmware identity vs
+    `1.24.0`) in `fwVersion`, next to `product`. See ARCHITECTURE.md → "Firmware identity vs
     API level".
 
     Endpoints for calibration and provisioning are absent by design — this product's modules are
@@ -84,6 +84,12 @@ paths:
         The only send path since v1.22.0: the physical gateway's `/api/rs485/send`
         (kept as a compatibility alias through v1.21) and the interim `/api/bus/send`
         were removed in v1.22.0 and now 404.
+
+        Frames are **one-way** (v1.24.0): the modules act on `-` (show character), `+`
+        (show index) and `h` (home), silently ignore everything else, and nothing ever
+        replies — the `v`/`A` queries were removed. The MQTT mirror carries only the
+        outbound wire (`<prefix>/frames/tx`). Read the wall back through
+        `/api/display/state`, `/api/flap/modules` and `/api/capabilities`.
       requestBody:
         required: true
         content:
@@ -107,12 +113,12 @@ paths:
             examples:
               home_all:
                 value: { data: "m*h" }
-              version_all:
-                value: { data: "m*v" }
               show_char:
                 value: { data: "m5-A" }
+              show_index:
+                value: { data: "m5+223" }
               raw_verbatim:
-                value: { data: "m4vDSassa", raw: true }
+                value: { data: "m5-A\n", raw: true }
       responses:
         "200":
           $ref: "#/components/responses/Ok"
@@ -130,6 +136,8 @@ paths:
         frames are delivered on a schedule by the frames task (so a paced batch never blocks the
         web server). `step_ms` 0 sends everything at once. The only batch path since v1.22.0:
         `/api/rs485/batch` and the interim `/api/bus/batch` were removed in v1.22.0 and now 404.
+        Like `/api/frames/send`, frames are one-way (v1.24.0) — nothing replies, and the MQTT
+        mirror carries only `<prefix>/frames/tx`.
       requestBody:
         required: true
         content:
@@ -883,7 +891,7 @@ paths:
                 type: object
                 properties:
                   product:  { type: string, example: "Matrix Portal Gateway" }
-                  fw:       { type: string, example: "1.22.0" }
+                  fw:       { type: string, example: "1.24.0" }
                   api:      { type: string, example: "3.1.0" }
                   grid:
                     type: object
@@ -1358,8 +1366,6 @@ paths:
                     Applies on the **next frame**, no reboot, so you can tick it and see the answer.
                 flapMs:        { type: integer, minimum: 2, maximum: 500, example: 60, description: "ms per flap. Next flap." }
                 flapMax:       { type: integer, minimum: 1, maximum: 64, example: 64, description: "Max flips per change. Next change." }
-                gridColor:     { type: integer, minimum: 0, maximum: 16777215, example: 2105376, description: "Seam colour as 0xRRGGBB. Live — the wall repaints." }
-                gridBright:    { type: integer, minimum: 0, maximum: 255, example: 40, description: "Seam intensity; 0 = grid off. Live." }
                 hostname:      { type: string, example: "flapwall", description: "1–31 chars of a-z 0-9 '-' (lowercased for you). Empty string reverts to the MAC-derived name. **Reboot to apply.**" }
                 haEnabled:   { type: boolean, example: true, description: "Enable Home Assistant MQTT auto-discovery and entity state topics. Short-circuits: send alone." }
                 serialDebug: { type: boolean, example: true, description: "Short-circuits: send alone." }
@@ -1523,20 +1529,20 @@ components:
 
     Module:
       type: object
+      description: >-
+        One module row of `GET /api/flap/modules`. The `sn`, `provisioned` and `fwVersion`
+        fields left in v1.24.0 along with the fake serial numbers and the `v`/`A` protocol
+        queries they answered — no consumer existed.
       properties:
         id:          { type: integer, description: "Module ID == its position in the grid", example: 5 }
-        sn:          { type: string,  description: "Serial number hex string. Always begins FA5E ('fabricated') so it is never mistaken for a real ATtiny SIGROW read.", example: "FA5E4827E2205AC80010" }
-        provisioned: { type: boolean, description: "Always true: a drawn module cannot be unprovisioned.", example: true }
         flapIndex:   { type: integer, description: "The flap on show, 0..236. 0 is blank.", example: 1 }
         flapChar:    { type: string,  description: "The character on show, as a Unicode code point (so pictographs report as themselves). A colour flap reports as its protocol letter: r o y g b p w.", example: "A" }
-        fwVersion:   { type: string,  description: "The emulated module firmware version.", example: "31" }
 
     Status:
       type: object
       properties:
         uptime:    { type: integer, description: "Seconds since boot", example: 3842 }
-        rx:        { type: integer, description: "Frames received since boot", example: 124 }
-        tx:        { type: integer, description: "Frames transmitted since boot", example: 37 }
+        tx:        { type: integer, description: "Frames transmitted since boot. (`rx` left in v1.24.0 — nothing replies, so nothing is ever received.)", example: 37 }
         wifi:      { type: boolean, example: true }
         ip:        { type: string,  example: "192.168.1.105" }
         apip:      { type: string,  example: "192.168.4.1" }
@@ -1574,7 +1580,6 @@ components:
             depth: { type: integer, description: "Effective colour bit depth (may be auto-clamped to fit RAM)", example: 4 }
             font:  { type: string,  description: "The face the wall is rendered with", example: "6x10" }
             vmods: { type: integer, description: "Virtual modules on the wall", example: 45 }
-            drop:  { type: integer, description: "Reply frames the virtual link has dropped since boot (queue full)", example: 0 }
         companion:
           type: object
           description: "The registered companion app (v3.0)"
@@ -1588,7 +1593,7 @@ components:
       properties:
         version:      { type: string,  example: "3.1.0", description: "The gateway API level, NOT this firmware's version — the companion parses MAJOR.MINOR out of it and gates its features on >= 3.1. `product` and `fwVersion` are what tell the firmwares apart. Absent on pre-3.1 gateways" }
         product:      { type: string,  example: "Matrix Portal Gateway" }
-        fwVersion:    { type: string,  example: "1.22.0", description: "This firmware's own version" }
+        fwVersion:    { type: string,  example: "1.24.0", description: "This firmware's own version" }
         wSSID:        { type: string,  example: "MyNetwork" }
         mqHost:       { type: string,  example: "192.168.1.50" }
         mqPort:       { type: integer, example: 1883 }
@@ -1610,6 +1615,4 @@ components:
         panelBright:   { type: integer, description: "Panel brightness 1–255", example: 160 }
         flapMs:        { type: integer, description: "ms per flap of the flip animation", example: 60 }
         flapMax:       { type: integer, description: "Max flips per character change", example: 64 }
-        gridColor:     { type: integer, description: "Seam colour as 0xRRGGBB", example: 2105376 }
-        gridBright:    { type: integer, description: "Seam intensity 0–255; 0 = grid off", example: 40 }
         maxFlaps:      { type: integer, description: "Flaps on the drawn reel: glyphs + colours + lowercase + pictographs", example: 237 }

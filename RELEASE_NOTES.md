@@ -1,5 +1,29 @@
 # Matrix Portal Gateway — Release Notes
 
+## v1.24.0 — 2026-07-18
+
+Frames now flow one way. The physical protocol's query commands existed so a controller
+could discover hardware it couldn't see; a drawn wall has nothing to discover.
+
+### Removed
+
+- **The `v`/`A` query commands and the entire reply pipeline.** No client ever sent them
+  (the companion reads `/api/config` and `/api/capabilities`; the wall reads back through
+  `/api/display/state`). With them go: the by-serial `mX` addressing, the reply queue and
+  its seam (`src/vlink.*` deleted — `frameSend` now hands frames straight to `vmDispatch`
+  under `vmMutex`), the reply-quiet guard, taskFrames' reply drain, the **`frames/rx`**
+  MQTT topic, the `rx` counter (status JSON, `[WDG]` line, dashboard tile) and the HA
+  "Frames Received" sensor (retained config deleted on connect), and the `panel.drop`
+  counter. The frame sanitizer now models exactly `-`, `+`, `h`.
+- **The fake module serial numbers.** They existed because ATtiny modules have factory
+  ids and a physical wire has unprovisioned hardware to address; here a module's identity
+  is its wall slot. `VModule` shrinks ~40 → ~16 bytes; `GET /api/flap/modules` rows are
+  now `{id, flapIndex, flapChar}` (the `sn`/`provisioned`/`fwVersion` fields had no
+  consumer).
+- **The grid seam.** The decorative border between module cells (`gridColor`/`gridBright`,
+  the Grid color/brightness settings, `drawGrid()`) is gone — it never looked good. The
+  module grid *layout* (`gridRows`/`gridCols`) is unchanged.
+
 ## v1.23.0 — 2026-07-18
 
 ### Breaking
