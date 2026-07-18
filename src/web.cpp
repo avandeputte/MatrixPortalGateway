@@ -1624,6 +1624,10 @@ static uint8_t* rbBuf = nullptr; static size_t rbCap = 0;
 static void handleApiCanvasFrameGet() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   if (!gPanel.ready) { sendJsonError(503, "Panel not running"); return; }
+  // Streaming a ~48 KB screenshot out holds internal TX buffers; on a RAM-tight 256x64 board, done
+  // while the companion is also pushing, that can approach loop()'s reboot floor. Same circuit
+  // breaker as the large uploads: refuse a preview rather than risk a reboot. A poller just retries.
+  if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) { sendJsonError(507, "Low on memory -- try again in a moment"); return; }
   const bool rgb565 = (server.arg("fmt") == "rgb565");
   const size_t need = (size_t)gPanel.panelW * gPanel.panelH * (rgb565 ? 2 : 3);
   if (rbCap < need) {
