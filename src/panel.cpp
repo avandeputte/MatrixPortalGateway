@@ -714,6 +714,12 @@ void panelStop() {
   gpio_set_level((gpio_num_t)HUB75_OE, 1);
 }
 
+void panelRelease() {
+  if (info.ok) panelStop();
+  panelFreeAll();
+  info.ok = false;
+}
+
 void panelResume() {
   if (!info.ok) return;
   pinmux(HUB75_OE, (uint8_t)(LCD_DATA_OUT0_IDX + 7));

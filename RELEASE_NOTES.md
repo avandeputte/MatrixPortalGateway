@@ -1,5 +1,20 @@
 # Matrix Portal Gateway — Release Notes
 
+## v2.2.2 — 2026-07-19
+
+### Fixed
+
+- **Web OTA now works on RAM-tight geometries too.** v2.2.1's backpressure and floor
+  exemption fixed OTA where heap was plentiful, but a 256×64 board *enters* the upload
+  with only ~40 KB free (its 102 KB framebuffer is the difference) — no throttle can
+  conjure headroom that isn't there. The panel now RELEASES its framebuffer and DMA
+  descriptors for the duration of the upload (`panelRelease()`): the display goes dark,
+  38–102 KB returns to the heap, and the TCP window has room to breathe. A successful
+  upload reboots into the new image as always; a failed one re-creates the panel at the
+  depth that was actually running (respecting the auto-clamp) and repaints. Verified on
+  the 256×64 board at full speed on a strong link: HTTP 200, previously seven straight
+  failures.
+
 ## v2.2.1 — 2026-07-19
 
 ### Fixed

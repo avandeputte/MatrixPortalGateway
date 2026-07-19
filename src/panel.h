@@ -73,6 +73,13 @@ void panelSetOverlay(void (*fn)(void));
 // Halt output (dark panel). Used during OTA flash writes -- not because the GDMA
 // refresh needs the CPU (it does not), but for the panel-current and memory-bandwidth headroom
 // while the upload runs. panelResume() undoes it.
+
+// Halt output AND free the framebuffers/descriptors (v2.2.2). Hands the panel's
+// internal DMA RAM (38-102 KB depending on geometry) back to the heap for the
+// duration of a web OTA -- on a 256x64 board the upload otherwise starts with
+// ~40 KB free and the TCP window exhausts it. Marks the panel not-ready; undo
+// with panelBegin() (a successful OTA reboots instead and re-inits normally).
+void panelRelease();
 void panelStop();
 void panelResume();
 

@@ -166,12 +166,32 @@ void dispReturnToWall() {
   dispMarkDirty();                 // repaint the wall
 }
 
-// Show black and halt output while a firmware image streams in -- see the note on
-// panelStop() in panel.h. Reversible -- see dispResume().
-void dispBlank() { if (gPanel.ready) panelStop(); }
+// Show black, halt output, and FREE the panel's DMA RAM while a firmware image
+// streams in (v2.2.2): the 38-102 KB framebuffer is the headroom the upload's
+// TCP window needs on RAM-tight geometries. See panelRelease() in panel.h.
+void dispBlank() {
+  if (!gPanel.ready) return;
+  panelRelease();
+  gPanel.ready = false;
+}
 
-// Restart output and repaint. Called when an upload fails.
-void dispResume() { if (gPanel.ready) { panelResume(); dispMarkDirty(); } }
+// Re-create the panel and repaint. Called only when an upload FAILS (a
+// successful one reboots into the new image and initialises normally).
+void dispResume() {
+  if (gPanel.ready) { panelResume(); dispMarkDirty(); return; }   // legacy path
+  // Re-init at the depth that was actually RUNNING (dispInit may have clamped
+  // the configured depth to fit RAM; asking for the configured value again
+  // could refuse and leave the wall dark).
+  uint8_t d = panelInfo().depth ? panelInfo().depth : cfg.panelBitDepth;
+  if (panelBegin(gPanel.panelW, gPanel.panelH, d)) {
+    panelSetColourOrder(cfg.panelBGR);
+    panelSetBrightness(cfg.panelBright);
+    gPanel.ready = true;
+    dispMarkDirty();
+  } else {
+    printf("[PANEL] re-init after failed OTA did not fit -- headless until reboot\n");
+  }
+}
 
 // Terminal: black, halted, marked not-ready. Only once a reboot is certain.
 void dispStop() { dispBlank(); gPanel.ready = false; }
