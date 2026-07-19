@@ -1602,6 +1602,18 @@ static void handleApiCanvasTransition() {
   server.send(200, "application/json", resp);
 }
 
+// POST /api/system/reboot -- clean remote restart (v2.2.3). Born of a bench session
+// where "please power-cycle it" needed human hands: geometry changes, a wedged
+// peripheral, or a committed-but-unbooted OTA all want this. Replies first, then
+// reboots via the same deliver-response-then-restart path the OTA upload uses
+// (gOtaRebootPending: taskWeb restarts only after handleClient has flushed the 200).
+static void handleApiSystemReboot() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  logCommand('R', "reboot");
+  server.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+  gOtaRebootPending = true;
+}
+
 // ---- animation library (v2.1) -------------------------------------------------------
 // Map a canvasAnim* return code onto the error surface.
 static void animRcReply(int rc, const char* okBody) {
@@ -2647,6 +2659,8 @@ void webInit() {
   server.on("/api/canvas/anim/delete", HTTP_POST,    handleApiAnimDelete);
   server.on("/api/canvas/anim/delete", HTTP_OPTIONS, handleOptions);
   server.on("/api/canvas/anims",       HTTP_GET,     handleApiAnimList);
+  server.on("/api/system/reboot",      HTTP_POST,    handleApiSystemReboot);
+  server.on("/api/system/reboot",      HTTP_OPTIONS, handleOptions);
   server.on("/api/canvas/transition",  HTTP_POST,    handleApiCanvasTransition);
   server.on("/api/canvas/transition",  HTTP_OPTIONS, handleOptions);
   server.on("/api/canvas/ticker",    HTTP_POST,    handleApiCanvasTicker);

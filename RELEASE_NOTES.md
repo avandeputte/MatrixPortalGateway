@@ -1,5 +1,13 @@
 # Matrix Portal Gateway — Release Notes
 
+## v2.2.3 — 2026-07-19
+
+### Added
+
+- **`POST /api/system/reboot`** — clean remote restart, replying before rebooting (the
+  same deliver-then-restart path web OTA uses). For applying geometry changes, kicking a
+  wedged peripheral, or booting a committed OTA image without touching the hardware.
+
 ## v2.2.2 — 2026-07-19
 
 ### Fixed
