@@ -16,15 +16,16 @@ serial transceiver is gone. In its place is a wall of *virtual* split-flap modul
 receiving the same protocol frames a real module would, acting on the display commands
 (`-`, `+`, `h`), and rendering itself as a flapping character cell on the panel.
 
-Everything above the protocol seam is unchanged: the web UI, the REST API, MQTT and Home
-Assistant discovery, OTA, the command log. The
+Everything above the protocol seam is unchanged: the web UI, the REST API, OTA, the
+command log. (MQTT and Home Assistant support existed through v2.2 and were removed in
+v3.0 — unused here, and every byte of RAM counts on this board.) The
 [companion app](../../SplitFlapGatewayCompanion) drives it without modification and cannot
 tell the difference. (One thing above the seam is *gone* rather than unchanged — the sticky
 module registry. See **New in 1.10**.)
 
 ```
      ┌──────────────────────────────────────────────┐
-     │  web UI · REST API · MQTT · OTA · command log     │   unchanged from Gateway 3.1
+     │  web UI · REST API · OTA · command log       │   from Gateway 3.1 (MQTT/HA removed in 3.0)
      ├──────────────────────────────────────────────┤
      │  frameSend()  framing · sanitization · Quiet  │   unchanged
      ├──────────────────────────────────────────────┤
@@ -37,6 +38,43 @@ module registry. See **New in 1.10**.)
 ```
 
 ---
+
+## New in 3.0
+
+The HTTP stack is replaced: the one-connection-at-a-time Arduino `WebServer` is gone,
+and every route now runs natively on ESP-IDF's **`esp_http_server`** (`src/httpx.*` is
+the thin helper layer over it — dispatch hook, JSON/chunk/query helpers). Multiple
+concurrent sockets, per-socket recv/send timeouts, LRU purge of idle connections, and —
+the reason for the migration — **async requests**, which make a push stream possible:
+
+- **`GET /api/events` — a Server-Sent Events stream** that pushes the display state the
+  instant the wall changes (rate-limited to ~7 events/s, so a flip cascade streams as
+  motion), with an immediate snapshot on connect and 15 s keepalives. Advertised as the
+  `events` capability token; up to 3 concurrent streams. **The dashboard's Live Display
+  now rides this stream** — the preview follows the wall in near-real-time instead of
+  polling every 1.5 s — and falls back to polling automatically if the stream drops.
+- **Breaking: uploads are raw bodies now, not multipart.** `POST /api/ota/upload` takes
+  the bare `firmware.bin` (`curl --data-binary @firmware.bin …`), and
+  `POST /api/fs/upload?name=<filename>` takes the bare file with the name in the query.
+  The `/ota` page and the Files tab already speak this; only external scripts using
+  `curl -F` need the one-line change.
+- **Heap backpressure on every large stream, both directions.** The OTA upload's
+  hard-won pacing (v2.2.1) is now generalized: every inbound raw stream and every
+  outbound chunked stream slows down when internal heap runs low, closing the TCP
+  window before buffer buildup can threaten the reboot floor.
+- Handler logic is otherwise byte-for-byte the same API surface — every endpoint,
+  schema and status code is unchanged apart from the two upload bodies above.
+- **Removed: MQTT and Home Assistant support.** The broker connection, the topic tree
+  (`frames/*`, `flap/*`, `display/*`, `quiet/*`, status), HA discovery, the per-frame
+  wire mirror, the MQTT settings/HA cards and `/api/config/mqtt` + `/api/mqtt/test` are
+  all gone. Nothing here used them — the companion is pure REST and the dashboard now
+  has SSE — and the permanent broker socket + client buffers were weight exactly where
+  this board is tightest. (Anything that DID subscribe: the REST API is the surface now.)
+- **Removed: ArduinoOTA** (the never-used IDE push path, its task, UDP listener and
+  password setting) — web/curl OTA and esptool recovery are the paths, and mDNS stays.
+- **Leaner throughout**: three per-handler upload buffers merged into one; task stacks
+  right-sized; concurrent-socket ceiling tuned (4 + LRU) to bound worst-case heap dips.
+  Net: **~60 KB less flash than v2.2.4** and ~10 KB more static RAM free.
 
 ## New in 2.2
 
@@ -51,8 +89,9 @@ API level stays `3.1.0`.)
   else the root), so an uploaded animation is immediately playable by name.
 - **The `/api/fs` surface behind it**, usable without the dashboard: `GET /api/fs` (totals +
   recursive file list), `GET /api/fs/file?path=…` (download), `POST /api/fs/delete
-  {"path"}`, and `POST /api/fs/upload` (multipart, part name `file`; streamed to a `.tmp`
-  then renamed; `413` when less than 64 KB would remain free).
+  {"path"}`, and `POST /api/fs/upload` (multipart in 2.2; a raw body with
+  `?name=<filename>` since 3.0; streamed to a `.tmp` then renamed; `413` when less
+  than 64 KB would remain free).
 - **Live brightness, capability-advertised.** `GET`/`POST /api/display/brightness`
   (`{"brightness":1..255}`) applies on the next presented frame and persists — the same
   value as `panelBright` — and `GET /api/capabilities` now advertises the `brightness`
@@ -172,7 +211,7 @@ reports `fwVersion` `2.1.0`; the API level stays `3.1.0`.)
 - **No UF2 bootloader — recovery changes.** The Waveshare board has no tinyuf2, so there is no
   double-tap-reset drag-and-drop recovery: a bricked board is recovered by **holding BOOT while
   plugging in USB, then flashing with esptool** (`pio run -t upload` does this under the hood).
-  Web OTA (`/ota`) and ArduinoOTA are unchanged.
+  Web OTA (`/ota`) is unchanged.
 
 ## New in 1.24
 
@@ -1026,10 +1065,9 @@ src/canvas.*        raw canvas: frames, rects, QOI decode, draw ops, on-device a
 src/effects.*       on-device effects: plasma, fire, matrix, flip-o-rama, clock, Life
 src/panel.*         the low-level HUB75 driver: ESP32-S3 LCD_CAM + GDMA, no library
 src/modules.*       high-level protocol send helpers (text/char/home) + FATFS mount
-src/mqtt.*          MQTT client, publish queue, HA discovery
 src/web.*           HTTP server: dashboard (web_ui.h) + REST API + GET /lang/<code>
 src/web_ui.h        GENERATED by tools/build_ui.py — do not edit
-src/ota.*           firmware update: ArduinoOTA + browser upload     (unchanged)
+src/ota.*           firmware update: raw-body browser/curl upload + mDNS
 src/tasks.*         the FreeRTOS task loops
 src/main.cpp        setup() boot sequence + loop() watchdog supervisor
 
@@ -1076,7 +1114,7 @@ pio device monitor      # 115200 baud, native USB CDC
 
 There is **no UF2 bootloader** on this board, so no drag-and-drop recovery: if a flash goes
 wrong, hold **BOOT** while plugging in USB and run `pio run -t upload` (esptool) again. Once a
-working firmware is on, web OTA (`/ota`) and ArduinoOTA update it as before.
+working firmware is on, web OTA (`/ota`) updates it as before.
 
 After changing anything under `ui/`, regenerate the dashboard header — `pio run` compiles
 `src/web_ui.h`, not `ui/index.html`, so skipping this silently builds the *old* page:

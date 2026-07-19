@@ -9,8 +9,6 @@ void cfgSetDefaults() {
   memset(&cfg, 0, sizeof(cfg));
   strlcpy(cfg.wifiSSID, DEFAULT_WIFI_SSID, sizeof(cfg.wifiSSID));
   strlcpy(cfg.wifiPass, DEFAULT_WIFI_PASS, sizeof(cfg.wifiPass));
-  cfg.mqttPort      = DEFAULT_MQTT_PORT;
-  strlcpy(cfg.mqttPrefix, DEFAULT_MQTT_PREFIX, sizeof(cfg.mqttPrefix));
   strlcpy(cfg.posixTZ, "UTC0", sizeof(cfg.posixTZ));
   strlcpy(cfg.ntpServer, DEFAULT_NTP_SERVER, sizeof(cfg.ntpServer));
   cfg.gridRows = DEFAULT_GRID_ROWS;
@@ -25,8 +23,6 @@ void cfgSetDefaults() {
   cfg.hostname[0] = 0;          // blank -> derived from the MAC
   cfg.serialDebug = false;
   gSerialDebug    = false;
-  cfg.haEnabled   = false;
-  strlcpy(cfg.otaPassword, "", sizeof(cfg.otaPassword));
   strlcpy(gPosixTZ,    "UTC0", sizeof(gPosixTZ));
   // v3.0 defaults
   strlcpy(cfg.companionUrl, "", sizeof(cfg.companionUrl));
@@ -45,11 +41,6 @@ void loadConfig() {
   // blank SSID -- NVS wins and the baked-in network is never reinstated.
   strlcpy(cfg.wifiSSID,   prefs.getString("wSSID",  DEFAULT_WIFI_SSID).c_str(), sizeof(cfg.wifiSSID));
   strlcpy(cfg.wifiPass,   prefs.getString("wPASS",  DEFAULT_WIFI_PASS).c_str(), sizeof(cfg.wifiPass));
-  strlcpy(cfg.mqttHost,   prefs.getString("mqHost", "").c_str(), sizeof(cfg.mqttHost));
-  cfg.mqttPort          = prefs.getInt   ("mqPort",  DEFAULT_MQTT_PORT);
-  strlcpy(cfg.mqttUser,   prefs.getString("mqUser", "").c_str(), sizeof(cfg.mqttUser));
-  strlcpy(cfg.mqttPass,   prefs.getString("mqPass", "").c_str(), sizeof(cfg.mqttPass));
-  strlcpy(cfg.mqttPrefix, prefs.getString("mqPfx",  DEFAULT_MQTT_PREFIX).c_str(), sizeof(cfg.mqttPrefix));
   strlcpy(cfg.posixTZ, prefs.getString("tz", "UTC0").c_str(), sizeof(cfg.posixTZ));
   strlcpy(cfg.ntpServer, prefs.getString("ntp", DEFAULT_NTP_SERVER).c_str(), sizeof(cfg.ntpServer));
   cfg.gridRows = (uint8_t)prefs.getInt("gRows", DEFAULT_GRID_ROWS);
@@ -71,8 +62,6 @@ void loadConfig() {
   if (cfg.hostname[0] && !cfgValidHostname(cfg.hostname)) cfg.hostname[0] = 0;
   cfg.serialDebug = prefs.getBool("dbgSerial", false);
   gSerialDebug    = cfg.serialDebug;
-  cfg.haEnabled   = prefs.getBool("haEnabled", false);
-  strlcpy(cfg.otaPassword, prefs.getString("otaPass", "").c_str(), sizeof(cfg.otaPassword));
   // v3.0
   strlcpy(cfg.companionUrl, prefs.getString("compUrl", "").c_str(), sizeof(cfg.companionUrl));
   strlcpy(cfg.bootAnim, prefs.getString("bAnim", "").c_str(), sizeof(cfg.bootAnim));
@@ -93,15 +82,8 @@ void saveConfig() {
   prefs.putInt   ("gRows",  cfg.gridRows);
   prefs.putInt   ("gCols",  cfg.gridCols);
   prefs.putString("wPASS",  cfg.wifiPass);
-  prefs.putString("mqHost", cfg.mqttHost);
-  prefs.putInt   ("mqPort", cfg.mqttPort);
-  prefs.putString("mqUser", cfg.mqttUser);
-  prefs.putString("mqPass", cfg.mqttPass);
-  prefs.putString("mqPfx",  cfg.mqttPrefix);
   prefs.putString("tz",     cfg.posixTZ);
   prefs.putBool  ("dbgSerial", cfg.serialDebug);
-  prefs.putBool  ("haEnabled", cfg.haEnabled);
-  prefs.putString("otaPass",   cfg.otaPassword);
   // v3.0
   prefs.putString("compUrl",   cfg.companionUrl);
   prefs.putString("bAnim",     cfg.bootAnim);
@@ -137,9 +119,9 @@ bool cfgValidHostname(const char* h) {
   return true;
 }
 
-// Cached: mDNS, ArduinoOTA and the SoftAP all latch this once at init, so changing
+// Cached: mDNS and the SoftAP latch this once at init, so changing
 // cfg.hostname takes effect on the next boot. Deriving from the eFuse MAC keeps it
-// stable across reflashes and unique across boards -- the same 32-bit value the MQTT
+// stable across reflashes and unique across boards -- the same 32-bit value the (removed) MQTT
 // client id and the Home Assistant node id already use.
 const char* cfgHostname() {
   static char host[HOSTNAME_MAX];

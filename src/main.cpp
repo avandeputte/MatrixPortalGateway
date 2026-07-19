@@ -28,11 +28,10 @@ void setup() {
   // 1. Mutexes first -- must exist before any task touches shared data
   msgMutex   = xSemaphoreCreateMutexStatic(&msgMutexBuf);
   timeMutex  = xSemaphoreCreateMutexStatic(&timeMutexBuf);
-  mqttQMutex = xSemaphoreCreateMutexStatic(&mqttQMutexBuf);
   txMutex    = xSemaphoreCreateMutexStatic(&txMutexBuf);
   txQMutex   = xSemaphoreCreateMutexStatic(&txQMutexBuf);
   vmMutex    = xSemaphoreCreateMutexStatic(&vmMutexBuf);
-  psramAllocInit();   // monitor ring + MQTT queue + TX queue -> PSRAM
+  psramAllocInit();   // monitor ring + TX queue -> PSRAM
 
   // Debug output over native USB CDC (the board boots with CDC on).
   Serial.begin(115200);
@@ -139,7 +138,7 @@ void setup() {
   // answered (the SYN-ACK arrives while the radio is parked and the AP does not
   // re-deliver it), and established sockets reset by the peer. Inbound traffic hides
   // it, because serving a request keeps the radio awake -- which is why the web UI
-  // limped while every outbound MQTT connect failed.
+  // limped while every outbound TCP connect failed.
   //
   // The saving it buys is irrelevant here: this board is mains-powered and is
   // driving a HUB75 panel that dwarfs the radio's draw. Reliability wins. If a
@@ -157,17 +156,17 @@ void setup() {
 
   // 9. Servers
   otaInit();
-  mqttInit();
   webInit();
 
   // 10. Tasks. Display sits on core 1 with the network stack, leaving core 0 for
   //    frames, the web server and the clock -- the same split the physical
   //    gateway uses, with the panel taking the slot the OTA task shares.
   xTaskCreatePinnedToCore(taskRTC,     "RTC",     2048, NULL, 2, &hTaskRTC,   0);
-  xTaskCreatePinnedToCore(taskFrames,  "Frames",  6144, NULL, 3, &hTaskFrames, 0);
-  xTaskCreatePinnedToCore(taskOTA,     "OTA",     4096, NULL, 1, &hTaskOTA,   1);
-  xTaskCreatePinnedToCore(taskWeb,     "Web",     8192, NULL, 2, &hTaskWeb,   0);
-  xTaskCreatePinnedToCore(taskNetwork, "Network", 8192, NULL, 1, &hTaskNet,   1);
+  xTaskCreatePinnedToCore(taskFrames,  "Frames",  5120, NULL, 3, &hTaskFrames, 0);
+  // v3.0: HTTP requests are served by esp_http_server's own task (httpx.h); taskWeb
+  // is just the SSE pump + supervisor now, so its stack shrank from the handler-era 8 KB.
+  xTaskCreatePinnedToCore(taskWeb,     "Web",     4096, NULL, 2, &hTaskWeb,   0);
+  xTaskCreatePinnedToCore(taskNetwork, "Network", 6144, NULL, 1, &hTaskNet,   1);
   xTaskCreatePinnedToCore(taskDisplay, "Display", 4096, NULL, 2, &hTaskDisp,  1);
 
   printf("[Boot] Ready\n");
@@ -192,7 +191,7 @@ void loop() {
     // heap/min/maxblk are INTERNAL RAM only -- that is what
     // (unsigned)ESP.getFreeHeap() reports -- and the panel's DMA framebuffer is the big claimant
     // on that pool, so a modest maxblk is expected. psram is counted separately; the
-    // monitor ring, the MQTT queue and the TX queue live there. The virtual modules do
+    // monitor ring and the TX queue live there. The virtual modules do
     // NOT -- they are pinned to internal RAM, see vmInit().
     // Heap + min-ever heap + largest free block
     // (fragmentation: a big gap between freeHeap and maxAlloc is a common
@@ -205,27 +204,28 @@ void loop() {
     unsigned sFrm = hTaskFrames   ? uxTaskGetStackHighWaterMark(hTaskFrames)   : 0;
     unsigned sWeb = hTaskWeb   ? uxTaskGetStackHighWaterMark(hTaskWeb)   : 0;
     unsigned sNet = hTaskNet   ? uxTaskGetStackHighWaterMark(hTaskNet)   : 0;
-    unsigned sOta = hTaskOTA   ? uxTaskGetStackHighWaterMark(hTaskOTA)   : 0;
+    TaskHandle_t hHttpd = xTaskGetHandle("httpd");   // esp_http_server's worker
+    unsigned sHtp = hHttpd     ? uxTaskGetStackHighWaterMark(hHttpd)     : 0;
     unsigned sRtc = hTaskRTC   ? uxTaskGetStackHighWaterMark(hTaskRTC)   : 0;
     unsigned sDsp = hTaskDisp  ? uxTaskGetStackHighWaterMark(hTaskDisp)  : 0;
     static unsigned minBlkEver = 0xFFFFFFFFu;
     if (maxBlk < minBlkEver) minBlkEver = maxBlk;
     printf("[WDG] up=%lus heap=%u min=%u maxblk=%u minblk=%u "
-           "stk(frames/web/net/ota/rtc/disp)=%u/%u/%u/%u/%u/%u "
+           "stk(frames/web/net/httpd/rtc/disp)=%u/%u/%u/%u/%u/%u "
            "tx=%lu psram=%u panel=%d "
-           "wifi=%d ap=%d rssi=%d mqtt=%d mods=%d\n",
+           "wifi=%d ap=%d rssi=%d mods=%d\n",
            now/1000, freeHeap, minHeap, maxBlk, minBlkEver,
-           sFrm, sWeb, sNet, sOta, sRtc, sDsp,
+           sFrm, sWeb, sNet, sHtp, sRtc, sDsp,
            txCount,
            (unsigned)ESP.getFreePsram(), (int)gPanel.ready,
            (int)(WiFi.status()==WL_CONNECTED),
            (int)gApActive,
            (WiFi.status()==WL_CONNECTED) ? (int)WiFi.RSSI() : 0,
-           (int)mqtt.connected(), vmCount);
+           vmCount);
 
     // Boot grace period: skip stall detection for the first 60 s. The first boot
     // after flashing formats the FATFS partition (a long blocking flash
-    // operation), and WiFi/MQTT bring-up can briefly skew task scheduling.
+    // operation), and WiFi bring-up can briefly skew task scheduling.
     if (now >= 60000UL) {
       // A heartbeat in the future (wdg > now) can only come from transient boot
       // skew -- treat it as healthy rather than letting the unsigned subtraction

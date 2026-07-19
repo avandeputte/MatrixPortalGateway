@@ -4,7 +4,7 @@
 // is the physical Split-Flap Gateway's (the companion app speaks it verbatim),
 // but there is no transceiver here: frameSend() owns frame correctness
 // (strip terminators, trim junk past a complete command, re-frame, enforce
-// Quiet Time, mirror to MQTT) and hands the finished bytes straight to
+// Quiet Time) and hands the finished bytes straight to
 // vmDispatch() under vmMutex. Nothing replies -- the query commands went in
 // v1.24 -- so frames flow one way: in.
 
@@ -13,15 +13,6 @@
 
 #include "common.h"
 
-/* ----------------------------------------------------------
-   Protocol frame passed to the MQTT wire mirror (<prefix>/frames/tx)
----------------------------------------------------------- */
-struct FrameMsg {
-  unsigned long timestamp;
-  uint8_t       data[MSG_MAX_BYTES];
-  size_t        len;
-  char          wallTime[24];   // gateway-TZ string (MQTT / serial debug)
-};
 
 // ---- owned globals (defined in globals.cpp) ----
 extern SemaphoreHandle_t txMutex;
@@ -36,7 +27,7 @@ struct GwLogEntry {
   unsigned long timestamp;      // millis() at capture
   unsigned long epoch;          // UTC epoch (0 = clock not set yet)
   char          wallTime[24];   // gateway-TZ string, for the serial log
-  char          source;         // 'R' REST, 'M' MQTT
+  char          source;         // 'R' REST
   char          text[LOG_TEXT_MAX];
 };
 extern GwLogEntry* logRing;
@@ -51,7 +42,7 @@ extern volatile unsigned long txCount;
 void* gwPsramAlloc(const char* name, size_t bytes);
 
 void psramAllocInit();
-// Record one inbound command. source is 'R' (REST) or 'M' (MQTT).
+// Record one inbound command. source is 'R' (REST).
 void logCommand(char source, const char* text);
 // Stream the log as JSON, one object per sink() call; never builds the whole array.
 void logDrainTo(void (*sink)(const char* frag));

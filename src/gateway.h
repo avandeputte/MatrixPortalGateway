@@ -15,9 +15,8 @@
 //   display.*   HUB75 panel geometry and the flap renderer
 //   panel.*     the HUB75 driver itself (LCD_CAM + GDMA)
 //   modules.*   high-level protocol send helpers (text/char/home) + FATFS mount
-//   mqtt.*      MQTT client, outbound publish queue, Home Assistant discovery
 //   web.*       HTTP server: dashboard page (web_ui.h) + REST API handlers
-//   ota.*       firmware update: ArduinoOTA + browser upload
+//   ota.*       firmware update: raw-body browser/curl upload + mDNS
 //   tasks.*     the FreeRTOS task loops (Frames / RTC / Web / Network / Display)
 //   main.cpp    setup() boot sequence + loop() watchdog supervisor
 //
@@ -37,7 +36,6 @@
 #include "vmodule.h"
 #include "display.h"
 #include "modules.h"
-#include "mqtt.h"
 #include "ota.h"
 #include "web.h"
 #include "tasks.h"

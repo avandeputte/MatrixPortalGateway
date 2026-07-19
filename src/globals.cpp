@@ -35,15 +35,9 @@ char gCompanionTabs[COMPANION_TABS_MAX] = "";
 volatile unsigned long gCompanionSeenMs = 0;
 volatile bool          gCompanionUrlDirty   = false;   // URL changed, not yet in flash
 volatile unsigned long gCompanionUrlDirtyMs = 0;       // millis() of the LAST change
-// Set when the wall changes (in frameSend); the network task publishes
-// the HA display-state topic (rate-limited) so HA reflects what's shown without
-// spamming. frameSend sets it; the network task (tasks.cpp) reads and clears it.
-volatile bool gDisplayDirty = false;
-// Set for the duration of a web OTA upload. While true the network task skips
-// MQTT status/display/discovery publishes so the upload has the heap and CPU it
-// needs (these reduce the contiguous heap the WiFi/TCP stack relies on, a known
-// cause of mid-upload connection drops). Set by the OTA handlers; read by the
-// network task.
+// Set for the duration of a web OTA upload. While true the display/frame tasks
+// stand down so the upload has the heap and CPU it needs. Set by the OTA
+// handler; read across tasks.
 volatile bool gOtaInProgress = false;
 volatile bool gCanvasMode    = false;
 // taskDisplay sets this true once it has seen gCanvasMode (or gOtaInProgress) and parked,
@@ -69,25 +63,13 @@ SemaphoreHandle_t     timeMutex     = NULL;
 StaticSemaphore_t     timeMutexBuf;
 // Watchdog timestamps -- each task writes millis() here every iteration
 volatile unsigned long wdgFramesMs     = 0;
-int                    mqttFailCount = 0;  // consecutive MQTT connect failures
 volatile unsigned long wdgNetMs     = 0;
 volatile unsigned long wdgWebMs     = 0;
 volatile unsigned long wdgDispMs    = 0;
 // Task handles -- used for uxTaskGetStackHighWaterMark on the Status page so
 // stack pressure is visible BEFORE it becomes a canary crash.
-TaskHandle_t hTaskRTC = NULL, hTaskFrames = NULL, hTaskOTA = NULL,
+TaskHandle_t hTaskRTC = NULL, hTaskFrames = NULL,
                     hTaskWeb = NULL, hTaskNet = NULL, hTaskDisp = NULL;
-// MQTT outbound queue -- frame/web tasks enqueue; network task publishes
-
-// Outbound MQTT publish queue (~25 KB). Lives in PSRAM -- it's drained by the
-// network task and written under mqttQMutex, never from an ISR or DMA, so the
-// slightly slower PSRAM is fine and it frees ~25 KB of internal RAM. Allocated
-// in psramAllocInit(); falls back to internal RAM if PSRAM is unavailable.
-MqttQItem*            mqttQueue     = NULL;
-volatile int          mqttQHead     = 0;
-volatile int          mqttQTail     = 0;
-SemaphoreHandle_t     mqttQMutex    = NULL;
-StaticSemaphore_t     mqttQMutexBuf;
 // Scheduled outbound frame ring (paces /api/frames/batch off taskWeb -- see frames.h).
 // PSRAM: written by taskWeb, drained by taskFrames, never from an ISR or DMA.
 TxQItem*              txQueue       = NULL;
@@ -97,10 +79,9 @@ SemaphoreHandle_t     txQMutex      = NULL;
 StaticSemaphore_t     txQMutexBuf;
 // Serializes the module-touching section of frameSend. There is no UART to garble any
 // more, but the section is still shared mutable RAM: a static scratch buffer, the
-// txCount counter, vmDispatch's mutation of the module array, and the MQTT mirror.
-// taskWeb (REST, core 0), taskNetwork (MQTT, core 1) and taskFrames (scheduled batch
-// frames, core 0) all call frameSend, so it is genuinely concurrent and genuinely
-// cross-core. Lock order is ALWAYS txMutex -> vmMutex (frameSend takes vmMutex around
+// txCount counter and vmDispatch's mutation of the module array. The httpd task
+// (REST, core 0) and taskFrames (scheduled batch frames, core 0) both call
+// frameSend, so it is genuinely concurrent. Lock order is ALWAYS txMutex -> vmMutex (frameSend takes vmMutex around
 // vmDispatch): never call frameSend while holding vmMutex, or it re-takes it and
 // self-deadlocks. The rule used to name the module registry's lock. The registry
 // is gone; the rule is not -- it now guards the thing that was the truth all along.
@@ -133,7 +114,7 @@ bool sfFsReady = false;   // set true once FFat is mounted
    ----------------------------------------------------------
    THE wall. Not a model of it and not a cache of it: vmInit() creates every module from
    rows x cols, none can appear or vanish, and vmods[i].curIndex IS the flap on show. Every
-   read path -- /api/display/state, /api/status, the MQTT display sensor, the quiet-time
+   read path -- /api/display/state, /api/status, the SSE stream, the quiet-time
    snapshot -- reads it directly. There used to be a second copy of this (the module
    registry: one byte per cell), and a byte cannot name a flap on a 237-flap reel.
 
@@ -141,20 +122,10 @@ bool sfFsReady = false;   // set true once FFat is mounted
    second (vmTick) on the core the panel refresh runs on, and this board's quad-SPI PSRAM
    stalls that walk long enough to wander the OE window -- an idle wall that shimmers.
    vmInit() pins it with MALLOC_CAP_INTERNAL for exactly that reason. The monitor ring and
-   the MQTT queue ARE in PSRAM (gwPsramAlloc); neither is walked on a 100 Hz path.
+   ARE in PSRAM (gwPsramAlloc); none is walked on a 100 Hz path.
 ---------------------------------------------------------- */
 VModule*              vmods     = NULL;
 int                   vmCount   = 0;
 SemaphoreHandle_t     vmMutex   = NULL;
 StaticSemaphore_t     vmMutexBuf;
-WiFiClient   mqttWifiClient;        // persistent client for PubSubClient
-PubSubClient mqtt(mqttWifiClient);  // mqttInit() configures timeouts on this
-
-unsigned long lastStatusMs = 0;
-unsigned long          lastDispPubMs   = 0;
-unsigned long mqttRetryMs  = 0;
-// Grows on repeated MQTT connect failures (30s -> 300s) so an unreachable broker is
-// not retried every 30 s forever; reset to 30 s on a successful connect.
-unsigned long mqttRetryDelayMs = 30000UL;
-HealWebServer server(80);
 unsigned long staDownSince = 0;   // millis() the station last dropped (0 = up/never)

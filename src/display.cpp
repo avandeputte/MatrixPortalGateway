@@ -100,7 +100,7 @@ void dispInit() {
 #if PANEL_DISABLE
   /* Diagnostic A/B: bring the whole gateway up with the panel never started -- no
      framebuffer, no GDMA, no LCD_CAM clock, no panel current draw. Everything else
-     (WiFi, web, MQTT, the frame link, the 45 virtual modules) runs exactly as
+     (WiFi, web, the frame link, the 45 virtual modules) runs exactly as
      normal; the wall is simply not driven.
 
      This exists to answer one question: is the radio's misbehaviour caused by the
@@ -125,7 +125,7 @@ void dispInit() {
   gPanel.ready = panelBegin(gPanel.panelW, gPanel.panelH, depth);
   panelSetColourOrder(cfg.panelBGR);   // the panel's own wiring, not something we can detect
   if (!gPanel.ready) {
-    // Headless is a legitimate state: the web UI, MQTT and all the virtual modules still
+    // Headless is a legitimate state: the web UI and all the virtual modules still
     // work, so report the fault and carry on rather than refusing to boot.
     printf("[PANEL] no output -- running headless\n");
     return;

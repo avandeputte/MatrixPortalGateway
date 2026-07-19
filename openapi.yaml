@@ -15,8 +15,15 @@ info:
     **The `version` above is the gateway API level (3.1), not the firmware's version.** That is
     deliberate: the companion app gates its features on reading `>= 3.1` from `GET /api/config`,
     so this firmware answers `3.1.0` there and reports its own firmware version (currently
-    `2.2.0`) in `fwVersion`, next to `product`. See ARCHITECTURE.md → "Firmware identity vs
+    `3.0.0`) in `fwVersion`, next to `product`. See ARCHITECTURE.md → "Firmware identity vs
     API level".
+
+    **Firmware 3.0 replaced the HTTP server** (ESP-IDF `esp_http_server`, natively) and with it:
+    `GET /api/events`, a Server-Sent Events stream pushing the display state whenever the wall
+    changes (the `events` capability token — the dashboard's live preview rides it); and a
+    **breaking change to the two upload endpoints**: `POST /api/ota/upload` and
+    `POST /api/fs/upload?name=<filename>` now take the raw file as the request body — no
+    multipart. Everything else on this surface is unchanged.
 
     **Firmware 2.1 grows the canvas surface** — an animation library persisted to FATFS (plus a
     `bootAnim` config field), an overlay ticker, full-frame transitions, a sprite atlas for the
@@ -38,8 +45,9 @@ info:
     the AP fallback network.
 
     JSON endpoints accept and return `application/json`. The canvas
-    frame/rect/qoi/anim/atlas/gif/font uploads, the companion settings blob and the OTA upload
-    carry binary bodies instead. All endpoints include `Access-Control-Allow-Origin: *`.
+    frame/rect/qoi/anim/atlas/gif/font uploads, the companion settings blob, the OTA upload and
+    the fs upload carry binary bodies instead. All endpoints include
+    `Access-Control-Allow-Origin: *`.
 
 servers:
   - url: http://192.168.4.1
@@ -82,7 +90,7 @@ paths:
       tags: [Frames]
       summary: Drain the command log
       description: >-
-        Returns the commands received (REST and MQTT) since the last call, up to 64, then
+        Returns the commands received since the last call, up to 64, then
         advances the cursor. On this firmware there is no physical wire, so this is a log of
         commands the gateway acted on, not an RX/TX wire trace. Each call drains what is new.
       responses:
@@ -106,7 +114,7 @@ paths:
 
         Frames are **one-way** (v1.24.0): the modules act on `-` (show character), `+`
         (show index) and `h` (home), silently ignore everything else, and nothing ever
-        replies — the `v`/`A` queries were removed. The MQTT mirror carries only the
+        replies — the `v`/`A` queries were removed. The command log carries only the
         outbound wire (`<prefix>/frames/tx`). Read the wall back through
         `/api/display/state`, `/api/flap/modules` and `/api/capabilities`.
       requestBody:
@@ -155,7 +163,7 @@ paths:
         frames are delivered on a schedule by the frames task (so a paced batch never blocks the
         web server). `step_ms` 0 sends everything at once. The only batch path since v1.22.0:
         `/api/rs485/batch` and the interim `/api/bus/batch` were removed in v1.22.0 and now 404.
-        Like `/api/frames/send`, frames are one-way (v1.24.0) — nothing replies, and the MQTT
+        Like `/api/frames/send`, frames are one-way (v1.24.0) — nothing replies, and the
         mirror carries only `<prefix>/frames/tx`.
       requestBody:
         required: true
@@ -219,6 +227,42 @@ paths:
                     type: array
                     items: { type: [string, "null"] }
                     example: [" ","1","2",":","0","4","A","M",null,null]
+
+  /api/events:
+    get:
+      tags: [Display]
+      summary: Server-Sent Events push stream — the live preview's pipe (v3.0)
+      description: |
+        A `text/event-stream` (SSE) the gateway pushes to whenever the wall changes,
+        advertised as the `events` capability token. Connect with the browser's
+        `EventSource` (it reconnects on its own) or `curl -N`. On connect the stream
+        opens with a `retry:` hint and an immediate `display` snapshot; after that a
+        `display` event carries the same JSON as `GET /api/display/state` every time
+        the wall changes — rate-limited to ~7 events/s, so a flip cascade streams as
+        motion. A `: ka` comment every 15 s keeps idle connections warm.
+
+        At most **3** concurrent streams; a fourth connect is refused with `503`.
+        The dashboard's Live Display rides this stream and falls back to polling
+        `/api/display/state` when it drops.
+      responses:
+        "200":
+          description: |
+            An SSE stream. Example frames:
+
+                retry: 3000
+
+                event: display
+                data: {"rows":5,"cols":32,"cells":["H","E","L","L","O",...]}
+
+                : ka
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "503":
+          description: All event-stream slots are taken (max 3)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/display/cells:
     post:
@@ -1520,7 +1564,7 @@ paths:
                     type: array
                     description: "Capability tokens a client checks instead of sniffing the firmware version. 'canvas', 'effects' and 'ticker' appear on the Matrix gateway only. 'brightness' (v2.2) says the panel brightness is live-settable via GET/POST /api/display/brightness (also persisted as panelBright in POST /api/config/settings, 1..255, applied on the next frame)."
                     items: { type: string }
-                    example: ["cells","colors","index","lowercase","pictographs","quiet","ha","ota","canvas","effects","ticker","brightness"]
+                    example: ["cells","colors","index","lowercase","pictographs","quiet","ota","canvas","effects","ticker","brightness","events"]
 
   /api/status:
     get:
@@ -1533,42 +1577,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Status"
-
-  /api/mqtt/test:
-    post:
-      tags: [Status]
-      summary: Test MQTT broker connectivity and credentials
-      description: |
-        Performs a TCP reachability check (3s cap) followed by a real MQTT
-        CONNECT/CONNACK exchange using a throwaway client, without touching the
-        gateway's live MQTT connection. Body fields are optional; omitted fields
-        default to the saved configuration, so settings can be verified before
-        saving.
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                host: { type: string, example: "192.168.1.65" }
-                port: { type: integer, example: 1883 }
-                user: { type: string }
-                pass: { type: string }
-      responses:
-        "200":
-          description: Test result
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  ok:     { type: boolean, description: "true if MQTT CONNECT succeeded" }
-                  tcp:    { type: boolean, description: "TCP connection succeeded" }
-                  mqtt:   { type: boolean, description: "MQTT CONNECT/CONNACK succeeded" }
-                  state:  { type: integer, description: "PubSubClient state code" }
-                  detail: { type: string,  example: "bad username or password" }
-
 
   /api/quiet:
     get:
@@ -1602,8 +1610,7 @@ paths:
         last asked to show while quiet -- or, if nothing was asked, to what it was showing
         when quiet time began.
 
-        Always resets to off on reboot (not persisted). Also settable over MQTT
-        (`<prefix>/quiet/set`) and from Home Assistant.
+        Always resets to off on reboot (not persisted).
       requestBody:
         required: true
         content:
@@ -1848,28 +1855,6 @@ paths:
         "200":
           $ref: "#/components/responses/Ok"
 
-  /api/config/mqtt:
-    post:
-      tags: [Config]
-      summary: Save MQTT broker settings and reconnect
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [host, port, prefix]
-              properties:
-                host:   { type: string, example: "192.168.1.50" }
-                port:   { type: integer, default: 1883 }
-                user:   { type: string, example: "" }
-                pass:   { type: string, example: "" }
-                prefix: { type: string, default: "splitflap" }
-            example: { host: "192.168.1.50", port: 1883, user: "", pass: "", prefix: "splitflap" }
-      responses:
-        "200":
-          $ref: "#/components/responses/Ok"
-
   /api/config/settings:
     post:
       tags: [Config]
@@ -1877,10 +1862,10 @@ paths:
       description: |
         The one-call settings sink behind the dashboard's Settings page: send only the fields
         you want to change. Most take effect immediately (the exceptions say **Reboot to
-        apply**). Three fields short-circuit — `otaPassword`, `serialDebug` and `haEnabled`
+        apply**). One field short-circuits — `serialDebug`
         each save and answer on their own, ignoring anything else in the same body — so send
         those alone. If WiFi credentials are in the payload the station reconnects after the
-        response; if MQTT settings are, the broker connection is re-dialled.
+        response.
       requestBody:
         required: true
         content:
@@ -1890,11 +1875,6 @@ paths:
               properties:
                 ssid:        { type: string, example: "MyNetwork", description: "WiFi SSID. Saving triggers a reconnect." }
                 pass:        { type: string, example: "mypassword", description: "WiFi password" }
-                mqHost:      { type: string, example: "192.168.1.50", description: "MQTT broker host. Saving re-dials the broker." }
-                mqPort:      { type: integer, example: 1883 }
-                mqUser:      { type: string, example: "" }
-                mqPass:      { type: string, example: "" }
-                mqPfx:       { type: string, example: "splitflap", description: "MQTT topic prefix" }
                 posixTZ:     { type: string, example: "EST5EDT,M3.2.0,M11.1.0" }
                 ntpServer:   { type: string, example: "pool.ntp.org", description: "NTP server hostname; blank resets to pool.ntp.org" }
                 gridRows:    { type: integer, minimum: 1, maximum: 64, example: 3,  description: "Display wall rows" }
@@ -1917,9 +1897,7 @@ paths:
                 flapMax:       { type: integer, minimum: 1, maximum: 64, example: 64, description: "Max flips per change. Next change." }
                 hostname:      { type: string, example: "flapwall", description: "1–31 chars of a-z 0-9 '-' (lowercased for you). Empty string reverts to the MAC-derived name. **Reboot to apply.**" }
                 bootAnim:      { type: string, example: "rainbow", description: "Animation-library name autoplayed at boot, before WiFi (v2.1); superseded by the first display command. Empty string disables. Must match the library naming rule (1–24 chars of a-z 0-9 - _); the entry need not exist yet." }
-                haEnabled:   { type: boolean, example: true, description: "Enable Home Assistant MQTT auto-discovery and entity state topics. Short-circuits: send alone." }
                 serialDebug: { type: boolean, example: true, description: "Short-circuits: send alone." }
-                otaPassword: { type: string, example: "mysecret", description: "Short-circuits: send alone." }
             examples:
               timezone:
                 value:
@@ -1931,11 +1909,6 @@ paths:
                 value:
                   ssid: "MyNetwork"
                   pass: "mypassword"
-              mqtt:
-                value:
-                  mqHost: "192.168.1.50"
-                  mqPort: 1883
-                  mqPfx: "splitflap"
               panel:
                 value:
                   panelW: 128
@@ -1944,12 +1917,6 @@ paths:
               debug_on:
                 value:
                   serialDebug: true
-              home_assistant:
-                value:
-                  haEnabled: true
-              ota_password:
-                value:
-                  otaPassword: "mysecret"
       responses:
         "200":
           description: Saved. `warn` appears when the requested wall does not fit the panel and will be reduced on reboot.
@@ -2070,28 +2037,32 @@ paths:
   /api/fs/upload:
     post:
       tags: [Files]
-      summary: Upload a file (v2.2)
+      summary: Upload a file (v2.2; raw body since v3.0)
       description: |
-        A `multipart/form-data` file part named `file` (the OTA upload's shape). The target
-        path comes from the **client filename**, sanitized — lowercased, characters outside
+        **v3.0 breaking change:** the request body is the file itself (raw bytes, no
+        multipart), and the filename rides the `name` query parameter —
+        `curl --data-binary @sweep.mpg '.../api/fs/upload?name=sweep.mpg'`. The target
+        path comes from that **name**, sanitized — lowercased, characters outside
         `a-z 0-9 . _ -` dropped; a name that sanitizes to nothing or to more than 40 chars
         is rejected. Routing is by extension: `.mpg` lands in `/anim/`, `.fnt` in
         `/fonts/`, anything else in the root — so an uploaded animation is immediately
         playable by name. The stream goes to a `.tmp` and is renamed on success, so a
         failed upload never clobbers an existing file. Refused up front (`413`) when the
         upload would leave less than 64 KB free.
+      parameters:
+        - name: name
+          in: query
+          required: true
+          schema: { type: string }
+          description: The filename; sanitized, and its extension decides the target directory.
       requestBody:
         required: true
         content:
-          multipart/form-data:
+          application/octet-stream:
             schema:
-              type: object
-              required: [file]
-              properties:
-                file:
-                  type: string
-                  format: binary
-                  description: The file to store; its filename decides the target path.
+              type: string
+              format: binary
+              description: The file's bytes, verbatim.
       responses:
         "200":
           description: Stored
@@ -2142,25 +2113,22 @@ paths:
   /api/ota/upload:
     post:
       tags: [OTA]
-      summary: Upload compiled firmware binary
+      summary: Upload compiled firmware binary (raw body since v3.0)
       description: |
-        Accepts the compiled firmware as a `multipart/form-data` file part named
-        `firmware` (this is what the `/ota` page submits). The gateway quiesces
-        for the transfer, verifies the image, and reboots automatically on
-        success; on failure it answers `500` and stays on the running firmware.
-        Obtain the binary with a PlatformIO build (`pio run` → `firmware.bin`).
+        **v3.0 breaking change:** accepts the compiled firmware as the raw request
+        body — `curl --data-binary @firmware.bin .../api/ota/upload` (this is also
+        what the `/ota` page sends; no multipart). The gateway quiesces for the
+        transfer, verifies the image, and reboots automatically on success; on
+        failure it answers `500` and stays on the running firmware. Obtain the
+        binary with a PlatformIO build (`pio run` → `firmware.bin`).
       requestBody:
         required: true
         content:
-          multipart/form-data:
+          application/octet-stream:
             schema:
-              type: object
-              required: [firmware]
-              properties:
-                firmware:
-                  type: string
-                  format: binary
-                  description: The compiled firmware.bin
+              type: string
+              format: binary
+              description: The compiled firmware.bin, verbatim.
       responses:
         "200":
           description: Upload successful — gateway rebooting
@@ -2232,7 +2200,7 @@ components:
         ts:   { type: integer, description: "Milliseconds since boot", example: 12345 }
         ep:   { type: integer, description: "UTC epoch at capture (0 if RTC not set); UI renders in browser-local time", example: 1781210380 }
         wt:   { type: string,  description: "Gateway wall-clock timestamp", example: "2026-06-10 14:32:01" }
-        src:  { type: string,  enum: [R, M], description: "Command source: R=REST, M=MQTT" }
+        src:  { type: string,  enum: [R], description: "Command source: R=REST" }
         text: { type: string,  description: "The command, JSON-safe (control chars stripped, high CP1252 flap bytes shown as their real UTF-8 glyph)", example: "send m5-A" }
 
     Module:
@@ -2255,7 +2223,6 @@ components:
         ip:        { type: string,  example: "192.168.1.105" }
         apip:      { type: string,  example: "192.168.4.1" }
         heap:      { type: integer, description: "Free heap bytes", example: 187432 }
-        mqtt:      { type: boolean, example: true }
         modules:   { type: integer, example: 45 }
         time:      { type: string,  description: "Local RTC time", example: "2026-06-10 14:32:01" }
         ntpSynced: { type: boolean, example: true }
@@ -2303,17 +2270,11 @@ components:
         product:      { type: string,  example: "Matrix Portal Gateway" }
         fwVersion:    { type: string,  example: "2.1.0", description: "This firmware's own version" }
         wSSID:        { type: string,  example: "MyNetwork" }
-        mqHost:       { type: string,  example: "192.168.1.50" }
-        mqPort:       { type: integer, example: 1883 }
-        mqUser:       { type: string,  example: "" }
-        mqPfx:        { type: string,  example: "splitflap" }
         posixTZ:      { type: string,  example: "EST5EDT,M3.2.0,M11.1.0" }
         ntpServer:    { type: string,  example: "pool.ntp.org" }
         gridRows:     { type: integer, example: 3,  description: "Display wall rows" }
         gridCols:     { type: integer, example: 15, description: "Display wall columns" }
         serialDebug:  { type: boolean, example: false }
-        haEnabled:    { type: boolean, description: "true if Home Assistant MQTT discovery is enabled", example: false }
-        otaPasswordSet: { type: boolean, description: "true if an OTA password is configured", example: false }
         hostname:     { type: string,  description: "The effective hostname (mDNS + AP SSID) — MAC-derived when not pinned", example: "matrix-gw-3f2a" }
         hostnameAuto: { type: boolean, description: "true when the hostname is derived from the MAC rather than pinned", example: true }
         panelW:        { type: integer, description: "Panel chain width in px", example: 128 }

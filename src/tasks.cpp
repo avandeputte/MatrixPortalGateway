@@ -1,4 +1,5 @@
 #include "gateway.h"
+#include "sse.h"   // taskWeb is the SSE push pump (v3.0)
 
 
 
@@ -6,8 +7,7 @@
 // taskFrames (core 0): sends scheduled batch frames when they fall due.
 // taskRTC  (core 0): refreshes the wall clock once a second.
 // taskWeb  (core 0): services the HTTP server.
-// taskNetwork (core 1): WiFi/MQTT reconnect, status publishing, virtual-module and
-// config persistence.
+// taskNetwork (core 1): WiFi reconnect and config persistence.
 // taskDisplay (core 1, in display.cpp): steps the reels and repaints the panel.
 // Each feeds its watchdog timestamp; loop() in main.cpp reboots if one stalls.
 /* ----------------------------------------------------------
@@ -100,46 +100,68 @@ void taskRTC(void* pv) {
   }
 }
 
+// v3.0: requests are served by esp_http_server's own task (see httpx.h), so taskWeb
+// no longer pumps handleClient. It is now (a) the SSE push pump behind /api/events --
+// the ONE task that writes to those parked sockets -- (b) the web watchdog's cover while
+// the server idles, and (c) the deferred-OTA-reboot runner it always was.
 void taskWeb(void* pv) {
-  unsigned long clientSince = 0;   // millis() when current client first seen
+  uint32_t      lastHash   = 0;   // last wall state pushed to the SSE streams
+  unsigned long lastPush   = 0;   // last display event (rate floor: one per 150 ms)
+  unsigned long lastKa     = 0;   // last keepalive comment
+  unsigned long lastListen = 0;   // last listener health check
   while (true) {
-    wdgWebMs = millis();      // touch BEFORE handling (covers in-handler stalls)
-    server.handleClient();
+    const unsigned long now = millis();
 
-    // Proactively close any client that lingers connected for too long.
-    // The ESP32 WebServer keeps a half-open connection in HC_WAIT_READ for
-    // up to HTTP_MAX_DATA_WAIT; a browser (notably Chrome/Safari) that opens
-    // a speculative socket and never completes the request can otherwise
-    // wedge handleClient() and stall the web task -> "Web=0" watchdog reboot.
-    WiFiClient c = server.client();
-    if (c && c.connected()) {
-      if (clientSince == 0) clientSince = millis();
-      else if (millis() - clientSince > 8000UL) {   // 8s hard cap per connection
-        c.stop();                                    // force-close the stale socket
-        clientSince = 0;
-      }
-    } else {
-      clientSince = 0;   // no client connected -- reset the timer
-    }
+    // Web watchdog: the httpd task has no loop of its own to feed it, so cover it from
+    // here -- but only while no request has been stuck in a handler for ~2 minutes.
+    // A genuinely wedged handler stops the cover, wdgWebMs goes stale, and loop()'s
+    // 120 s stall check reboots, exactly as it did when handlers ran on this task.
+    // (Long uploads stay healthy: the shim stamps wdgWebMs on every body chunk.)
+    const unsigned long busy = httpxBusySince();
+    if (!busy || now - busy < 110000UL) wdgWebMs = now;
 
-    wdgWebMs = millis();      // touch AFTER handling
-
-    // Self-heal a silently-dead port-80 listener (see webEnsureListening): a ground-truth
-    // listening() check every 20s, acted on only when the listener is genuinely down.
-    static unsigned long lastListenCheck = 0;
-    if (millis() - lastListenCheck >= 20000UL) {
-      lastListenCheck = millis();
+    // Self-heal a dead port-80 server (boot-time httpd_start failure): a ground-truth
+    // check every 20s, acted on only when the server is genuinely down.
+    if (now - lastListen >= 20000UL) {
+      lastListen = now;
       webEnsureListening();
     }
 
-    // handleClient() has returned, so the 200 is on the wire and the socket is closed.
-    // Now it is safe to boot the image we just flashed.
+    // SSE live preview: when the wall changes, push the display state to every open
+    // /api/events stream -- at most ~7 events/s so a flip cascade streams as motion
+    // without flooding the sockets. The hash reads the reels under vmMutex; a miss
+    // (busy lock) just retries next tick.
+    if (sseClientCount() && !gOtaInProgress) {
+      if (now - lastPush >= 150) {
+        uint32_t h = 2166136261u;                     // FNV-1a over the visible state
+        if (vmMutex && xSemaphoreTake(vmMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+          for (int i = 0; i < vmCount; i++) {
+            h ^= (uint32_t)(uint16_t)vmods[i].curIndex;
+            h *= 16777619u;
+          }
+          xSemaphoreGive(vmMutex);
+          if (h != lastHash) {
+            lastHash = h;
+            lastPush = now;
+            sseBroadcastDisplay();
+            lastKa = now;                             // a data frame is also a keepalive
+          }
+        }
+      }
+      if (now - lastKa >= 15000UL) {
+        lastKa = now;
+        sseKeepalive();
+      }
+    }
+
+    // The OTA 200 was queued by the httpd task; give lwIP a moment to flush it to the
+    // browser, then boot the image we just flashed.
     if (gOtaRebootPending) {
       printf("[OTA] response delivered -- rebooting into the new image\n");
-      vTaskDelay(pdMS_TO_TICKS(250));
+      vTaskDelay(pdMS_TO_TICKS(500));
       ESP.restart();
     }
-    vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 
@@ -188,70 +210,6 @@ void taskNetwork(void* pv) {
       WiFi.disconnect();
       WiFi.begin(cfg.wifiSSID, cfg.wifiPass);
     }
-    if (staUp && strlen(cfg.mqttHost) && !gOtaInProgress) {
-      if (!mqtt.connected() && millis() - mqttRetryMs > mqttRetryDelayMs) {
-        mqttRetryMs = millis();
-        mqttConnect();
-        if (!mqtt.connected()) {
-          if (mqttFailCount < 255) mqttFailCount++;
-          // Back off: 30s, 60, 120, 240, then every 300s. A broker that is
-          // unreachable stays unreachable, and retrying it every 30 s forever
-          // buys nothing while each attempt blocks this task for the 5 s connect
-          // timeout and churns an lwIP socket.
-          //
-          // Deliberately NOT forcing a WiFi reconnect here. The old code did that
-          // after 5 straight failures, on the theory that MQTT-won't-connect means
-          // the TCP stack is wedged. It does not: MQTT also fails when the BROKER
-          // is unreachable -- and then tearing down a working station drops every
-          // in-flight HTTP response, so the web UI dies every ~150 s and the user
-          // cannot even reach the page to switch MQTT off. The cure was worse than
-          // the disease, and it hid the real fault. If WiFi is genuinely down,
-          // staUp is false and the reconnect above this block handles it.
-          unsigned long d = 30000UL << (mqttFailCount > 4 ? 4 : mqttFailCount - 1);
-          mqttRetryDelayMs = d > 300000UL ? 300000UL : d;
-        } else {
-          mqttFailCount    = 0;
-          mqttRetryDelayMs = 30000UL;
-        }
-      }
-      if (mqtt.connected()) {
-        mqtt.loop();
-        // Drain the outbound queue -- all mqtt.publish calls happen here. Each
-        // item is copied out UNDER the lock and published AFTER releasing it:
-        // publish() is a blocking TCP write, and holding mqttQMutex across up to
-        // MQTT_Q_SIZE of them starved mqttEnqueue (10 ms timeout) into silently
-        // dropping messages whenever the broker was slow.
-        for (;;) {
-          static MqttQItem item;   // this task is the only consumer
-          bool have = false;
-          if (!mqttQMutex || !mqttQueue ||
-              xSemaphoreTake(mqttQMutex, pdMS_TO_TICKS(10)) != pdTRUE) break;
-          if (mqttQTail != mqttQHead) {
-            item = mqttQueue[mqttQTail];
-            mqttQTail = (mqttQTail + 1) % MQTT_Q_SIZE;
-            have = true;
-          }
-          xSemaphoreGive(mqttQMutex);
-          if (!have) break;
-          mqtt.publish(item.topic, (uint8_t*)item.payload, item.len, false);
-        }
-      }
-    }
-    if (!gOtaInProgress && millis() - lastStatusMs > STATUS_INTERVAL_MS) {
-      lastStatusMs = millis();
-      mqttPublishStatus();
-    }
-    // Refresh the HA display sensor when the wall changed, rate-limited to avoid
-    // spamming HA's recorder. No-op unless HA integration is enabled. Skipped
-    // during an OTA upload to keep heap/CPU free for the transfer.
-    if (!gOtaInProgress && gDisplayDirty && cfg.haEnabled && millis() - lastDispPubMs > 1500) {
-      lastDispPubMs = millis();
-      // Clear the dirty flag only if it actually published. A snapshot skipped because the reel
-      // lock was momentarily busy must be retried on the next tick, not dropped -- otherwise HA
-      // keeps the prior state until the wall next changes.
-      if (mqttPublishDisplayState()) gDisplayDirty = false;
-    }
-
     // Persist the companion URL only once it has stopped moving. See the note on
     // gCompanionUrlDirty in common.h: an unconditional save turned two co-resident
     // companions into an NVS write every heartbeat, forever.

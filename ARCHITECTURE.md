@@ -4,9 +4,47 @@ This document captures the reasoning behind non-obvious design decisions in the 
 Gateway, so future maintainers (including future-you) don't have to re-derive them.
 
 It assumes the [Split-Flap Gateway 3.1 architecture notes](../../SplitFlapGateway/3.1/ARCHITECTURE.md)
-and only covers what this port changed or added. The task model, the watchdog, the choice of the
-synchronous `WebServer`, the heap-stability work and the companion
-settings blob are all inherited verbatim and are still true.
+and only covers what this port changed or added. The task model, the watchdog, the heap-stability
+work and the companion settings blob are inherited and still true — but as of v3.0 the HTTP
+server is NOT: see "The v3.0 HTTP stack" below.
+
+---
+
+## The v3.0 HTTP stack: native esp_http_server
+
+Through v2.2 the gateway inherited the physical gateway's synchronous Arduino `WebServer`
+(one connection at a time, handlers on our own `taskWeb`). v3.0 replaced it with ESP-IDF's
+`esp_http_server`, spoken natively: every handler is an `esp_err_t fn(httpd_req_t*)`,
+registered through `src/httpx.*` — a deliberately thin layer (route table + dispatch hook
+that stamps the watchdog/CORS, JSON/error/chunk/query helpers, low-heap pacing in
+`httpxRecv`/`httpxChunk`). What the swap bought, in order of importance:
+
+1. **Async requests** — `httpd_req_async_handler_begin` lets `GET /api/events` park its
+   socket and hand it to a push pump. That is the entire mechanism behind the SSE live
+   preview, and a synchronous server simply cannot do it.
+2. **Concurrent sockets** — a slow canvas stream or OTA no longer starves the companion
+   and the dashboard; httpd holds several sockets with per-socket recv/send timeouts and
+   LRU-purges the idlest when full.
+3. **Less of our own machinery** — the lingering-client reaper, the listener self-heal
+   subclass and the cross-callback upload state machines all dissolved. Uploads are now
+   linear recv loops with local state.
+
+Two inherited invariants survive the swap and matter:
+
+- **Handlers still run one at a time** (httpd has a single worker task), so the static
+  scratch buffers (`httpxBuf` — THE shared raw-body buffer every streaming handler uses —
+  plus `capBuf` and the readback buffer in `web.cpp`) remain safe without locks. If httpd
+  is ever given more workers, that assumption breaks loudly — audit every `static` in
+  `web.cpp`/`httpx.cpp` first.
+- **The web watchdog still catches wedged handlers.** taskWeb (now just the SSE pump +
+  supervisor) covers `wdgWebMs` while the server is idle, but stops covering once a
+  request has been in-flight for ~110 s (`httpxBusySince`); a truly stuck handler
+  therefore still trips loop()'s 120 s stall reboot, exactly as on the old task model.
+
+The push pump: taskWeb hashes the reels (FNV over `curIndex` under `vmMutex`) every
+150 ms while streams are open, and broadcasts the display-state JSON (built by
+`dispStateJson`, the same shape `/api/display/state` serves) to every parked SSE socket.
+One sender task means no two writers ever interleave on a socket — keep it that way.
 
 ---
 
@@ -15,7 +53,7 @@ settings blob are all inherited verbatim and are still true.
 The single most important structural decision. `frameSend()` (`src/frames.*` — the physical
 gateway's send choke point, renamed because there is no serial transceiver here) — which strips
 terminators, trims anything past a complete well-formed command, re-frames, enforces Quiet
-Time and mirrors to MQTT — is otherwise untouched. Where the physical gateway wrote the
+Time — is otherwise untouched (the MQTT wire mirror it once fed went with MQTT in v3.0). Where the physical gateway wrote the
 finished bytes to a UART, it hands them to `vmDispatch()`.
 
 That is the whole seam, and since v1.24 it is **one-way**: sanitize under `txMutex`, dispatch
@@ -52,11 +90,8 @@ nothing replies. (The last synthesized answers — the `v` version reply with it
 map — went with the queries in v1.24. They only ever reported constants, and a `VModule` is
 now ~16 bytes: an id and its runtime flip state.)
 
-With no replies, buffer sizing is simple: `TX_MAX_BYTES` (512) is kept generous for raw frame
-sends, and `MSG_MAX_BYTES` (320) caps what the MQTT wire mirror records per frame.
-`MSG_MAX_BYTES` also sizes `mqttPublishMsg`'s stack buffer (`MSG_MAX_BYTES * 3 + 80`, since a
-flap byte can expand to a 3-byte UTF-8 glyph), which `MQTT_BUF_SIZE` (1280) must be able to
-hold. Raise one, check the other.
+With no replies (and, since v3.0, no MQTT wire mirror), buffer sizing is simple:
+`TX_MAX_BYTES` (512) is kept generous for raw frame sends.
 
 ## The reel: 237 flaps, sectioned
 
@@ -118,13 +153,13 @@ share an ID. None of it survives here, because since v1.24 **nothing replies at 
 frame is a function call into `vmDispatch()`, delivery is instant and one-way, and there is
 no reply to meter, stagger or collide. (Through v1.23 the reply pipeline reproduced the
 *ordering* of the wire — replies in module-ID order, `VLINK_SLOT_MS` apart — purely so a
-broadcast train stayed legible in the MQTT mirror. With the queries gone that machinery had
+broadcast train stayed legible in the (since-removed) MQTT mirror. With the queries gone that machinery had
 nothing left to order, and it went too, along with `frameSend()`'s reply-quiet guard.)
 
 The one piece of wire pacing that remains is deliberate and outbound: `/api/frames/batch`'s
 `step_ms` staggers a cascade through the scheduled-TX ring, drained by `taskFrames` on a 5 ms
 tick, because the companion's animation styles rely on frames landing spread out in time.
-That is display choreography, not wire emulation — and the MQTT mirror
+That is display choreography, not wire emulation — and the wire mirror (while it existed)
 (`<prefix>/frames/tx`) is now the complete wire trace, because outbound frames are the whole
 of the traffic.
 
@@ -192,7 +227,7 @@ matrix into one LCD_CAM data word, so the driver does not care which pins they a
 **The pixel clock is 5 MHz.** On the MatrixPortal that was a hard radio constraint: the GDMA
 chain reads the framebuffer out of internal SRAM continuously, and at 10 MHz that traffic
 (~20 MB/s plus the descriptor fetches) starved the WiFi MAC, which shares that SRAM —
-association failed with `4WAY_HANDSHAKE_TIMEOUT` at close range and MQTT could not connect.
+association failed with `4WAY_HANDSHAKE_TIMEOUT` at close range and outbound TCP could not connect.
 **Re-tested on the Waveshare board (a 10 MHz A/B, 2026-07-18): the radio survived** — instant
 association, 0% ping loss, normal HTTP latency. But the payoff 10 MHz would unlock, depth 4 on
 a 256×64 chain at ~80 Hz, is blocked by RAM instead of the clock: that geometry's 144.6 KB
@@ -201,7 +236,7 @@ So `LCD_CLK_HZ` stays 5 MHz (~157 Hz at the default geometry, well above flicker
 ever grows single-buffering or PSRAM bounce buffers, 10 MHz + depth 4 becomes worth revisiting.
 If a long chain ghosts, lower the clock, don't raise it.
 
-Conversely, the command log, the MQTT queue, the scheduled-TX ring and the 8 MB on-device
+Conversely, the command log, the scheduled-TX ring and the 8 MB on-device
 animation store (`ANIM_MAX_BYTES`, grown from 1.5 MB now that there is 16 MB to draw on)
 are in PSRAM, precisely to leave that internal SRAM free.
 The virtual-module array is the exception — it is pinned to internal RAM, because `taskDisplay`
@@ -209,7 +244,7 @@ walks it 100×/s on the core the refresh runs on, and a PSRAM cache miss there s
 wall. None of the PSRAM structures is on a hot path, in an ISR, or fed by DMA.
 
 If `panelBegin()` still fails — a geometry too big even at depth 1 — the firmware logs why and
-**runs headless**. The web UI, MQTT and the
+**runs headless**. The web UI and the
 whole protocol emulation still work; refusing to boot over a display fault would be worse.
 
 ### Geometry falls out of the grid
@@ -295,7 +330,7 @@ boot and again only when the timezone changes; `rtcFormatTime()` computes the UT
 ## Partition table
 
 `partitions-32MB.csv` — written for this board's 32 MB octal flash: **4 MB `app0` + 4 MB
-`app1`** (so ArduinoOTA and the browser uploader both keep working) and **23.9 MB of FATFS**.
+`app1`** (so the browser/curl uploader keeps working) and **23.9 MB of FATFS**.
 
 There is **no `uf2` slot**, because the Waveshare board ships no tinyuf2 bootloader — the
 MatrixPortal's double-tap-reset UF2 recovery does not exist here, and recovery is hold-BOOT +

@@ -2,6 +2,7 @@
 #include "panel.h"   // panelSetColourOrder: a BGR panel is a runtime fact, not a build one
 #include "effects.h"
 #include "canvas.h"
+#include "sse.h"     // GET /api/events: the live-preview push stream (v3.0)
 #include "web_ui.h"
 #include <mbedtls/base64.h>   // the canvas "image" op decodes a base64 sprite
 
@@ -13,77 +14,47 @@
 // route (the HTTP method + path is noted above each, and registered in
 // webInit). Handlers are static -- only webInit is exported.
 // ---- file-private forward declarations ----
-static void handleApiChar();
-static void handleApiConfigGet();
-static void handleApiConfigMqtt();
-static void handleApiConfigSettings();
-static void handleApiConfigWifi();
-static void handleApiDisplayState();
-static void handleApiDisplayBrightness();
-static void handleApiFsList();
-static void handleApiFsFile();
-static void handleApiFsDelete();
-static void handleFsUpload();
-static void sendFsUploadResult();
-static void handleApiHome();
-static void handleApiIndex();
-static void handleApiMessages();
-static void handleApiModules();
-static void handleApiMqttTest();
-static void handleApiQuiet();
-static void handleApiQuietSchedule();
-static void handleApiCompanion();
-static void handleApiCompanionSettingsGet();
-static void handleApiCompanionSettingsPut();
-static void handleApiCompanionSettingsRaw();
-static void handleApiSend();
-static void handleApiSendBatch();
-static void handleApiDisplayCells();
-static void handleApiCapabilities();
-static void handleApiStatus();
-static void handleApiText();
-static void handleFavicon();
-static void handleLogo();
-static void handleOptions();
-static void handleRoot();
-static void sendJsonError(int code, const char* msg);
-
+static esp_err_t handleApiChar(httpd_req_t* r);
+static esp_err_t handleApiConfigGet(httpd_req_t* r);
+static esp_err_t handleApiConfigSettings(httpd_req_t* r);
+static esp_err_t handleApiConfigWifi(httpd_req_t* r);
+static esp_err_t handleApiDisplayState(httpd_req_t* r);
+static esp_err_t handleApiDisplayBrightness(httpd_req_t* r);
+static esp_err_t handleApiFsList(httpd_req_t* r);
+static esp_err_t handleApiFsFile(httpd_req_t* r);
+static esp_err_t handleApiFsDelete(httpd_req_t* r);
+static esp_err_t handleFsUpload(httpd_req_t* r);
+static esp_err_t handleApiHome(httpd_req_t* r);
+static esp_err_t handleApiIndex(httpd_req_t* r);
+static esp_err_t handleApiMessages(httpd_req_t* r);
+static esp_err_t handleApiModules(httpd_req_t* r);
+static esp_err_t handleApiQuiet(httpd_req_t* r);
+static esp_err_t handleApiQuietSchedule(httpd_req_t* r);
+static esp_err_t handleApiCompanion(httpd_req_t* r);
+static esp_err_t handleApiCompanionSettingsGet(httpd_req_t* r);
+static esp_err_t handleApiCompanionSettingsPut(httpd_req_t* r);
+static esp_err_t handleApiSend(httpd_req_t* r);
+static esp_err_t handleApiSendBatch(httpd_req_t* r);
+static esp_err_t handleApiDisplayCells(httpd_req_t* r);
+static esp_err_t handleApiCapabilities(httpd_req_t* r);
+static esp_err_t handleApiStatus(httpd_req_t* r);
+static esp_err_t handleApiText(httpd_req_t* r);
+static esp_err_t handleFavicon(httpd_req_t* r);
+static esp_err_t handleLogo(httpd_req_t* r);
+static esp_err_t handleRoot(httpd_req_t* r);
 /* ----------------------------------------------------------
    Web server
 ---------------------------------------------------------- */
-static void sendJsonError(int code, const char* msg) {
-  // JSON-escape msg: some callers interpolate client-supplied text into it (an
-  // unknown colour name, for one), and an unescaped quote or backslash would
-  // make the error body invalid JSON.
-  char esc[192];
-  size_t o = 0;
-  for (const char* p = msg; *p && o < sizeof(esc) - 7; p++) {
-    unsigned char c = (unsigned char)*p;
-    if (c == '"' || c == '\\')      { esc[o++] = '\\'; esc[o++] = (char)c; }
-    else if (c < 0x20)              { o += snprintf(esc + o, 7, "\\u%04x", c); }
-    else                            { esc[o++] = (char)c; }
-  }
-  esc[o] = 0;
-  char buf[256];
-  snprintf(buf, sizeof(buf), "{\"error\":\"%s\"}", esc);
-  server.send(code, "application/json", buf);
-}
-
 // One build-time ETag for every immutable asset (the page, favicon, logo, /lang
 // dictionaries): they all live in the firmware image, so a reflash -- which
 // changes __TIME__ -- is exactly when they change.
 static const char BUILD_ETAG[] = "\"" __DATE__ "-" __TIME__ "\"";
 
-// Parse the JSON request body into `doc`, answering the 400 itself when the body
-// is missing or malformed. The same preamble was previously copy-pasted into
-// every POST handler.
-static bool readJsonBody(JsonDocument& doc) {
-  if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return false; }
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-    sendJsonError(400, "Bad JSON"); return false;
-  }
-  return true;
-}
+// The request currently being streamed to, for the C-function sink callbacks
+// (logDrainTo, canvasAnimList/FontList) that predate a request argument. Safe as a
+// single static: esp_http_server dispatches one request at a time.
+static httpd_req_t* gStreamReq = nullptr;
+
 
 // -- GET /  (main dashboard)
 // Browser tab icon (favicon): a split-flap tile -- two flaps, the signature
@@ -93,11 +64,11 @@ static bool readJsonBody(JsonDocument& doc) {
 const char FAVICON_SVG[] =
   "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' role='img' aria-label='Split-Flap Gateway'><defs><linearGradient id='sfTop' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#3c424c'/><stop offset='1' stop-color='#2d323b'/></linearGradient><linearGradient id='sfBot' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#272b32'/><stop offset='1' stop-color='#181b20'/></linearGradient><clipPath id='sfTile'><rect x='7' y='7' width='50' height='50' rx='10'/></clipPath></defs><rect x='7' y='8.5' width='50' height='50' rx='10' fill='#000' opacity='0.35'/><g clip-path='url(#sfTile)'><rect x='7' y='7' width='50' height='25' fill='url(#sfTop)'/><rect x='7' y='32' width='50' height='25' fill='url(#sfBot)'/><text x='32' y='46' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='40' fill='#f3eee3'>S</text><rect x='7' y='30.9' width='50' height='2.2' fill='#0c0d10'/><rect x='7' y='33.1' width='50' height='0.8' fill='#565c68' opacity='0.7'/></g><rect x='4.5' y='29.5' width='4' height='5' rx='1.6' fill='#0c0d10'/><rect x='55.5' y='29.5' width='4' height='5' rx='1.6' fill='#0c0d10'/><rect x='7' y='7' width='50' height='50' rx='10' fill='none' stroke='#0a0b0d' stroke-width='1'/></svg>";
 // GET /favicon.svg
-static void handleFavicon() {
-  server.sendHeader("ETag", BUILD_ETAG);
-  server.sendHeader("Cache-Control", "no-cache");
-  if (server.header("If-None-Match") == BUILD_ETAG) { server.send(304, "image/svg+xml", ""); return; }
-  server.send(200, "image/svg+xml", FAVICON_SVG);
+static esp_err_t handleFavicon(httpd_req_t* r) {
+  httpd_resp_set_hdr(r, "ETag", BUILD_ETAG);
+  httpd_resp_set_hdr(r, "Cache-Control", "no-cache");
+  if (httpxHeader(r, "If-None-Match") == BUILD_ETAG) { return httpxSend(r, 304, "image/svg+xml", ""); }
+  return httpxSend(r, 200, "image/svg+xml", FAVICON_SVG);
 }
 
 // Web UI wordmark: the app name on a split-flap board -- the same two-flap
@@ -107,23 +78,23 @@ static void handleFavicon() {
 const char LOGO_SVG[] =
   "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 44' role='img' aria-label='Split-Flap'><defs><linearGradient id='sfTop' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#3c424c'/><stop offset='1' stop-color='#2d323b'/></linearGradient><linearGradient id='sfBot' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#272b32'/><stop offset='1' stop-color='#181b20'/></linearGradient></defs><rect x='3' y='2' width='250' height='40' rx='6' fill='#000' opacity='0.30'/><clipPath id='clip1'><rect x='3' y='0' width='250' height='40' rx='6'/></clipPath><g clip-path='url(#clip1)'><rect x='3' y='0' width='250' height='20' fill='url(#sfTop)'/><rect x='3' y='20' width='250' height='20' fill='url(#sfBot)'/><rect x='27.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='28.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='52.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='53.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='77.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='78.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='102.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='103.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='127.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='128.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='152.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='153.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='177.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='178.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='202.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='203.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><rect x='227.4' y='0' width='1.2' height='40' fill='#0c0d10'/><rect x='228.6' y='0' width='0.5' height='40' fill='#454b56' opacity='0.45'/><text x='15.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>S</text><text x='40.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>P</text><text x='65.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>L</text><text x='90.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>I</text><text x='115.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>T</text><text x='140.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>-</text><text x='165.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>F</text><text x='190.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>L</text><text x='215.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>A</text><text x='240.5' y='27.7' text-anchor='middle' font-family='Arial, Helvetica, sans-serif' font-weight='700' font-size='22' fill='#f3eee3'>P</text><rect x='3' y='18.9' width='250' height='2.2' fill='#0c0d10'/><rect x='3' y='21.1' width='250' height='0.8' fill='#565c68' opacity='0.7'/></g><rect x='1.2' y='17.5' width='3.6' height='5' rx='1.4' fill='#0c0d10'/><rect x='251.2' y='17.5' width='3.6' height='5' rx='1.4' fill='#0c0d10'/><rect x='3' y='0' width='250' height='40' rx='6' fill='none' stroke='#0a0b0d' stroke-width='0.8'/></svg>";
 // GET /logo.svg
-static void handleLogo() {
+static esp_err_t handleLogo(httpd_req_t* r) {
   // ETag = build time, revalidated every request (like the page and /lang). A plain 7-day
   // max-age with NO validator was a bug: when the logo changed, the browser kept serving its
   // OLD cached copy for a week -- the header text updated but the wordmark did not.
-  server.sendHeader("ETag", BUILD_ETAG);
-  server.sendHeader("Cache-Control", "no-cache");
-  if (server.header("If-None-Match") == BUILD_ETAG) { server.send(304, "image/svg+xml", ""); return; }
-  server.send(200, "image/svg+xml", LOGO_SVG);
+  httpd_resp_set_hdr(r, "ETag", BUILD_ETAG);
+  httpd_resp_set_hdr(r, "Cache-Control", "no-cache");
+  if (httpxHeader(r, "If-None-Match") == BUILD_ETAG) { return httpxSend(r, 304, "image/svg+xml", ""); }
+  return httpxSend(r, 200, "image/svg+xml", LOGO_SVG);
 }
 
 // Stream a byte range of the static page in watchdog-friendly chunks so a slow
 // client can't trip the stall detector mid-send.
-static void streamPage(const char* p, size_t n) {
+static void streamPage(httpd_req_t* r, const char* p, size_t n) {
   const size_t CHUNK = 1024;
   for (size_t off = 0; off < n; off += CHUNK) {
     size_t c = (n - off < CHUNK) ? (n - off) : CHUNK;
-    server.sendContent_P(p + off, c);
+    httpxChunk(r, p + off, c);
     wdgWebMs = millis();
   }
 }
@@ -139,86 +110,88 @@ static void streamPage(const char* p, size_t n) {
 // the page's fetch().json() ever sees it. The companion blob is the opposite -- there the
 // gzip IS the payload, which is why that endpoint must not claim the header.
 //
-// One route is registered per language in webInit(), so an unknown code simply 404s.
-static void handleLang(size_t idx) {
+// One route is registered per language in webInit(), so an unknown code simply 404s;
+// the handler reads the code back out of the URI it was matched on.
+static esp_err_t handleLang(httpd_req_t* r) {
+  size_t idx = 0;
+  for (; idx < UI_LANG_COUNT; idx++) {
+    const size_t cl = strlen(UI_LANGS[idx].code);
+    if (strncmp(r->uri + 6, UI_LANGS[idx].code, cl) == 0 &&
+        (r->uri[6 + cl] == 0 || r->uri[6 + cl] == '?')) break;   // 6 = strlen("/lang/")
+  }
+  if (idx >= UI_LANG_COUNT) return httpxErr(r, 404, "not found");   // unreachable: routes are exact
   const UiLang& L = UI_LANGS[idx];
   wdgWebMs = millis();
-  server.client().setConnectionTimeout(3000);
-  server.sendHeader("Access-Control-Allow-Origin", "*");
   // Dictionaries live in the firmware image, so they change only on reflash -- the same
   // ETag as the page busts them at exactly the right moment.
-  server.sendHeader("ETag", BUILD_ETAG);
-  server.sendHeader("Cache-Control", "no-cache");
-  if (server.header("If-None-Match") == BUILD_ETAG) { server.send(304, "application/json", ""); return; }
-  server.sendHeader("Content-Encoding", "gzip");
-  server.setContentLength(L.len);
-  server.send(200, "application/json", "");
-  server.sendContent_P((PGM_P)L.gz, L.len);
+  httpd_resp_set_hdr(r, "ETag", BUILD_ETAG);
+  httpd_resp_set_hdr(r, "Cache-Control", "no-cache");
+  if (httpxHeader(r, "If-None-Match") == BUILD_ETAG) { return httpxSend(r, 304, "application/json", ""); }
+  httpd_resp_set_hdr(r, "Content-Encoding", "gzip");
+  httpd_resp_set_type(r, "application/json");
+  httpxChunk(r, (PGM_P)L.gz, L.len);
   wdgWebMs = millis();
+  return httpxChunkEnd(r);
 }
 
 // GET /
-static void handleRoot() {
+static esp_err_t handleRoot(httpd_req_t* r) {
   wdgWebMs = millis();                 // streaming response can take a while
   // Cap per-write blocking so a stalled browser cannot wedge taskWeb. This must be
   // setConnectionTimeout(): NetworkClient keeps its own `_timeout` (which is what
   // seeds SO_SNDTIMEO) and does NOT override Stream::setTimeout(), so the old
   // setTimeout(3000) here set the *read* timeout and capped nothing at all.
-  server.client().setConnectionTimeout(3000);   // 3s per socket write
   // The page is baked into the firmware, so its bytes change only when the firmware
   // is rebuilt -- and every rebuild changes __TIME__. Serve it with that as an ETag
   // and honour If-None-Match: navigating away and back then costs a tiny 304 instead
   // of re-downloading the whole ~65 KB page, while a reflash still busts the cache and
   // delivers the new UI. (The old no-store forced a full re-download on every visit.)
-  server.sendHeader("ETag", BUILD_ETAG);
-  server.sendHeader("Cache-Control", "no-cache");   // revalidate, but cheaply (304)
-  if (server.header("If-None-Match") == BUILD_ETAG) { server.send(304, "text/html", ""); return; }
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/html", "");
+  httpd_resp_set_hdr(r, "ETag", BUILD_ETAG);
+  httpd_resp_set_hdr(r, "Cache-Control", "no-cache");   // revalidate, but cheaply (304)
+  if (httpxHeader(r, "If-None-Match") == BUILD_ETAG) { return httpxSend(r, 304, "text/html", ""); }
+  httpd_resp_set_type(r, "text/html");
   // Stream the static page (web_ui.h), substituting the single {FWVER} token
   // with the firmware version so the page stays tied to the FW_VERSION macro.
   const char*  page  = PAGE_HTML;
   const size_t total = sizeof(PAGE_HTML) - 1;
   const char*  mark  = strstr(page, "{FWVER}");
   if (mark) {
-    streamPage(page, (size_t)(mark - page));
-    server.sendContent(FW_VERSION);
-    streamPage(mark + 7, total - (size_t)(mark + 7 - page));  // 7 = strlen("{FWVER}")
+    streamPage(r, page, (size_t)(mark - page));
+    httpxChunkStr(r, FW_VERSION);
+    streamPage(r, mark + 7, total - (size_t)(mark + 7 - page));  // 7 = strlen("{FWVER}")
   } else {
-    streamPage(page, total);
+    streamPage(r, page, total);
   }
-  server.sendContent("");             // terminate the chunked response
+  return httpxChunkEnd(r);             // terminate the chunked response
 }
 
-// GET /api/log -- the command log (REST + MQTT), newest entries since last poll
-static void logSink(const char* frag) { server.sendContent(frag); wdgWebMs = millis(); }
-static void handleApiMessages() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+// GET /api/log -- the command log, newest entries since last poll
+static void logSink(const char* frag) { httpxChunkStr(gStreamReq, frag); wdgWebMs = millis(); }
+static esp_err_t handleApiMessages(httpd_req_t* r) {
   // Chunked: streamed one entry at a time, never one contiguous allocation.
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "application/json", "");
+  httpd_resp_set_type(r, "application/json");
+  gStreamReq = r;
   logDrainTo(logSink);
-  server.sendContent("");   // terminate the chunked response
+  return httpxChunkEnd(r);   // terminate the chunked response
 }
 
 // POST /api/frames/send -- send one raw protocol frame to the virtual modules.
 // (The physical gateway's /api/rs485/* paths, kept as aliases through v1.21, were
 // dropped in v1.22; the companion must use /api/frames/*.)
-static void handleApiSend() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiSend(httpd_req_t* r) {
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   const char* d = doc["data"] | "";
   bool raw = doc["raw"] | false;   // optional: send verbatim, bypassing sanitization
   uint8_t outBuf[TX_MAX_BYTES];
   size_t  outLen = min(strlen(d), (size_t)TX_MAX_BYTES);
   memcpy(outBuf, d, outLen);
-  if (!outLen) { sendJsonError(400, "Empty data"); return; }
+  if (!outLen) { httpxErr(r, 400, "Empty data"); return ESP_OK; }
   { char cd[LOG_TEXT_MAX]; snprintf(cd, sizeof(cd), "send %s", d); logCommand('R', cd); }
   frameSend(outBuf, outLen, raw);
   char resp[64];
   snprintf(resp, sizeof(resp), "{\"ok\":true,\"bytes\":%zu,\"raw\":%s}", outLen, raw ? "true" : "false");
-  server.send(200, "application/json", resp);
+  return httpxSend(r, 200, "application/json", resp);
 }
 
 // POST /api/frames/batch -- send many frames in one request.
@@ -227,12 +200,11 @@ static void handleApiSend() {
 // device-side. Lets the companion draw a whole animated page in ONE HTTP call
 // instead of one request per module. Caps keep the request bounded and the web
 // watchdog fed.
-static void handleApiSendBatch() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiSendBatch(httpd_req_t* r) {
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   JsonArray frames = doc["frames"].as<JsonArray>();
-  if (frames.isNull()) { sendJsonError(400, "'frames' array required"); return; }
+  if (frames.isNull()) { httpxErr(r, 400, "'frames' array required"); return ESP_OK; }
   int step = doc["step_ms"] | 0;
   if (step < 0)  step = 0;
   if (step > 30) step = 30;          // keep per-frame pacing small
@@ -263,7 +235,7 @@ static void handleApiSendBatch() {
   }
   char resp[48];
   snprintf(resp, sizeof(resp), "{\"ok\":true,\"sent\":%d}", sent);
-  server.send(200, "application/json", resp);
+  return httpxSend(r, 200, "application/json", resp);
 }
 
 
@@ -299,15 +271,14 @@ static void handleApiSendBatch() {
  * cannot be shown is a bug in the caller, and swallowing it would show a hole in a wall of
  * text with nothing to explain it.
  */
-static void handleApiDisplayCells() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiDisplayCells(httpd_req_t* r) {
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   JsonArray cells = doc["cells"].as<JsonArray>();
-  if (cells.isNull()) { sendJsonError(400, "'cells' array required"); return; }
+  if (cells.isNull()) { httpxErr(r, 400, "'cells' array required"); return ESP_OK; }
 
   int start = doc["start"] | 0;
-  if (start < 0 || start > 254) { sendJsonError(400, "'start' must be 0..254"); return; }
+  if (start < 0 || start > 254) { httpxErr(r, 400, "'start' must be 0..254"); return ESP_OK; }
   int step = doc["step_ms"] | 0;
   if (step < 0)  step = 0;
   if (step > 30) step = 30;
@@ -330,7 +301,7 @@ static void handleApiDisplayCells() {
         char e[96];
         snprintf(e, sizeof(e), "cell %d: unknown color '%.16s' (red orange yellow green "
                  "blue purple white)", n, c["color"].as<const char*>());
-        sendJsonError(400, e); return;
+        httpxErr(r, 400, e); return ESP_OK;
       }
       flap[n++] = (int16_t)idx;
       continue;
@@ -341,14 +312,14 @@ static void handleApiDisplayCells() {
       uint32_t cp = 0;
       if (!ch || !*ch || utf8Next(ch, &cp) == 0) {
         char e[64]; snprintf(e, sizeof(e), "cell %d: 'ch' is not valid UTF-8", n);
-        sendJsonError(400, e); return;
+        httpxErr(r, 400, e); return ESP_OK;
       }
       int idx = vmFlapIndexOfCodepoint(cp);
       if (idx < 0) {
         char e[96];
         snprintf(e, sizeof(e), "cell %d: no flap for U+%04X -- the reel cannot show it",
                  n, (unsigned)cp);
-        sendJsonError(400, e); return;
+        httpxErr(r, 400, e); return ESP_OK;
       }
       flap[n++] = (int16_t)idx;
       continue;
@@ -356,7 +327,7 @@ static void handleApiDisplayCells() {
 
     char e[80];
     snprintf(e, sizeof(e), "cell %d: need one of ch, color, blank, skip", n);
-    sendJsonError(400, e); return;
+    httpxErr(r, 400, e); return ESP_OK;
   }
 
   { char cd[64]; snprintf(cd, sizeof(cd), "cells %d from id %d, step=%dms", n, start, step);
@@ -380,7 +351,7 @@ static void handleApiDisplayCells() {
   }
   char resp[64];
   snprintf(resp, sizeof(resp), "{\"ok\":true,\"cells\":%d,\"sent\":%d}", n, sent);
-  server.send(200, "application/json", resp);
+  return httpxSend(r, 200, "application/json", resp);
 }
 
 /* GET /api/flap/modules
@@ -394,16 +365,13 @@ static void handleApiDisplayCells() {
  * stale-probe pruner and a duplicate-ID heuristic. It existed to track modules that appear
  * and disappear on a physical wire. Nothing here appears or disappears.)
  */
-static void handleApiModules() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiModules(httpd_req_t* r) {
   // setConnectionTimeout(), NOT setTimeout(): the latter sets Stream's *read* timeout and
   // leaves SO_SNDTIMEO at its 3 s default. This loop does one socket write per module, so on
   // a wedged client 160 modules x 3 s is far past the 120 s web watchdog, which would reboot
   // the board. Bound each write instead.
-  server.client().setConnectionTimeout(1500);
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "application/json", "");
-  server.sendContent("[");
+  httpd_resp_set_type(r, "application/json");
+  httpxChunkStr(r, "[");
 
   const int n = vmCount;
   for (int i = 0; i < n; i++) {
@@ -434,11 +402,11 @@ static void handleApiModules() {
     snprintf(row, sizeof(row),
              "%s{\"id\":%u,\"flapIndex\":%d,\"flapChar\":\"%s\"}",
              i ? "," : "", (unsigned)id, flap, utf8);
-    server.sendContent(row);
+    httpxChunkStr(r, row);
     wdgWebMs = millis();
   }
-  server.sendContent("]");
-  server.sendContent("");
+  httpxChunkStr(r, "]");
+  return httpxChunkEnd(r);
 }
 
 
@@ -452,9 +420,7 @@ static void handleApiModules() {
  * A cell is: the character the flap carries, "?" when the flap has no byte (a pictograph --
  * text cannot name it, the panel draws it fine), or null when there is no module there.
  */
-static void handleApiDisplayState() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  server.client().setConnectionTimeout(1500);
+static esp_err_t handleApiDisplayState(httpd_req_t* r) {
   const int rows = gPanel.rows ? gPanel.rows : 1;
   const int cols = gPanel.cols ? gPanel.cols : 1;
   const int cells = rows * cols;
@@ -467,11 +433,10 @@ static void handleApiDisplayState() {
     xSemaphoreGive(vmMutex);
   }
 
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "application/json", "");
+  httpd_resp_set_type(r, "application/json");
   char head[48];
   snprintf(head, sizeof(head), "{\"rows\":%d,\"cols\":%d,\"cells\":[", rows, cols);
-  server.sendContent(head);
+  httpxChunkStr(r, head);
   for (int i = 0; i < cells; i++) {
     char one[16];
     if (i >= n) {
@@ -495,11 +460,54 @@ static void handleApiDisplayState() {
           snprintf(one, sizeof(one), "%s\"%s\"", i ? "," : "", utf8);
       }
     }
-    server.sendContent(one);
+    httpxChunkStr(r, one);
     if ((i & 31) == 0) wdgWebMs = millis();
   }
-  server.sendContent("]}");
-  server.sendContent("");
+  httpxChunkStr(r, "]}");
+  return httpxChunkEnd(r);
+}
+
+// The same display-state JSON, serialized into a buffer for the SSE pump (web.h). The
+// REST handler above streams; this builds -- the pump wraps the result in an SSE frame
+// and pushes one copy to every /api/events stream. Returns bytes written (never > cap-1).
+size_t dispStateJson(char* out, size_t cap) {
+  if (!out || cap < 32) return 0;
+  const int rows = gPanel.rows ? gPanel.rows : 1;
+  const int cols = gPanel.cols ? gPanel.cols : 1;
+  const int cells = rows * cols;
+
+  static int16_t flap[VM_MAX_MODULES];   // taskWeb is the only caller: no reentrancy
+  int n = vmCount;
+  if (n > VM_MAX_MODULES) n = VM_MAX_MODULES;
+  if (vmMutex && xSemaphoreTake(vmMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    for (int i = 0; i < n; i++) flap[i] = vmods[i].curIndex;
+    xSemaphoreGive(vmMutex);
+  } else {
+    return 0;                            // reels busy: the pump just tries again next tick
+  }
+
+  size_t o = (size_t)snprintf(out, cap, "{\"rows\":%d,\"cols\":%d,\"cells\":[", rows, cols);
+  for (int i = 0; i < cells && o + 16 < cap; i++) {
+    if (i >= n) {
+      o += (size_t)snprintf(out + o, cap - o, "%snull", i ? "," : "");
+      continue;
+    }
+    const uint32_t cp = vmFlapCodepointAt(flap[i]);
+    if (!cp) {
+      const char c = vmFlapCharAt(flap[i]);                   // a colour flap
+      o += (size_t)snprintf(out + o, cap - o, "%s\"%c\"", i ? "," : "", c ? c : ' ');
+    } else {
+      char utf8[8] = "";
+      size_t n8 = utf8Encode(cp, utf8);
+      utf8[n8] = 0;
+      if (cp == '"' || cp == '\\')                            // JSON-escape the two that need it
+        o += (size_t)snprintf(out + o, cap - o, "%s\"\\%s\"", i ? "," : "", utf8);
+      else
+        o += (size_t)snprintf(out + o, cap - o, "%s\"%s\"", i ? "," : "", utf8);
+    }
+  }
+  o += (size_t)snprintf(out + o, cap - o, "]}");
+  return o;
 }
 
 
@@ -508,14 +516,13 @@ static void handleApiDisplayState() {
 // path handleApiConfigSettings takes: panelSetBrightness only sets a pending flag,
 // and the next panelShow in any mode -- wall, effect, canvas, animation -- writes
 // the new duty) and persists it. Advertised as the "brightness" capability token.
-static void handleApiDisplayBrightness() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (server.method() == HTTP_POST) {
+static esp_err_t handleApiDisplayBrightness(httpd_req_t* r) {
+  if (r->method == HTTP_POST) {
     JsonDocument doc;
-    if (!readJsonBody(doc)) return;
-    if (!doc["brightness"].is<int>()) { sendJsonError(400, "'brightness' (1-255) required"); return; }
+    if (!httpxReadJson(r, doc)) return ESP_OK;
+    if (!doc["brightness"].is<int>()) { httpxErr(r, 400, "'brightness' (1-255) required"); return ESP_OK; }
     int v = doc["brightness"].as<int>();
-    if (v < 1 || v > 255) { sendJsonError(400, "'brightness' (1-255) required"); return; }
+    if (v < 1 || v > 255) { httpxErr(r, 400, "'brightness' (1-255) required"); return ESP_OK; }
     cfg.panelBright = (uint8_t)v;
     panelSetBrightness(cfg.panelBright);   // pending flag; the next panelShow applies it
     dispMarkDirty();                       // an idle wall repaints, so the change is visible now
@@ -524,35 +531,33 @@ static void handleApiDisplayBrightness() {
   }
   char out[48];
   snprintf(out, sizeof(out), "{\"ok\":true,\"brightness\":%u}", (unsigned)cfg.panelBright);
-  server.send(200, "application/json", out);
+  return httpxSend(r, 200, "application/json", out);
 }
 
 // POST /api/flap/char   {"id":5,"char":"A"}   id=-1 for broadcast
-static void handleApiChar() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiChar(httpd_req_t* r) {
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   int id = doc["id"] | -1;
   const char* ch = doc["char"] | "";
-  if (!ch[0]) { sendJsonError(400, "Missing char"); return; }
+  if (!ch[0]) { httpxErr(r, 400, "Missing char"); return ESP_OK; }
   // `ch` is UTF-8: a euro/accented glyph is multi-byte. Transcode to a single
   // Windows-1252 byte and display the first character (see charset.h).
   char enc[8];
   utf8ToFlap(ch, enc, sizeof(enc));
-  if (!enc[0]) { sendJsonError(400, "Unsupported character"); return; }
+  if (!enc[0]) { httpxErr(r, 400, "Unsupported character"); return ESP_OK; }
   { char cd[LOG_TEXT_MAX];
     if (id < 0) snprintf(cd, sizeof(cd), "char -> all modules");
     else        snprintf(cd, sizeof(cd), "char -> module %d", id);
     logCommand('R', cd); }
   sfSendChar(id, enc[0]);
-  server.send(200, "application/json", "{\"ok\":true}");
+  return httpxSend(r, 200, "application/json", "{\"ok\":true}");
 }
 
 // POST /api/flap/index  {"id":5,"index":3}
-static void handleApiIndex() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiIndex(httpd_req_t* r) {
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   int id  = doc["id"]    | -1;
   int idx = doc["index"] | -1;
   // The whole reel is addressable -- the lowercase and pictograph sections included:
@@ -560,44 +565,42 @@ static void handleApiIndex() {
   if (idx < 0 || idx >= SF_MAX_FLAPS) {
     char e[48];
     snprintf(e, sizeof(e), "Invalid index (0-%d)", SF_MAX_FLAPS - 1);
-    sendJsonError(400, e); return;
+    httpxErr(r, 400, e); return ESP_OK;
   }
   { char cd[LOG_TEXT_MAX];
     if (id < 0) snprintf(cd, sizeof(cd), "index %d -> all modules", idx);
     else        snprintf(cd, sizeof(cd), "index %d -> module %d", idx, id);
     logCommand('R', cd); }
   sfSendIndex(id, idx);
-  server.send(200, "application/json", "{\"ok\":true}");
+  return httpxSend(r, 200, "application/json", "{\"ok\":true}");
 }
 
 // POST /api/flap/text   {"text":"HELLO","start":0}
-static void handleApiText() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiText(httpd_req_t* r) {
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   const char* text = doc["text"] | "";
   int start = doc["start"] | 0;
-  if (!text[0]) { sendJsonError(400, "Empty text"); return; }
+  if (!text[0]) { httpxErr(r, 400, "Empty text"); return ESP_OK; }
   { char cd[LOG_TEXT_MAX]; snprintf(cd, sizeof(cd), "text from module %d: \"%.60s\"", start, text);
     logCommand('R', cd); }
   sfSendText(start, text);
   char resp[64];
   snprintf(resp, sizeof(resp), "{\"ok\":true,\"chars\":%zu}", strlen(text));
-  server.send(200, "application/json", resp);
+  return httpxSend(r, 200, "application/json", resp);
 }
 
 // POST /api/flap/home   {"id":5}  or  {"id":-1}
-static void handleApiHome() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiHome(httpd_req_t* r) {
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   int id = doc["id"] | -1;
   { char cd[LOG_TEXT_MAX];
     if (id < 0) snprintf(cd, sizeof(cd), "home all modules");
     else        snprintf(cd, sizeof(cd), "home module %d", id);
     logCommand('R', cd); }
   sfHome(id);
-  server.send(200, "application/json", "{\"ok\":true}");
+  return httpxSend(r, 200, "application/json", "{\"ok\":true}");
 }
 
 
@@ -623,7 +626,7 @@ static void handleApiHome() {
    to exist in RAM all at once.                                                                */
 // A BUFFERED writer for the response below.
 //
-// server.sendContent() is one HTTP chunk and one TCP write. Streaming this response a CHARACTER
+// Each httpxChunk() is one HTTP chunk and one TCP write. Streaming this response a CHARACTER
 // at a time -- which is the obvious way to write it, and what this did at first -- sent a
 // 230-character repertoire as ~700 chunks of one to three bytes, each waiting on its own
 // round-trip: FIVE SECONDS to deliver 1.6 KB, while /api/status delivered 465 bytes in twenty
@@ -637,14 +640,14 @@ static size_t capLen = 0;
 static void capFlush() {
   if (!capLen) return;
   capBuf[capLen] = 0;
-  server.sendContent(capBuf);
+  httpxChunkStr(gStreamReq, capBuf);
   capLen = 0;
   wdgWebMs = millis();
 }
 static void capPut(const char* str) {
   size_t n = strlen(str);
   if (capLen + n >= sizeof(capBuf) - 1) capFlush();
-  if (n >= sizeof(capBuf) - 1) { server.sendContent(str); return; }   // never truncate a caller
+  if (n >= sizeof(capBuf) - 1) { httpxChunkStr(gStreamReq, str); return; }   // never truncate a caller
   memcpy(capBuf + capLen, str, n);
   capLen += n;
 }
@@ -666,14 +669,12 @@ static void capPutReel() {
   }
 }
 
-static void handleApiCapabilities() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  server.client().setConnectionTimeout(1500);
+static esp_err_t handleApiCapabilities(httpd_req_t* r) {
   const int rows = gPanel.rows ? gPanel.rows : 1;
   const int cols = gPanel.cols ? gPanel.cols : 1;
 
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "application/json", "");
+  httpd_resp_set_type(r, "application/json");
+  gStreamReq = r;
   capLen = 0;
 
   char head[320];
@@ -742,14 +743,13 @@ static void handleApiCapabilities() {
   // What the wall can DO, not just show, so a client reads this instead of sniffing the
   // firmware version and guessing.
   capPut("\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
-         "\"quiet\",\"ha\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\"]}");
+         "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\"]}");
   capFlush();
-  server.sendContent("");
+  return httpxChunkEnd(r);
 }
 
 // GET /api/status
-static void handleApiStatus() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiStatus(httpd_req_t* r) {
   // Use snprintf to avoid JsonDocument heap allocation (called every 3s by browser)
   char rtcBuf[24]; rtcFormatTime(rtcBuf, sizeof(rtcBuf));
   IPAddress lip = WiFi.localIP(), aip = WiFi.softAPIP();
@@ -758,7 +758,8 @@ static void handleApiStatus() {
   unsigned stkFrm = hTaskFrames ? uxTaskGetStackHighWaterMark(hTaskFrames) : 0;
   unsigned stkWeb = hTaskWeb   ? uxTaskGetStackHighWaterMark(hTaskWeb)   : 0;
   unsigned stkNet = hTaskNet   ? uxTaskGetStackHighWaterMark(hTaskNet)   : 0;
-  unsigned stkOta = hTaskOTA   ? uxTaskGetStackHighWaterMark(hTaskOTA)   : 0;
+  TaskHandle_t hHttpd = xTaskGetHandle("httpd");
+  unsigned stkHtp = hHttpd     ? uxTaskGetStackHighWaterMark(hHttpd)     : 0;
   unsigned stkRtc = hTaskRTC   ? uxTaskGetStackHighWaterMark(hTaskRTC)   : 0;
   // v3.0: seconds since the companion last checked in (-1 = never / deregistered)
   long compAge = gCompanionSeenMs ? (long)((millis() - gCompanionSeenMs) / 1000UL) : -1;
@@ -767,8 +768,8 @@ static void handleApiStatus() {
   snprintf(out, sizeof(out),
     "{\"uptime\":%lu,\"tx\":%lu,"
     "\"wifi\":%s,\"ip\":\"%d.%d.%d.%d\",\"apip\":\"%d.%d.%d.%d\","
-    "\"heap\":%u,\"minheap\":%u,\"mqtt\":%s,\"modules\":%d,"
-    "\"stk\":{\"frames\":%u,\"web\":%u,\"net\":%u,\"ota\":%u,\"rtc\":%u,\"disp\":%u},"
+    "\"heap\":%u,\"minheap\":%u,\"modules\":%d,"
+    "\"stk\":{\"frames\":%u,\"web\":%u,\"net\":%u,\"httpd\":%u,\"rtc\":%u,\"disp\":%u},"
     "\"panel\":{\"ok\":%s,\"w\":%u,\"h\":%u,\"cols\":%u,\"rows\":%u,"
     "\"cellW\":%u,\"cellH\":%u,\"depth\":%u,\"font\":\"%s\",\"vmods\":%d},"
     "\"time\":\"%s\",\"ntpSynced\":%s,\"quiet\":%s,"
@@ -778,9 +779,8 @@ static void handleApiStatus() {
     lip[0],lip[1],lip[2],lip[3],
     aip[0],aip[1],aip[2],aip[3],
     (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
-    mqtt.connected()?"true":"false",
     vmCount,
-    stkFrm, stkWeb, stkNet, stkOta, stkRtc, stkDsp,
+    stkFrm, stkWeb, stkNet, stkHtp, stkRtc, stkDsp,
     gPanel.ready?"true":"false", gPanel.panelW, gPanel.panelH,
     gPanel.cols, gPanel.rows, gPanel.cellW, gPanel.cellH, (unsigned)panelInfo().depth,
     dispFontName(), vmCount,
@@ -788,12 +788,11 @@ static void handleApiStatus() {
     ntpSynced?"true":"false",
     gQuietTime?"true":"false",
     cfg.companionUrl, gCompanionStatus, compAge);
-  server.send(200, "application/json", out);
+  return httpxSend(r, 200, "application/json", out);
 }
 
 // GET /api/config
-static void handleApiConfigGet() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiConfigGet(httpd_req_t* r) {
   JsonDocument doc;
   // "version" is the GATEWAY API level, not this firmware's version. The
   // companion parses MAJOR.MINOR out of it and enables its gateway-stored
@@ -803,17 +802,11 @@ static void handleApiConfigGet() {
   doc["product"]   = PRODUCT_NAME;
   doc["fwVersion"] = FW_VERSION;
   doc["wSSID"]    = cfg.wifiSSID;
-  doc["mqHost"]   = cfg.mqttHost;
-  doc["mqPort"]   = cfg.mqttPort;
-  doc["mqUser"]   = cfg.mqttUser;
-  doc["mqPfx"]    = cfg.mqttPrefix;
   doc["posixTZ"]    = cfg.posixTZ;
   doc["ntpServer"]  = cfg.ntpServer;
   doc["gridRows"]   = cfg.gridRows;
   doc["gridCols"]   = cfg.gridCols;
   doc["serialDebug"]   = cfg.serialDebug;
-  doc["haEnabled"]     = cfg.haEnabled;
-  doc["otaPasswordSet"] = (strlen(cfg.otaPassword) > 0);
   doc["hostname"]       = cfgHostname();          // effective, MAC-derived if unset
   doc["hostnameAuto"]   = (cfg.hostname[0] == 0); // true = derived, not pinned
   // ---- panel (Matrix Portal Gateway) ----
@@ -831,94 +824,40 @@ static void handleApiConfigGet() {
   doc["bootAnim"]      = cfg.bootAnim;   // library animation autoplayed at boot ("" = none)
   char out[1280];   // headroom for identity + panel + JSON-escaped SSID/TZ/hostname
   serializeJson(doc, out, sizeof(out));
-  server.send(200, "application/json", out);
+  return httpxSend(r, 200, "application/json", out);
 }
 
 // POST /api/config/wifi
-static void handleApiConfigWifi() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiConfigWifi(httpd_req_t* r) {
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   strlcpy(cfg.wifiSSID, doc["ssid"] | "", sizeof(cfg.wifiSSID));
   strlcpy(cfg.wifiPass, doc["pass"] | "", sizeof(cfg.wifiPass));
   saveConfig();
   DBG("[CFG] WiFi SSID set to '%s'\n", cfg.wifiSSID);
-  server.send(200, "application/json", "{\"ok\":true}");
-  delay(100);
-  WiFi.disconnect();
+  httpxSend(r, 200, "application/json", "{\"ok\":true}");
+  delay(100);            // let the 200 reach the wire before the interface drops
+  WiFi.disconnect();     // taskNetwork re-associates with the new credentials
+  return ESP_OK;
 }
 
-// POST /api/config/mqtt
-static void handleApiConfigMqtt() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  JsonDocument doc;
-  if (!readJsonBody(doc)) return;
-  strlcpy(cfg.mqttHost,   doc["host"]   | "", sizeof(cfg.mqttHost));
-  cfg.mqttPort          = doc["port"]   | DEFAULT_MQTT_PORT;
-  strlcpy(cfg.mqttUser,   doc["user"]   | "", sizeof(cfg.mqttUser));
-  strlcpy(cfg.mqttPass,   doc["pass"]   | "", sizeof(cfg.mqttPass));
-  strlcpy(cfg.mqttPrefix, doc["prefix"] | DEFAULT_MQTT_PREFIX, sizeof(cfg.mqttPrefix));
-  saveConfig();
-  DBG("[CFG] MQTT broker set to %s:%d  prefix=%s\n", cfg.mqttHost, cfg.mqttPort, cfg.mqttPrefix);
-  server.send(200, "application/json", "{\"ok\":true}");
-  delay(100);
-  mqtt.disconnect();
-  // PubSubClient caches the broker it was last told to dial. mqttInit() is the only
-  // other caller and runs once at boot, so without this the new broker is saved and
-  // logged but never actually dialled: the reconnect keeps using the boot-time target
-  // (or none at all, if none was configured then) and fails forever with rc=-2.
-  if (strlen(cfg.mqttHost)) mqtt.setServer(cfg.mqttHost, cfg.mqttPort);
-  mqttFailCount = 0;   // a fresh broker gets a fresh 5-strike budget
-}
 
 
 // POST /api/config/settings  -- save all settings in one call
-static void handleApiConfigSettings() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiConfigSettings(httpd_req_t* r) {
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   // WiFi
   if (doc["ssid"].is<const char*>()) strlcpy(cfg.wifiSSID, doc["ssid"] | "", sizeof(cfg.wifiSSID));
   if (doc["pass"].is<const char*>()) strlcpy(cfg.wifiPass, doc["pass"] | "", sizeof(cfg.wifiPass));
-  // MQTT
-  if (doc["mqHost"].is<const char*>())   strlcpy(cfg.mqttHost,   doc["mqHost"]   | "", sizeof(cfg.mqttHost));
-  if (doc["mqPort"].is<int>())           cfg.mqttPort = doc["mqPort"];
-  if (doc["mqUser"].is<const char*>())   strlcpy(cfg.mqttUser,   doc["mqUser"]   | "", sizeof(cfg.mqttUser));
-  if (doc["mqPass"].is<const char*>())   strlcpy(cfg.mqttPass,   doc["mqPass"]   | "", sizeof(cfg.mqttPass));
-  if (doc["mqPfx"].is<const char*>())    strlcpy(cfg.mqttPrefix, doc["mqPfx"]    | DEFAULT_MQTT_PREFIX, sizeof(cfg.mqttPrefix));
-  // Timezone
-  // OTA password update
-  if (doc["otaPassword"].is<const char*>()) {
-    strlcpy(cfg.otaPassword, doc["otaPassword"] | "", sizeof(cfg.otaPassword));
-    saveConfig();
-    if (strlen(cfg.otaPassword) > 0) {
-      ArduinoOTA.setPassword(cfg.otaPassword);
-    }
-    printf("[CFG] OTA password updated\n");
-    server.send(200, "application/json", "{\"ok\":true}");
-    return;
-  }
   // Serial debug toggle
   if (doc["serialDebug"].is<bool>()) {
     cfg.serialDebug = doc["serialDebug"].as<bool>();
     gSerialDebug    = cfg.serialDebug;
     saveConfig();
     printf("[CFG] Serial debug %s\n", cfg.serialDebug ? "enabled" : "disabled");
-    server.send(200, "application/json", "{\"ok\":true}");
-    return;
-  }
-  // Home Assistant integration toggle
-  if (doc["haEnabled"].is<bool>()) {
-    bool was = cfg.haEnabled;
-    cfg.haEnabled = doc["haEnabled"].as<bool>();
-    saveConfig();
-    printf("[CFG] Home Assistant integration %s\n", cfg.haEnabled ? "enabled" : "disabled");
-    if (mqtt.connected()) {
-      if (cfg.haEnabled && !was) { haPublishDiscovery(true); mqttPublishStateTopics(); }
-      else if (!cfg.haEnabled && was) { haPublishDiscovery(false); }  // remove entities
-    }
-    server.send(200, "application/json", "{\"ok\":true}");
-    return;
+    return httpxSend(r, 200, "application/json", "{\"ok\":true}");
+    return ESP_OK;
   }
   if (doc["posixTZ"].is<const char*>()) {
     strlcpy(cfg.posixTZ, doc["posixTZ"] | "UTC0", sizeof(cfg.posixTZ));
@@ -991,7 +930,7 @@ static void handleApiConfigSettings() {
     lo[n] = 0;
     if (!lo[0])                    cfg.hostname[0] = 0;               // revert to auto
     else if (cfgValidHostname(lo)) strlcpy(cfg.hostname, lo, sizeof(cfg.hostname));
-    else { sendJsonError(400, "hostname must be 1-31 chars of a-z 0-9 -"); return; }
+    else { httpxErr(r, 400, "hostname must be 1-31 chars of a-z 0-9 -"); return ESP_OK; }
   }
   dispMarkDirty();
   saveConfig();
@@ -1008,128 +947,47 @@ static void handleApiConfigSettings() {
   } else {
     strlcpy(resp, "{\"ok\":true}", sizeof(resp));
   }
-  server.send(200, "application/json", resp);
-  delay(100);
-  // Only disconnect/reconnect if WiFi or MQTT credentials were in the payload
+  httpxSend(r, 200, "application/json", resp);
+  // Only disconnect/reconnect if WiFi credentials were in the payload -- and only
+  // after the 200 has had a moment to reach the wire.
   bool hasWifi = doc["ssid"].is<const char*>() || doc["pass"].is<const char*>();
-  bool hasMqtt = doc["mqHost"].is<const char*>() || doc["mqPort"].is<int>();
-  if (hasMqtt) mqtt.disconnect();
-  if (hasWifi) WiFi.disconnect();
-}
-
-static void handleOptions() {
-  server.sendHeader("Access-Control-Allow-Origin",  "*");
-  // PUT is used by /api/companion/settings (v3.1); the rest of the API is GET/POST.
-  server.sendHeader("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS");
-  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
-  server.send(204);
+  if (hasWifi) { delay(100); WiFi.disconnect(); }
+  return ESP_OK;
 }
 
 
 
 
-// POST /api/mqtt/test {host?,port?,user?,pass?} -- tries the given (or saved)
-// broker settings WITHOUT touching the live connection, so settings can be
-// verified before saving. Two phases: TCP reachability (3s cap), then a real
-// MQTT CONNECT/CONNACK using a throwaway client. Runs on taskWeb (8KB stack;
-// the temporary client objects are small and its packet buffer is heap).
-static void handleApiMqttTest() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  char host[64]; int port = cfg.mqttPort;
-  char user[48], pass[64];
-  strlcpy(host, cfg.mqttHost, sizeof(host));
-  strlcpy(user, cfg.mqttUser, sizeof(user));
-  strlcpy(pass, cfg.mqttPass, sizeof(pass));
-  if (server.hasArg("plain") && server.arg("plain").length() > 1) {
-    JsonDocument doc;
-    if (deserializeJson(doc, server.arg("plain")) == DeserializationError::Ok) {
-      if (doc["host"].is<const char*>()) strlcpy(host, doc["host"] | "", sizeof(host));
-      if (doc["port"].is<int>())         port = doc["port"] | cfg.mqttPort;
-      if (doc["user"].is<const char*>()) strlcpy(user, doc["user"] | "", sizeof(user));
-      if (doc["pass"].is<const char*>()) strlcpy(pass, doc["pass"] | "", sizeof(pass));
-    }
-  }
-  if (!host[0]) { sendJsonError(400, "no broker host configured"); return; }
-  DBG("[MQTT] testing %s:%d\n", host, port);
 
-  wdgWebMs = millis();
-  WiFiClient testNet;
-  // Phase 1: TCP reachability with an explicit 3s cap.
-  if (!testNet.connect(host, (uint16_t)port, 3000)) {
-    server.send(200, "application/json",
-      "{\"ok\":false,\"tcp\":false,\"mqtt\":false,"
-      "\"error\":\"TCP connect failed (host/port unreachable)\"}");
-    return;
-  }
-  wdgWebMs = millis();
-  // Phase 2: real MQTT CONNECT on the already-open socket. PubSubClient skips
-  // its own TCP connect when the client is connected, so this only exchanges
-  // CONNECT/CONNACK. CONNACK from a live broker arrives in milliseconds.
-  PubSubClient testMq(testNet);
-  testMq.setBufferSize(128);   // CONNECT/CONNACK only -- keep the heap use tiny
-  bool mqOk;
-  if (user[0]) mqOk = testMq.connect("sfgw-test", user, pass);
-  else         mqOk = testMq.connect("sfgw-test");
-  int state = testMq.state();
-  testMq.disconnect();
-  testNet.stop();
-  wdgWebMs = millis();
 
-  const char* why = "";
-  switch (state) {                       // PubSubClient state codes
-    case  0: why = "connected";                       break;
-    case  1: why = "bad protocol version";            break;
-    case  2: why = "client id rejected";              break;
-    case  3: why = "broker unavailable";              break;
-    case  4: why = "bad username or password";        break;
-    case  5: why = "not authorized";                  break;
-    case -2: why = "network failed during handshake"; break;
-    case -4: why = "broker did not respond (timeout)";break;
-    default: why = "connection failed";               break;
-  }
-  char out[160];
-  snprintf(out, sizeof(out),
-    "{\"ok\":%s,\"tcp\":true,\"mqtt\":%s,\"state\":%d,\"detail\":\"%s\"}",
-    mqOk ? "true" : "false", mqOk ? "true" : "false", state, why);
-  server.send(200, "application/json", out);
-}
 
 // GET returns Quiet Time state; POST {"on":true|false} sets it.
-static void handleApiQuiet() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (server.method() == HTTP_POST) {
-    if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
+static esp_err_t handleApiQuiet(httpd_req_t* r) {
+  if (r->method == HTTP_POST) {
     JsonDocument doc;
-    if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-      sendJsonError(400, "Bad JSON"); return;
-    }
-    if (!doc["on"].is<bool>()) { sendJsonError(400, "'on' (bool) required"); return; }
+    if (!httpxReadJson(r, doc)) return ESP_OK;
+    if (!doc["on"].is<bool>()) { httpxErr(r, 400, "'on' (bool) required"); return ESP_OK; }
     bool on = doc["on"].as<bool>();
-    // The schedule wins inside its window: refuse a manual OFF here too (see the
-    // MQTT handler for the rationale). Disable the schedule to override.
+    // The schedule wins inside its window: refuse a manual OFF here too, so the
+    // window cannot be defeated by accident. Disable the schedule to override.
     if (!on && quietSchedInWindow()) {
       printf("[QUIET] REST quiet OFF ignored -- schedule active (in window)\n");
     } else {
       sfSetQuietTime(on);
     }
-    mqttPublishStateTopics();
   }
   char out[40];
   snprintf(out, sizeof(out), "{\"ok\":true,\"on\":%s}", gQuietTime ? "true" : "false");
-  server.send(200, "application/json", out);
+  return httpxSend(r, 200, "application/json", out);
 }
 
 // GET/POST /api/quiet/schedule  -- daily Quiet-Time schedule (v3.0).
 // The schedule is evaluated once a second in taskRTC; when the current local
 // time enters/leaves the window, Quiet Time is toggled automatically.
-static void handleApiQuietSchedule() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (server.method() == HTTP_POST) {
-    if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
+static esp_err_t handleApiQuietSchedule(httpd_req_t* r) {
+  if (r->method == HTTP_POST) {
     JsonDocument doc;
-    if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-      sendJsonError(400, "Bad JSON"); return;
-    }
+    if (!httpxReadJson(r, doc)) return ESP_OK;
     if (doc["enabled"].is<bool>())        cfg.quietSchedEnabled = doc["enabled"].as<bool>();
     if (doc["start"].is<const char*>())   strlcpy(cfg.quietStart, doc["start"].as<const char*>(), sizeof(cfg.quietStart));
     if (doc["end"].is<const char*>())     strlcpy(cfg.quietEnd,   doc["end"].as<const char*>(),   sizeof(cfg.quietEnd));
@@ -1153,7 +1011,7 @@ static void handleApiQuietSchedule() {
   out["offset"]  = cfg.quietTzOffsetMin;   // browser's UTC offset, echoed back for the client
   char buf[128];
   serializeJson(out, buf, sizeof(buf));
-  server.send(200, "application/json", buf);
+  return httpxSend(r, 200, "application/json", buf);
 }
 
 // GET/POST /api/companion  -- the companion app registers its URL here (v3.0)
@@ -1205,14 +1063,10 @@ static void storeCompanionTabs(JsonArrayConst tabs) {
   serializeJson(out, gCompanionTabs, sizeof(gCompanionTabs));
 }
 
-static void handleApiCompanion() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (server.method() == HTTP_POST) {
-    if (!server.hasArg("plain")) { sendJsonError(400, "No body"); return; }
+static esp_err_t handleApiCompanion(httpd_req_t* r) {
+  if (r->method == HTTP_POST) {
     JsonDocument doc;
-    if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
-      sendJsonError(400, "Bad JSON"); return;
-    }
+    if (!httpxReadJson(r, doc)) return ESP_OK;
     if (doc["url"].is<const char*>()) {
       const char* url = doc["url"].as<const char*>();
       if (strcmp(url, cfg.companionUrl) != 0) {
@@ -1268,7 +1122,7 @@ static void handleApiCompanion() {
   // and the dashboard polls this endpoint every 4 s.
   char buf[COMPANION_TABS_MAX + 768];
   serializeJson(out, buf, sizeof(buf));
-  server.send(200, "application/json", buf);
+  return httpxSend(r, 200, "application/json", buf);
 }
 
 /* ----------------------------------------------------------
@@ -1278,115 +1132,62 @@ static void handleApiCompanion() {
    its own disk. The payload is gzip(minified JSON) whose schema belongs entirely
    to the companion -- the gateway stores the bytes verbatim and never parses them.
 
-   The body is binary, which rules out server.arg("plain"): the WebServer copies a
-   non-form body through String(char*), so it would stop at the first NUL byte --
-   and a gzip header carries one at offset 3. Instead the PUT registers an upload
-   callback, which makes the WebServer take its "raw" path and stream the body to
-   us in HTTP_RAW_BUFLEN chunks. handleApiCompanionSettingsRaw writes those chunks
-   straight to a temp file; handleApiCompanionSettingsPut then sends the response.
+   The body is binary (a gzip header carries a NUL at offset 3), so it is streamed
+   straight from the socket to a temp file -- one linear recv loop, no whole-body
+   buffering. (The WebServer era needed this split across two callbacks with static
+   state; native esp_http_server lets it read as what it is.)
 ---------------------------------------------------------- */
-static File   compFile;          // temp file, open across the RAW_WRITE chunks
-static size_t compRecvd = 0;     // bytes written so far this request
-static int    compErr   = 0;     // 0 = ok, else the HTTP status to report
+// PUT /api/companion/settings
+static esp_err_t handleApiCompanionSettingsPut(httpd_req_t* r) {
+  const size_t len = r->content_len;
+  // Decide before opening anything, so a bad request never touches flash.
+  if (!sfFsReady)                { return httpxErr(r, 503, "No filesystem"); }
+  if (len == 0)                  { return httpxErr(r, 400, "Empty or truncated body"); }
+  if (len > COMPANION_MAX_BYTES) { return httpxErr(r, 413, "Settings blob too large"); }
+  FFat.remove(COMPANION_TMP);                                 // clear a stale temp file
+  File f = FFat.open(COMPANION_TMP, "w");
+  if (!f) { return httpxErr(r, 507, "Write failed"); }
 
-// Give up on the transfer: close + delete the temp file, remember the status.
-// The WebServer keeps draining the socket either way (we cannot stop its read
-// loop), so every later chunk is simply dropped and the response still lands.
-static void compAbort(int status) {
-  if (compFile) compFile.close();
-  if (sfFsReady) FFat.remove(COMPANION_TMP);
-  compErr = status;
-}
-
-// PUT /api/companion/settings -- raw body callback (one call per chunk)
-static void handleApiCompanionSettingsRaw() {
-  HTTPRaw& raw = server.raw();
-  wdgWebMs = millis();          // a slow client must not trip the web watchdog
-
-  switch (raw.status) {
-    case RAW_START: {
-      compRecvd = 0;
-      compErr   = 0;
-      size_t len = (size_t)server.clientContentLength();
-      // Decide before opening anything, so a bad request never touches flash.
-      if (!sfFsReady)                  { compErr = 503; break; }  // no filesystem mounted
-      if (len == 0)                    { compErr = 400; break; }  // nothing to store
-      if (len > COMPANION_MAX_BYTES)   { compErr = 413; break; }
-      FFat.remove(COMPANION_TMP);                                 // clear a stale temp file
-      compFile = FFat.open(COMPANION_TMP, "w");
-      if (!compFile) compErr = 507;
-      break;
-    }
-
-    case RAW_WRITE:
-      if (compErr || !compFile) break;                         // already failed -- drain
-      // Content-Length was checked up front, but a body may overrun it; re-check
-      // so a lying header still cannot fill the flash.
-      if (compRecvd + raw.currentSize > COMPANION_MAX_BYTES) { compAbort(413); break; }
-      if (compFile.write(raw.buf, raw.currentSize) != raw.currentSize) { compAbort(507); break; }
-      compRecvd += raw.currentSize;
-      break;
-
-    case RAW_END:
-      if (compErr) { compAbort(compErr); break; }              // reuse the cleanup path
-      compFile.close();
-      // A truncated body (fewer bytes than promised) must not overwrite good settings.
-      if (compRecvd != (size_t)server.clientContentLength()) { compAbort(400); break; }
-      // Publish atomically: the old blob survives intact until the rename lands.
-      FFat.remove(COMPANION_FILE);
-      if (!FFat.rename(COMPANION_TMP, COMPANION_FILE)) { compAbort(507); break; }
-      DBG("[CFG] Companion settings stored (%u bytes)\n", (unsigned)compRecvd);
-      break;
-
-    case RAW_ABORTED:
-      compAbort(400);
-      break;
+  size_t recvd = 0;
+  while (recvd < len) {
+    int n = httpxRecv(r, (char*)httpxBuf, min(len - recvd, (size_t)sizeof(httpxBuf)));
+    // A truncated body (fewer bytes than promised) must not overwrite good settings.
+    if (n <= 0) { f.close(); FFat.remove(COMPANION_TMP); return httpxErr(r, 400, "Empty or truncated body"); }
+    if (f.write(httpxBuf, (size_t)n) != (size_t)n) { f.close(); FFat.remove(COMPANION_TMP); return httpxErr(r, 507, "Write failed"); }
+    recvd += (size_t)n;
   }
-}
-
-// PUT /api/companion/settings -- response, after the raw body has been consumed
-static void handleApiCompanionSettingsPut() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  int err = compErr;
-  compErr = 0;                  // never leak this request's verdict into the next
-  switch (err) {
-    case 0:   break;
-    case 400: sendJsonError(400, "Empty or truncated body"); return;
-    case 413: sendJsonError(413, "Settings blob too large"); return;
-    case 503: sendJsonError(503, "No filesystem");         return;
-    default:  sendJsonError(507, "Write failed");          return;
-  }
-  char buf[64];
-  snprintf(buf, sizeof(buf), "{\"ok\":true,\"bytes\":%u}", (unsigned)compRecvd);
-  server.send(200, "application/json", buf);
+  f.close();
+  // Publish atomically: the old blob survives intact until the rename lands.
+  FFat.remove(COMPANION_FILE);
+  if (!FFat.rename(COMPANION_TMP, COMPANION_FILE)) { return httpxErr(r, 507, "Write failed"); }
+  DBG("[CFG] Companion settings stored (%u bytes)\n", (unsigned)recvd);
+  char out[64];
+  snprintf(out, sizeof(out), "{\"ok\":true,\"bytes\":%u}", (unsigned)recvd);
+  return httpxSend(r, 200, "application/json", out);
 }
 
 // GET /api/companion/settings -- hand the stored blob back byte-for-byte
-static void handleApiCompanionSettingsGet() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  server.sendHeader("Cache-Control", "no-store");
-  if (!sfFsReady || !FFat.exists(COMPANION_FILE)) { sendJsonError(404, "No settings stored"); return; }
+static esp_err_t handleApiCompanionSettingsGet(httpd_req_t* r) {
+  httpd_resp_set_hdr(r, "Cache-Control", "no-store");
+  if (!sfFsReady || !FFat.exists(COMPANION_FILE)) { httpxErr(r, 404, "No settings stored"); return ESP_OK; }
   File f = FFat.open(COMPANION_FILE, "r");
-  if (!f) { sendJsonError(404, "No settings stored"); return; }
+  if (!f) { httpxErr(r, 404, "No settings stored"); return ESP_OK; }
   size_t n = f.size();
-  if (n == 0) { f.close(); sendJsonError(404, "No settings stored"); return; }
+  if (n == 0) { f.close(); httpxErr(r, 404, "No settings stored"); return ESP_OK; }
 
   wdgWebMs = millis();
-  // setConnectionTimeout(), NOT setTimeout() -- the latter is the Stream READ
-  // timeout and caps nothing here (see handleRoot).
-  server.client().setConnectionTimeout(3000);
-  server.setContentLength(n);
   // Deliberately NOT "Content-Encoding: gzip": these bytes are the payload, not a
   // transfer encoding of it. Declaring the encoding would make HTTP clients gunzip
   // the body transparently, and the companion -- which decompresses itself -- would
   // then be handed plain JSON it tries to decompress again.
-  server.send(200, "application/gzip", "");
+  httpd_resp_set_type(r, "application/gzip");
   uint8_t buf[512];
   while (size_t got = f.read(buf, sizeof(buf))) {
-    server.sendContent((const char*)buf, got);
+    httpxChunk(r, (const char*)buf, got);
     wdgWebMs = millis();
   }
   f.close();
+  return httpxChunkEnd(r);
 }
 
 /* ----------------------------------------------------------
@@ -1460,16 +1261,15 @@ static void pxDecode(const uint8_t* c, uint8_t bpp, uint8_t& r, uint8_t& g, uint
 }
 
 // GET  /api/canvas -> {active,width,height,formats}   POST {"active":bool} take over / release.
-static void handleApiCanvas() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (server.method() == HTTP_POST) {
+static esp_err_t handleApiCanvas(httpd_req_t* r) {
+  if (r->method == HTTP_POST) {
     JsonDocument doc;
-    if (!readJsonBody(doc)) return;
+    if (!httpxReadJson(r, doc)) return ESP_OK;
     if (doc["active"] | false) canvasEnter(true); else canvasLeave();
     char buf[48];
     snprintf(buf, sizeof(buf), "{\"ok\":true,\"active\":%s}", gCanvasMode ? "true" : "false");
-    server.send(200, "application/json", buf);
-    return;
+    return httpxSend(r, 200, "application/json", buf);
+    return ESP_OK;
   }
   // The atlas field says what the "sprite" op can blit right now: the loaded sheet's
   // shape, or null when none has been uploaded yet.
@@ -1487,23 +1287,22 @@ static void handleApiCanvas() {
            gCanvasMode ? "true" : "false", (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
            effectName(gEffect), gAnimActive ? "true" : "false", gTickerActive ? "true" : "false",
            atlas, effectListJson());
-  server.send(200, "application/json", buf);
+  return httpxSend(r, 200, "application/json", buf);
 }
 
 // POST /api/canvas/effect  {"type":"plasma|fire|matrix|none","speed":1..10}
 // Start an on-device effect (rendered by taskDisplay at the panel's native rate) or, with
 // "none", return to the wall. Supersedes raw-canvas mode -- the display task, not HTTP, owns the
 // panel -- so it clears gCanvasMode too.
-static void handleApiCanvasEffect() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!gPanel.ready) { sendJsonError(503, "Panel not running"); return; }
+static esp_err_t handleApiCanvasEffect(httpd_req_t* r) {
+  if (!gPanel.ready) { httpxErr(r, 503, "Panel not running"); return ESP_OK; }
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   uint8_t e = effectByName(doc["type"] | "none");
   // Refuse BEFORE touching any parameter: a request rejected for Quiet Time must
   // not leave its speed/hue/density behind for the next start to inherit.
   if (e != EFFECT_NONE && gQuietTime) {
-    sendJsonError(409, "Quiet Time is active"); return;   // don't light the panel during quiet hours
+    httpxErr(r, 409, "Quiet Time is active"); return ESP_OK;   // don't light the panel during quiet hours
   }
   int sp = doc["speed"] | (int)gEffectSpeed;
   gEffectSpeed = (uint8_t)(sp < 1 ? 1 : sp > 10 ? 10 : sp);
@@ -1521,7 +1320,7 @@ static void handleApiCanvasEffect() {
   char buf[112];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"effect\":\"%s\",\"speed\":%u,\"hue\":%d,\"density\":%d}",
            effectName(e), (unsigned)gEffectSpeed, gEffectHue, gEffectDensity);
-  server.send(200, "application/json", buf);
+  return httpxSend(r, 200, "application/json", buf);
 }
 
 // A base64 sprite op: {op:"image", x, y, w, h, fmt:"rgb888"|"rgb565", data:"<base64>"}. Decoded into
@@ -1582,69 +1381,66 @@ static void canvasOpPolyline(JsonVariantConst pts, uint8_t r, uint8_t g, uint8_t
 // POST /api/canvas/transition {"type":"none|crossfade|wipe|slide","ms":100..2000}
 // Configures how subsequent full-frame canvas PUTs present. Sticky until changed;
 // runtime-only (a reboot returns to hard cuts).
-static void handleApiCanvasTransition() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiCanvasTransition(httpd_req_t* r) {
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   const char* t = doc["type"] | "none";
   uint8_t ty;
   if      (!strcmp(t, "none"))      ty = 0;
   else if (!strcmp(t, "crossfade")) ty = 1;
   else if (!strcmp(t, "wipe"))      ty = 2;
   else if (!strcmp(t, "slide"))     ty = 3;
-  else { sendJsonError(400, "type must be none|crossfade|wipe|slide"); return; }
+  else { httpxErr(r, 400, "type must be none|crossfade|wipe|slide"); return ESP_OK; }
   int ms = doc["ms"] | 400;
   if (ms < 100) ms = 100;
   if (ms > 2000) ms = 2000;
   gTransType = ty; gTransMs = (uint16_t)ms;
   char resp[64];
   snprintf(resp, sizeof(resp), "{\"ok\":true,\"type\":\"%s\",\"ms\":%d}", t, ms);
-  server.send(200, "application/json", resp);
+  return httpxSend(r, 200, "application/json", resp);
 }
 
 // POST /api/system/reboot -- clean remote restart (v2.2.3). Born of a bench session
 // where "please power-cycle it" needed human hands: geometry changes, a wedged
 // peripheral, or a committed-but-unbooted OTA all want this. Replies first, then
 // reboots via the same deliver-response-then-restart path the OTA upload uses
-// (gOtaRebootPending: taskWeb restarts only after handleClient has flushed the 200).
-static void handleApiSystemReboot() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+// (gOtaRebootPending: taskWeb restarts only after the 200 has been flushed).
+static esp_err_t handleApiSystemReboot(httpd_req_t* r) {
   logCommand('R', "reboot");
-  server.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+  httpxSend(r, 200, "application/json", "{\"ok\":true,\"rebooting\":true}");
   gOtaRebootPending = true;
+  return ESP_OK;
 }
 
 // ---- animation library (v2.1) -------------------------------------------------------
 // Map a canvasAnim* return code onto the error surface.
-static void animRcReply(int rc, const char* okBody) {
+static esp_err_t animRcReply(httpd_req_t* r, int rc, const char* okBody) {
   switch (rc) {
-    case 0:   server.send(200, "application/json", okBody); return;
-    case 400: sendJsonError(400, "Bad name (1-24 chars a-z 0-9 - _) or bad/truncated file"); return;
-    case 404: sendJsonError(404, "No such animation"); return;
-    case 409: sendJsonError(409, "Nothing loaded to save -- upload an animation first"); return;
-    case 413: sendJsonError(413, "Animation exceeds the store limit"); return;
-    case 507: sendJsonError(507, "Filesystem full or write failed"); return;
-    default:  sendJsonError(503, "Filesystem or memory unavailable"); return;
+    case 0:   return httpxSend(r, 200, "application/json", okBody);
+    case 400: return httpxErr(r, 400, "Bad name (1-24 chars a-z 0-9 - _) or bad/truncated file");
+    case 404: return httpxErr(r, 404, "No such animation");
+    case 409: return httpxErr(r, 409, "Nothing loaded to save -- upload an animation first");
+    case 413: return httpxErr(r, 413, "Animation exceeds the store limit");
+    case 507: return httpxErr(r, 507, "Filesystem full or write failed");
+    default:  return httpxErr(r, 503, "Filesystem or memory unavailable");
   }
 }
 
 // POST /api/canvas/anim/save {"name":"x"} -- persist the currently loaded store to FATFS.
-static void handleApiAnimSave() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiAnimSave(httpd_req_t* r) {
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   const char* name = doc["name"] | "";
   { char cd[64]; snprintf(cd, sizeof(cd), "anim save '%.24s'", name); logCommand('R', cd); }
-  animRcReply(canvasAnimSave(name), "{\"ok\":true}");
+  return animRcReply(r, canvasAnimSave(name), "{\"ok\":true}");
 }
 
 // POST /api/canvas/anim/play {"name":"x"} -- load a library animation and play it.
-static void handleApiAnimPlay() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!gPanel.ready) { sendJsonError(503, "Panel not running"); return; }
-  if (gQuietTime)    { sendJsonError(409, "Quiet Time is active"); return; }
+static esp_err_t handleApiAnimPlay(httpd_req_t* r) {
+  if (!gPanel.ready) { httpxErr(r, 503, "Panel not running"); return ESP_OK; }
+  if (gQuietTime)    { httpxErr(r, 409, "Quiet Time is active"); return ESP_OK; }
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   const char* name = doc["name"] | "";
   { char cd[64]; snprintf(cd, sizeof(cd), "anim play '%.24s'", name); logCommand('R', cd); }
   char okBody[96];
@@ -1652,39 +1448,36 @@ static void handleApiAnimPlay() {
   int rc = canvasAnimLoadPlay(name);
   if (rc == 0)
     snprintf(okBody, sizeof(okBody), "{\"ok\":true,\"frames\":%u}", (unsigned)canvasAnimCount());
-  animRcReply(rc, okBody);
+  return animRcReply(r, rc, okBody);
 }
 
 // POST /api/canvas/anim/delete {"name":"x"}
-static void handleApiAnimDelete() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiAnimDelete(httpd_req_t* r) {
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   const char* name = doc["name"] | "";
   { char cd[64]; snprintf(cd, sizeof(cd), "anim delete '%.24s'", name); logCommand('R', cd); }
-  animRcReply(canvasAnimDelete(name), "{\"ok\":true}");
+  return animRcReply(r, canvasAnimDelete(name), "{\"ok\":true}");
 }
 
 // GET /api/canvas/anims -- the library, streamed.
-static void animListSink(const char* frag) { server.sendContent(frag); wdgWebMs = millis(); }
-static void handleApiAnimList() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "application/json", "");
+static void animListSink(const char* frag) { httpxChunkStr(gStreamReq, frag); wdgWebMs = millis(); }
+static esp_err_t handleApiAnimList(httpd_req_t* r) {
+  httpd_resp_set_type(r, "application/json");
+  gStreamReq = r;
   canvasAnimList(animListSink);
-  server.sendContent("");
+  return httpxChunkEnd(r);
 }
 
 // POST /api/canvas/ops -- a JSON array of draw commands, applied in order then presented. Ops: clear
 // | pixel | hline | vline | line | rect(+fill) | circle(+fill) | ellipse(+fill) | triangle(+fill) |
 // roundrect(+fill) | gradient | polyline | text(+align) | image | scroll | show. Colours are [r,g,b],
 // default white (black for clear). Auto-takes-over the panel.
-static void handleApiCanvasOps() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!gPanel.ready) { sendJsonError(503, "Panel not running"); return; }
+static esp_err_t handleApiCanvasOps(httpd_req_t* r) {
+  if (!gPanel.ready) { httpxErr(r, 503, "Panel not running"); return ESP_OK; }
   JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok || !doc.is<JsonArray>()) {
-    sendJsonError(400, "Body must be a JSON array of ops"); return;
+  if (deserializeJson(doc, httpxArg(r, "plain")) != DeserializationError::Ok || !doc.is<JsonArray>()) {
+    httpxErr(r, 400, "Body must be a JSON array of ops"); return ESP_OK;
   }
   canvasEnter(false);
   int applied = 0; bool shown = false;
@@ -1761,94 +1554,66 @@ static void handleApiCanvasOps() {
   if (!shown) panelShow();
   char buf[48];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"applied\":%d}", applied);
-  server.send(200, "application/json", buf);
+  return httpxSend(r, 200, "application/json", buf);
 }
 
 // PUT /api/canvas/frame -- a full raw frame, width*height pixels, row-major, top-left origin.
 // The pixel format follows from the body LENGTH: W*H*3 is rgb888 (3 bytes/px), W*H*2 is rgb565
-// (2 bytes/px, big-endian). The ?fmt= hint is not read here -- the WebServer discards URL query
-// args once it begins streaming a raw body -- so the length is authoritative. Streamed straight
-// to the back buffer so no multi-KB frame is ever buffered whole; presented on RAW_END.
-static volatile int canvasErr = 0;
-static uint16_t     canvasX = 0, canvasY = 0;   // running write position: no per-pixel divide
-static uint8_t      canvasCarry[3];     // partial pixel across a chunk boundary
-static uint8_t      canvasCarryN = 0;
-static uint8_t      canvasBpp = 3;
-static bool         canvasStaged = false;
-static void handleApiCanvasFrameRaw() {
-  HTTPRaw& raw = server.raw();
-  wdgWebMs = millis();                   // a slow client must not trip the web watchdog
-  switch (raw.status) {
-    case RAW_START: {
-      canvasErr = 0; canvasX = 0; canvasY = 0; canvasCarryN = 0; canvasStaged = false;
-      if (!gPanel.ready) { canvasErr = 503; break; }
-      // Infer the pixel format from the body length -- a full frame is unambiguously W*H*3
-      // (rgb888) or W*H*2 (rgb565). server.arg("fmt") reads empty in a raw handler, so the
-      // length is the source of truth; the client's ?fmt= is only a hint.
-      const size_t px  = (size_t)gPanel.panelW * gPanel.panelH;
-      const size_t len = (size_t)server.clientContentLength();
-      if      (len == px * 3) canvasBpp = 3;
-      else if (len == px * 2) canvasBpp = 2;
-      else { canvasErr = 400; break; }
-      canvasStandDown();                 // stand the wall down and wait for the renderer to park
-      // Transition configured: stage the whole frame in PSRAM and tween on RAW_END,
-      // instead of painting pixels as they stream. Allocation failure falls back to
-      // the direct path -- a hard cut beats a 500.
-      if (gTransType != 0) canvasStaged = canvasStageBegin(canvasBpp);
-      break;
+// (2 bytes/px, big-endian) -- the length is authoritative, the client's ?fmt= only a hint.
+// Streamed straight to the back buffer so no multi-KB frame is ever buffered whole; presented
+// after the last byte. Bodies stream through httpxBuf, the shared raw-body buffer (httpx.h).
+static esp_err_t handleApiCanvasFrame(httpd_req_t* r) {
+  if (!gPanel.ready) return httpxErr(r, 503, "Panel not running");
+  const size_t px  = (size_t)gPanel.panelW * gPanel.panelH;
+  const size_t len = (size_t)r->content_len;
+  uint8_t bpp;
+  if      (len == px * 3) bpp = 3;
+  else if (len == px * 2) bpp = 2;
+  else return httpxErr(r, 400, "Body length must equal width*height*3 (rgb888) or *2 (rgb565)");
+  canvasStandDown();                 // stand the wall down and wait for the renderer to park
+  // Transition configured: stage the whole frame in PSRAM and tween at the end, instead of
+  // painting pixels as they stream. Allocation failure falls back to the direct path -- a
+  // hard cut beats a 500.
+  const bool staged = (gTransType != 0) && canvasStageBegin(bpp);
+
+  uint8_t  carry[3];                 // partial pixel across a chunk boundary
+  uint8_t  carryN = 0;
+  uint16_t x = 0, y = 0;             // running write position: no per-pixel divide
+  size_t   recvd = 0;
+  while (recvd < len) {
+    int n = httpxRecv(r, (char*)httpxBuf, min(len - recvd, (size_t)sizeof(httpxBuf)));
+    if (n <= 0) return httpxErr(r, 400, "Truncated body");   // nothing presented; wall stays parked until the next taker
+    recvd += (size_t)n;
+    if (staged) { canvasStageFeed(httpxBuf, (size_t)n); continue; }
+    for (int i = 0; i < n; i++) {
+      carry[carryN++] = httpxBuf[i];
+      if (carryN < bpp) continue;
+      carryN = 0;
+      uint8_t cr, cg, cb;
+      pxDecode(carry, bpp, cr, cg, cb);
+      panelPixel(x, y, cr, cg, cb);            // panelPixel clamps, so an over-long body is safe
+      if (++x >= gPanel.panelW) { x = 0; y++; }
     }
-    case RAW_WRITE:
-      if (canvasErr) break;
-      if (canvasStaged) { canvasStageFeed(raw.buf, raw.currentSize); break; }
-      for (size_t i = 0; i < raw.currentSize; i++) {
-        canvasCarry[canvasCarryN++] = raw.buf[i];
-        if (canvasCarryN < canvasBpp) continue;
-        canvasCarryN = 0;
-        uint8_t r, g, b;
-        pxDecode(canvasCarry, canvasBpp, r, g, b);
-        panelPixel(canvasX, canvasY, r, g, b);      // panelPixel clamps, so an over-long body is safe
-        if (++canvasX >= gPanel.panelW) { canvasX = 0; canvasY++; }
-      }
-      break;
-    case RAW_END:
-      if (!canvasErr && gPanel.ready) {
-        if (canvasStaged) canvasStagePresent();   // tween old -> new, land on new
-        else              panelShow();
-      }
-      break;
-    case RAW_ABORTED:
-      canvasErr = 400;
-      break;
   }
-}
-static void handleApiCanvasFrame() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  int err = canvasErr; canvasErr = 0;
-  switch (err) {
-    case 0:   break;
-    case 400: sendJsonError(400, "Body length must equal width*height*3 (rgb888) or *2 (rgb565)"); return;
-    case 503: sendJsonError(503, "Panel not running"); return;
-    default:  sendJsonError(500, "Canvas frame failed"); return;
-  }
+  if (staged) canvasStagePresent();  // tween old -> new, land on new
+  else        panelShow();
   char buf[96];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"width\":%u,\"height\":%u,\"pixels\":%lu}",
-           (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
-           (unsigned long)canvasY * gPanel.panelW + canvasX);
-  server.send(200, "application/json", buf);
+           (unsigned)gPanel.panelW, (unsigned)gPanel.panelH, (unsigned long)px);
+  return httpxSend(r, 200, "application/json", buf);
 }
 
 // GET /api/canvas/frame[?fmt=rgb888|rgb565] -- read the live panel back as raw pixels: a screenshot
 // of whatever is on screen (wall, effect, canvas, animation, ticker), quantised to the panel depth.
 // Reconstructed from the framebuffer into a reused PSRAM buffer, then streamed. Read-only.
 static uint8_t* rbBuf = nullptr; static size_t rbCap = 0;
-static void handleApiCanvasFrameGet() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!gPanel.ready) { sendJsonError(503, "Panel not running"); return; }
+static esp_err_t handleApiCanvasFrameGet(httpd_req_t* r) {
+  if (!gPanel.ready) { httpxErr(r, 503, "Panel not running"); return ESP_OK; }
   // Streaming a ~48 KB screenshot out holds internal TX buffers; on a RAM-tight 256x64 board, done
   // while the companion is also pushing, that can approach loop()'s reboot floor. Same circuit
   // breaker as the large uploads: refuse a preview rather than risk a reboot. A poller just retries.
-  if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) { sendJsonError(507, "Low on memory -- try again in a moment"); return; }
-  const bool rgb565 = (server.arg("fmt") == "rgb565");
+  if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) { httpxErr(r, 507, "Low on memory -- try again in a moment"); return ESP_OK; }
+  const bool rgb565 = (httpxArg(r, "fmt") == "rgb565");
   const size_t need = (size_t)gPanel.panelW * gPanel.panelH * (rgb565 ? 2 : 3);
   if (rbCap < need) {
     if (rbBuf) free(rbBuf);
@@ -1856,81 +1621,68 @@ static void handleApiCanvasFrameGet() {
     if (!rbBuf) rbBuf = (uint8_t*)malloc(need);
     rbCap = rbBuf ? need : 0;
   }
-  if (!rbBuf) { sendJsonError(503, "Out of memory"); return; }
+  if (!rbBuf) { httpxErr(r, 503, "Out of memory"); return ESP_OK; }
   panelReadback(rbBuf, rgb565);                    // snapshot fast, then stream at leisure
   char v[16];
-  snprintf(v, sizeof(v), "%u", (unsigned)gPanel.panelW);  server.sendHeader("X-Canvas-Width", v);
-  snprintf(v, sizeof(v), "%u", (unsigned)gPanel.panelH);  server.sendHeader("X-Canvas-Height", v);
-  server.sendHeader("X-Canvas-Format", rgb565 ? "rgb565" : "rgb888");
-  server.setContentLength(need);
-  server.send(200, "application/octet-stream", "");
+  snprintf(v, sizeof(v), "%u", (unsigned)gPanel.panelW);  httpd_resp_set_hdr(r, "X-Canvas-Width", v);
+  snprintf(v, sizeof(v), "%u", (unsigned)gPanel.panelH);  httpd_resp_set_hdr(r, "X-Canvas-Height", v);
+  httpd_resp_set_hdr(r, "X-Canvas-Format", rgb565 ? "rgb565" : "rgb888");
+  httpd_resp_set_type(r, "application/octet-stream");
   for (size_t off = 0; off < need; off += 1024) {
     size_t c = (need - off < 1024) ? (need - off) : 1024;
-    server.sendContent_P((PGM_P)(rbBuf + off), c);   // _P reads RAM fine on ESP32; length-delimited
+    httpxChunk(r, (const char*)(rbBuf + off), c);
     wdgWebMs = millis();                              // feed the web watchdog on a ~48 KB send
   }
+  return httpxChunkEnd(r);
 }
 
 // PUT /api/canvas/rect -- update one rectangle without resending the whole panel. Body: an 8-byte
 // big-endian header [x, y, w, h] (u16 each) then w*h pixels, rgb888 or rgb565 (by remaining length).
 // Drawn ON TOP of what is on screen: the back buffer is synced to the live frame first.
-static int      rectErr = 0;
-static uint8_t  rectHdr[8]; static uint8_t rectHdrN = 0;
-static int      rectX = 0, rectY = 0, rectW = 0, rectH = 0;
-static uint8_t  rectBpp = 3, rectCarry[3], rectCarryN = 0;
-static int      rectCol = 0, rectRow = 0;
-static bool     rectStarted = false;
-static void handleApiCanvasRectRaw() {
-  HTTPRaw& raw = server.raw();
-  wdgWebMs = millis();
-  switch (raw.status) {
-    case RAW_START:
-      rectErr = 0; rectHdrN = 0; rectCarryN = 0; rectCol = 0; rectRow = 0; rectStarted = false;
-      if (!gPanel.ready) rectErr = 503;
-      break;
-    case RAW_WRITE: {
-      if (rectErr) break;
-      size_t i = 0;
-      while (rectHdrN < 8 && i < raw.currentSize) rectHdr[rectHdrN++] = raw.buf[i++];
-      if (rectHdrN < 8) break;                       // header can straddle chunks
-      if (!rectStarted) {
-        rectX = (rectHdr[0] << 8) | rectHdr[1]; rectY = (rectHdr[2] << 8) | rectHdr[3];
-        rectW = (rectHdr[4] << 8) | rectHdr[5]; rectH = (rectHdr[6] << 8) | rectHdr[7];
-        long cells = (long)rectW * rectH;
-        long body  = (long)server.clientContentLength() - 8;
-        if (rectW <= 0 || rectH <= 0 || (body != cells * 3 && body != cells * 2)) { rectErr = 400; break; }
-        rectBpp = (body == cells * 3) ? 3 : 2;
-        canvasStandDown();                           // take the panel, then start from what is shown
-        panelCloneToBack();
-        rectStarted = true;
-      }
-      for (; i < raw.currentSize; i++) {
-        rectCarry[rectCarryN++] = raw.buf[i];
-        if (rectCarryN < rectBpp) continue;
-        rectCarryN = 0;
-        uint8_t r, g, b;
-        pxDecode(rectCarry, rectBpp, r, g, b);
-        if (rectRow < rectH) panelPixel(rectX + rectCol, rectY + rectRow, r, g, b);   // panelPixel clamps
-        if (++rectCol >= rectW) { rectCol = 0; rectRow++; }
-      }
-      break;
+static esp_err_t handleApiCanvasRect(httpd_req_t* r) {
+  if (!gPanel.ready) return httpxErr(r, 503, "Panel not running");
+  static const char* BAD = "Body must be an 8-byte x,y,w,h header then w*h*3 or w*h*2 pixels";
+  const size_t len = (size_t)r->content_len;
+  if (len < 8) return httpxErr(r, 400, BAD);
+
+  uint8_t  hdr[8]; uint8_t hdrN = 0;
+  int      x = 0, y = 0, w = 0, h = 0;
+  uint8_t  bpp = 3, carry[3], carryN = 0;
+  int      col = 0, row = 0;
+  bool     started = false;
+  size_t   recvd = 0;
+  while (recvd < len) {
+    int n = httpxRecv(r, (char*)httpxBuf, min(len - recvd, (size_t)sizeof(httpxBuf)));
+    if (n <= 0) return httpxErr(r, 400, BAD);       // truncated: nothing presented
+    recvd += (size_t)n;
+    int i = 0;
+    while (hdrN < 8 && i < n) hdr[hdrN++] = httpxBuf[i++];
+    if (hdrN < 8) continue;                          // header can straddle chunks
+    if (!started) {
+      x = (hdr[0] << 8) | hdr[1]; y = (hdr[2] << 8) | hdr[3];
+      w = (hdr[4] << 8) | hdr[5]; h = (hdr[6] << 8) | hdr[7];
+      long cells = (long)w * h;
+      long body  = (long)len - 8;
+      if (w <= 0 || h <= 0 || (body != cells * 3 && body != cells * 2)) return httpxErr(r, 400, BAD);
+      bpp = (body == cells * 3) ? 3 : 2;
+      canvasStandDown();                             // take the panel, then start from what is shown
+      panelCloneToBack();
+      started = true;
     }
-    case RAW_END:
-      if (!rectErr && rectStarted && gPanel.ready) panelShow();
-      break;
-    case RAW_ABORTED:
-      rectErr = 400;
-      break;
+    for (; i < n; i++) {
+      carry[carryN++] = httpxBuf[i];
+      if (carryN < bpp) continue;
+      carryN = 0;
+      uint8_t cr, cg, cb;
+      pxDecode(carry, bpp, cr, cg, cb);
+      if (row < h) panelPixel(x + col, y + row, cr, cg, cb);   // panelPixel clamps
+      if (++col >= w) { col = 0; row++; }
+    }
   }
-}
-static void handleApiCanvasRect() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  int e = rectErr; rectErr = 0;
-  if (e == 400) { sendJsonError(400, "Body must be an 8-byte x,y,w,h header then w*h*3 or w*h*2 pixels"); return; }
-  if (e == 503) { sendJsonError(503, "Panel not running"); return; }
+  if (started && gPanel.ready) panelShow();
   char buf[96];
-  snprintf(buf, sizeof(buf), "{\"ok\":true,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}", rectX, rectY, rectW, rectH);
-  server.send(200, "application/json", buf);
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}", x, y, w, h);
+  return httpxSend(r, 200, "application/json", buf);
 }
 
 // ---- QOI image decode (https://qoiformat.org) --------------------------------------------------
@@ -1966,161 +1718,138 @@ static bool qoiDecodeToPanel(const uint8_t* d, size_t len) {
   return true;
 }
 // PUT /api/canvas/qoi -- a full-panel QOI image. Buffered whole in PSRAM (it is compressed) then
-// decoded straight to the panel. Same takeover as /frame.
-static uint8_t* qoiBuf = nullptr; static size_t qoiCap = 0, qoiLen = 0; static int qoiErr = 0;
-static void handleApiCanvasQoiRaw() {
-  HTTPRaw& raw = server.raw();
-  wdgWebMs = millis();
-  switch (raw.status) {
-    case RAW_START: {
-      qoiErr = 0; qoiLen = 0;
-      if (!gPanel.ready) { qoiErr = 503; break; }
-      if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) { qoiErr = 507; break; }   // stressed: back off
-      size_t need = (size_t)server.clientContentLength();
-      size_t cap  = (size_t)gPanel.panelW * gPanel.panelH * 4 + 1024;   // QOI worst case + header
-      if (need < 14 || need > cap) { qoiErr = 400; break; }
-      if (qoiCap < need) {
-        if (qoiBuf) free(qoiBuf);
-        qoiBuf = (uint8_t*)ps_malloc(need);
-        if (!qoiBuf) qoiBuf = (uint8_t*)malloc(need);
-        qoiCap = qoiBuf ? need : 0;
-      }
-      if (!qoiBuf) { qoiErr = 503; break; }
-      canvasStandDown();
-      break;
-    }
-    case RAW_WRITE:
-      if (qoiErr || !qoiBuf) break;
-      if (qoiLen + raw.currentSize <= qoiCap) { memcpy(qoiBuf + qoiLen, raw.buf, raw.currentSize); qoiLen += raw.currentSize; }
-      break;
-    case RAW_END:
-      if (!qoiErr && gPanel.ready) {
-        if (qoiDecodeToPanel(qoiBuf, qoiLen)) panelShow();
-        else { qoiErr = 400; dispReturnToWall(); }    // bad image: don't leave the panel parked
-      }
-      break;
-    case RAW_ABORTED:
-      qoiErr = 400;
-      break;
+// decoded straight to the panel. Same takeover as /frame. The buffer allocation is kept and
+// reused across uploads (qoiCap), like the readback buffer.
+static uint8_t* qoiBuf = nullptr; static size_t qoiCap = 0;
+
+// Receive a whole raw body into a kept PSRAM buffer (allocating/growing it as needed) -- the
+// shape shared by the qoi/gif/font uploads, which all buffer-then-decode. Returns the bytes
+// received, or 0 on truncation/allocation failure (buf/cap are updated either way).
+static size_t recvWhole(httpd_req_t* r, uint8_t** buf, size_t* cap, size_t need, bool psramOnly = false) {
+  if (*cap < need) {
+    if (*buf) free(*buf);
+    *buf = (uint8_t*)ps_malloc(need);
+    if (!*buf && !psramOnly) *buf = (uint8_t*)malloc(need);
+    *cap = *buf ? need : 0;
   }
+  if (!*buf) return 0;
+  size_t got = 0;
+  while (got < need) {
+    int n = httpxRecv(r, (char*)(*buf + got), need - got);
+    if (n <= 0) return 0;
+    got += (size_t)n;
+  }
+  return got;
 }
-static void handleApiCanvasQoi() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  int e = qoiErr; qoiErr = 0;
-  if (e == 400) { sendJsonError(400, "Not a QOI image matching the panel size"); return; }
-  if (e == 503) { sendJsonError(503, "Panel not running or out of memory"); return; }
-  if (e == 507) { sendJsonError(507, "Low on memory -- try again in a moment"); return; }
+
+static esp_err_t handleApiCanvasQoi(httpd_req_t* r) {
+  if (!gPanel.ready) return httpxErr(r, 503, "Panel not running or out of memory");
+  if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP)
+    return httpxErr(r, 507, "Low on memory -- try again in a moment");   // stressed: back off
+  const size_t need = (size_t)r->content_len;
+  const size_t cap  = (size_t)gPanel.panelW * gPanel.panelH * 4 + 1024;   // QOI worst case + header
+  if (need < 14 || need > cap) return httpxErr(r, 400, "Not a QOI image matching the panel size");
+  canvasStandDown();
+  const size_t got = recvWhole(r, &qoiBuf, &qoiCap, need);
+  if (!got) { dispReturnToWall(); return httpxErr(r, 503, "Panel not running or out of memory"); }
+  if (!qoiDecodeToPanel(qoiBuf, got)) {
+    dispReturnToWall();                               // bad image: don't leave the panel parked
+    return httpxErr(r, 400, "Not a QOI image matching the panel size");
+  }
+  panelShow();
   char buf[96];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"width\":%u,\"height\":%u}", (unsigned)gPanel.panelW, (unsigned)gPanel.panelH);
-  server.send(200, "application/json", buf);
+  return httpxSend(r, 200, "application/json", buf);
 }
 
 // PUT /api/canvas/anim -- upload a looping animation that plays on-device (client can disconnect).
 // Header (14 B, big-endian): "MPGA"(4) ver(1)=1 fmt(1: 2=rgb565,3=rgb888) fps(1) flags(1: bit0=loop)
 // w(2) h(2) frames(2), then frames*w*h*fmt bytes of frame data. Streamed straight into PSRAM.
-static int      animErr = 0;
-static uint8_t  animHdr[14]; static uint8_t animHdrN = 0; static bool animBegun = false;
-static void handleApiCanvasAnimRaw() {
-  HTTPRaw& raw = server.raw();
-  wdgWebMs = millis();
-  switch (raw.status) {
-    case RAW_START:
-      animErr = 0; animHdrN = 0; animBegun = false;
-      if (!gPanel.ready) { animErr = 503; break; }
-      if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) { animErr = 507; break; }   // stressed: back off
-      canvasStandDown();                              // park the render task while the store refills
-      break;
-    case RAW_WRITE: {
-      if (animErr) break;
-      size_t i = 0;
-      while (animHdrN < 14 && i < raw.currentSize) animHdr[animHdrN++] = raw.buf[i++];
-      if (animHdrN < 14) break;
-      if (!animBegun) {
-        if (memcmp(animHdr, "MPGA", 4) != 0 || animHdr[4] != 1) { animErr = 400; break; }
-        uint16_t w  = (animHdr[8]  << 8) | animHdr[9];
-        uint16_t h  = (animHdr[10] << 8) | animHdr[11];
-        uint16_t fr = (animHdr[12] << 8) | animHdr[13];
-        int rc = canvasAnimBegin(animHdr[5], animHdr[6], animHdr[7] & 1, w, h, fr);
-        if (rc) { animErr = rc; break; }
-        animBegun = true;
-      }
-      if (i < raw.currentSize) canvasAnimFeed(raw.buf + i, raw.currentSize - i);
-      break;
-    }
-    case RAW_END:
-      if (!animErr && animBegun) { int rc = canvasAnimCommit(); if (rc) animErr = rc; }
-      if (animErr) dispReturnToWall();                // failed mid-upload: hand the panel back
-      break;
-    case RAW_ABORTED:
-      animErr = 400; dispReturnToWall();
-      break;
-  }
+static esp_err_t animRawReply(httpd_req_t* r, int e) {
+  if (e == 400) return httpxErr(r, 400, "Bad MPGA header or truncated upload");
+  if (e == 413) return httpxErr(r, 413, "Animation exceeds the PSRAM budget");
+  if (e == 507) return httpxErr(r, 507, "Low on memory -- try again in a moment");
+  return httpxErr(r, 503, "Panel not running or out of memory");
 }
-static void handleApiCanvasAnim() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  int e = animErr; animErr = 0;
-  if (e == 400) { sendJsonError(400, "Bad MPGA header or truncated upload"); return; }
-  if (e == 413) { sendJsonError(413, "Animation exceeds the PSRAM budget"); return; }
-  if (e == 503) { sendJsonError(503, "Panel not running or out of memory"); return; }
-  if (e == 507) { sendJsonError(507, "Low on memory -- try again in a moment"); return; }
+static esp_err_t handleApiCanvasAnim(httpd_req_t* r) {
+  if (!gPanel.ready) return animRawReply(r, 503);
+  if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) return animRawReply(r, 507);   // stressed: back off
+  const size_t len = (size_t)r->content_len;
+  if (len < 14) return animRawReply(r, 400);
+  canvasStandDown();                              // park the render task while the store refills
+
+  uint8_t hdr[14]; uint8_t hdrN = 0;
+  bool    begun = false;
+  size_t  recvd = 0;
+  while (recvd < len) {
+    int n = httpxRecv(r, (char*)httpxBuf, min(len - recvd, (size_t)sizeof(httpxBuf)));
+    if (n <= 0) { dispReturnToWall(); return animRawReply(r, 400); }   // failed mid-upload: hand the panel back
+    recvd += (size_t)n;
+    int i = 0;
+    while (hdrN < 14 && i < n) hdr[hdrN++] = httpxBuf[i++];
+    if (hdrN < 14) continue;
+    if (!begun) {
+      if (memcmp(hdr, "MPGA", 4) != 0 || hdr[4] != 1) { dispReturnToWall(); return animRawReply(r, 400); }
+      uint16_t w  = (hdr[8]  << 8) | hdr[9];
+      uint16_t h  = (hdr[10] << 8) | hdr[11];
+      uint16_t fr = (hdr[12] << 8) | hdr[13];
+      int rc = canvasAnimBegin(hdr[5], hdr[6], hdr[7] & 1, w, h, fr);
+      if (rc) { dispReturnToWall(); return animRawReply(r, rc); }
+      begun = true;
+    }
+    if (i < n) canvasAnimFeed(httpxBuf + i, (size_t)(n - i));
+  }
+  int rc = begun ? canvasAnimCommit() : 400;
+  if (rc) { dispReturnToWall(); return animRawReply(r, rc); }
   char buf[64];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"frames\":%u}", (unsigned)canvasAnimCount());
-  server.send(200, "application/json", buf);
+  return httpxSend(r, 200, "application/json", buf);
 }
 
 // PUT /api/canvas/atlas -- upload a sprite tile sheet for the ops path's "sprite" op (v2.1).
 // Header (12 B, big-endian): "MPTA"(4) ver(1)=1 fmt(1: 2=rgb565BE, 3=rgb888) tileW(2) tileH(2)
 // tiles(2), then tiles*tileW*tileH*fmt bytes of tile data. Streamed straight into PSRAM; kept
 // across uses and replaced by the next upload. No panel takeover -- it is data, not pixels.
-static int      atlasErr = 0;
-static uint8_t  atlasHdr[12]; static uint8_t atlasHdrN = 0; static bool atlasBegun = false;
-static void handleApiCanvasAtlasRaw() {
-  HTTPRaw& raw = server.raw();
-  wdgWebMs = millis();
-  switch (raw.status) {
-    case RAW_START:
-      atlasErr = 0; atlasHdrN = 0; atlasBegun = false;
-      if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) { atlasErr = 507; break; }   // stressed: back off
-      break;
-    case RAW_WRITE: {
-      if (atlasErr) break;
-      size_t i = 0;
-      while (atlasHdrN < 12 && i < raw.currentSize) atlasHdr[atlasHdrN++] = raw.buf[i++];
-      if (atlasHdrN < 12) break;
-      if (!atlasBegun) {
-        if (memcmp(atlasHdr, "MPTA", 4) != 0 || atlasHdr[4] != 1) { atlasErr = 400; break; }
-        uint16_t tw = (atlasHdr[6]  << 8) | atlasHdr[7];
-        uint16_t th = (atlasHdr[8]  << 8) | atlasHdr[9];
-        uint16_t tn = (atlasHdr[10] << 8) | atlasHdr[11];
-        int rc = canvasAtlasBegin(atlasHdr[5], tw, th, tn);
-        if (rc) { atlasErr = rc; break; }
-        atlasBegun = true;
-      }
-      if (i < raw.currentSize) canvasAtlasFeed(raw.buf + i, raw.currentSize - i);
-      break;
-    }
-    case RAW_END:
-      if (!atlasErr && !atlasBegun) atlasErr = 400;   // empty body: never reached the header
-      if (!atlasErr) { int rc = canvasAtlasCommit(); if (rc) atlasErr = rc; }
-      break;
-    case RAW_ABORTED:
-      atlasErr = 400;
-      break;
-  }
+static esp_err_t atlasRawReply(httpd_req_t* r, int e) {
+  if (e == 400) return httpxErr(r, 400, "Bad MPTA header or truncated upload");
+  if (e == 413) return httpxErr(r, 413, "Atlas exceeds the 2 MB budget");
+  if (e == 507) return httpxErr(r, 507, "Low on memory -- try again in a moment");
+  return httpxErr(r, 503, "Out of memory");
 }
-static void handleApiCanvasAtlas() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  int e = atlasErr; atlasErr = 0;
-  if (e == 400) { sendJsonError(400, "Bad MPTA header or truncated upload"); return; }
-  if (e == 413) { sendJsonError(413, "Atlas exceeds the 2 MB budget"); return; }
-  if (e == 503) { sendJsonError(503, "Out of memory"); return; }
-  if (e == 507) { sendJsonError(507, "Low on memory -- try again in a moment"); return; }
+static esp_err_t handleApiCanvasAtlas(httpd_req_t* r) {
+  if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) return atlasRawReply(r, 507);   // stressed: back off
+  const size_t len = (size_t)r->content_len;
+  if (len < 12) return atlasRawReply(r, 400);       // empty body: never reaches the header
+
+  uint8_t hdr[12]; uint8_t hdrN = 0;
+  bool    begun = false;
+  size_t  recvd = 0;
+  while (recvd < len) {
+    int n = httpxRecv(r, (char*)httpxBuf, min(len - recvd, (size_t)sizeof(httpxBuf)));
+    if (n <= 0) return atlasRawReply(r, 400);
+    recvd += (size_t)n;
+    int i = 0;
+    while (hdrN < 12 && i < n) hdr[hdrN++] = httpxBuf[i++];
+    if (hdrN < 12) continue;
+    if (!begun) {
+      if (memcmp(hdr, "MPTA", 4) != 0 || hdr[4] != 1) return atlasRawReply(r, 400);
+      uint16_t tw = (hdr[6]  << 8) | hdr[7];
+      uint16_t th = (hdr[8]  << 8) | hdr[9];
+      uint16_t tn = (hdr[10] << 8) | hdr[11];
+      int rc = canvasAtlasBegin(hdr[5], tw, th, tn);
+      if (rc) return atlasRawReply(r, rc);
+      begun = true;
+    }
+    if (i < n) canvasAtlasFeed(httpxBuf + i, (size_t)(n - i));
+  }
+  int rc = begun ? canvasAtlasCommit() : 400;
+  if (rc) return atlasRawReply(r, rc);
   uint16_t tiles = 0, w = 0, h = 0;
   canvasAtlasInfo(tiles, w, h);
   char buf[64];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"tiles\":%u,\"w\":%u,\"h\":%u}",
            (unsigned)tiles, (unsigned)w, (unsigned)h);
-  server.send(200, "application/json", buf);
+  return httpxSend(r, 200, "application/json", buf);
 }
 
 // PUT /api/canvas/gif -- import a GIF into the animation store (v2.1). The whole file is
@@ -2128,183 +1857,118 @@ static void handleApiCanvasAtlas() {
 // same store PUT /api/canvas/anim fills, so it plays immediately and POST /api/canvas/anim/save
 // persists it. GIFs smaller than the panel are centred on black; larger ones are rejected.
 #define CANVAS_GIF_MAX_BYTES  (4096u * 1024u)
-static uint8_t* gifBuf = nullptr; static size_t gifCap = 0, gifLen = 0;
-static int      gifErr = 0;
-static const char* gifErrMsg = "";
-static uint16_t gifFrames = 0; static uint8_t gifFps = 0;
-static void handleApiCanvasGifRaw() {
-  HTTPRaw& raw = server.raw();
-  wdgWebMs = millis();
-  switch (raw.status) {
-    case RAW_START: {
-      gifErr = 0; gifLen = 0;
-      if (!gPanel.ready) { gifErr = 503; gifErrMsg = "Panel not running"; break; }
-      if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) {   // stressed: back off
-        gifErr = 507; gifErrMsg = "Low on memory -- try again in a moment"; break;
-      }
-      size_t need = (size_t)server.clientContentLength();
-      if (need < 14) { gifErr = 400; gifErrMsg = "Empty or truncated body"; break; }
-      if (need > CANVAS_GIF_MAX_BYTES) {
-        gifErr = 413; gifErrMsg = "GIF exceeds the 4 MB budget"; break;
-      }
-      if (gifCap < need) {                    // a multi-MB file only ever fits PSRAM
-        if (gifBuf) free(gifBuf);
-        gifBuf = (uint8_t*)ps_malloc(need);
-        gifCap = gifBuf ? need : 0;
-      }
-      if (!gifBuf) { gifErr = 503; gifErrMsg = "Out of memory"; break; }
-      break;
-    }
-    case RAW_WRITE:
-      if (gifErr || !gifBuf) break;
-      if (gifLen + raw.currentSize <= gifCap) {
-        memcpy(gifBuf + gifLen, raw.buf, raw.currentSize);
-        gifLen += raw.currentSize;
-      }
-      break;
-    case RAW_END:
-      if (!gifErr) {
-        canvasStandDown();                    // park the render task while the store refills
-        int rc = canvasGifImport(gifBuf, gifLen, &gifFrames, &gifFps, &gifErrMsg);
-        if (rc) { gifErr = rc; dispReturnToWall(); }
-      }
-      // The compressed upload is dead weight once decoded (the frames live in the
-      // animation store) -- free it rather than cache 4 MB against the next import.
-      if (gifBuf) { free(gifBuf); gifBuf = nullptr; gifCap = 0; }
-      break;
-    case RAW_ABORTED:
-      // No dispReturnToWall() here: the panel is only taken over at RAW_END (the decode),
-      // which an aborted upload never reaches -- whatever was showing keeps showing.
-      gifErr = 400; gifErrMsg = "Upload aborted";
-      if (gifBuf) { free(gifBuf); gifBuf = nullptr; gifCap = 0; }
-      break;
+static esp_err_t handleApiCanvasGif(httpd_req_t* r) {
+  if (!gPanel.ready) return httpxErr(r, 503, "Panel not running");
+  if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP)
+    return httpxErr(r, 507, "Low on memory -- try again in a moment");   // stressed: back off
+  const size_t need = (size_t)r->content_len;
+  if (need < 14)                   return httpxErr(r, 400, "Empty or truncated body");
+  if (need > CANVAS_GIF_MAX_BYTES) return httpxErr(r, 413, "GIF exceeds the 4 MB budget");
+  // Buffered whole, then decoded -- and freed right after: the compressed upload is dead
+  // weight once the frames live in the animation store. A multi-MB file only ever fits PSRAM.
+  uint8_t* buf = nullptr; size_t cap = 0;
+  const size_t got = recvWhole(r, &buf, &cap, need, /*psramOnly=*/true);
+  if (!got) {
+    if (buf) free(buf);
+    // No dispReturnToWall(): the panel is only taken over below (the decode), which a
+    // truncated upload never reaches -- whatever was showing keeps showing.
+    return httpxErr(r, buf ? 400 : 503, buf ? "Empty or truncated body" : "Out of memory");
   }
-}
-static void handleApiCanvasGif() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  int e = gifErr; gifErr = 0;
-  if (e) { sendJsonError(e, gifErrMsg[0] ? gifErrMsg : "GIF import failed"); return; }
-  char buf[64];
-  snprintf(buf, sizeof(buf), "{\"ok\":true,\"frames\":%u,\"fps\":%u}",
-           (unsigned)gifFrames, (unsigned)gifFps);
-  server.send(200, "application/json", buf);
+  canvasStandDown();                    // park the render task while the store refills
+  uint16_t frames = 0; uint8_t fps = 0; const char* errMsg = "";
+  int rc = canvasGifImport(buf, got, &frames, &fps, &errMsg);
+  free(buf);
+  if (rc) { dispReturnToWall(); return httpxErr(r, rc, errMsg[0] ? errMsg : "GIF import failed"); }
+  char out[64];
+  snprintf(out, sizeof(out), "{\"ok\":true,\"frames\":%u,\"fps\":%u}",
+           (unsigned)frames, (unsigned)fps);
+  return httpxSend(r, 200, "application/json", out);
 }
 
 // PUT /api/canvas/font -- upload an MPFT font blob (tools/fontpack.py) into the custom-font
 // slot (v2.1). Small (<= 64 KB), so it is buffered whole and handed to canvasFontInstall on
 // RAW_END -- the same path a library load uses. On success the face answers to the name
 // "custom" in the ticker and the ops text op.
-static uint8_t* fontUpBuf = nullptr; static size_t fontUpCap = 0, fontUpLen = 0;
-static int      fontUpErr = 0;
-static void handleApiCanvasFontRaw() {
-  HTTPRaw& raw = server.raw();
-  wdgWebMs = millis();
-  switch (raw.status) {
-    case RAW_START: {
-      fontUpErr = 0; fontUpLen = 0;
-      size_t need = (size_t)server.clientContentLength();
-      if (need < 8)                     { fontUpErr = 400; break; }
-      if (need > CANVAS_FONT_MAX_BYTES) { fontUpErr = 413; break; }
-      if (fontUpCap < need) {
-        if (fontUpBuf) free(fontUpBuf);
-        fontUpBuf = (uint8_t*)ps_malloc(need);
-        if (!fontUpBuf) fontUpBuf = (uint8_t*)malloc(need);
-        fontUpCap = fontUpBuf ? need : 0;
-      }
-      if (!fontUpBuf) fontUpErr = 503;
-      break;
-    }
-    case RAW_WRITE:
-      if (fontUpErr || !fontUpBuf) break;
-      if (fontUpLen + raw.currentSize <= fontUpCap) {
-        memcpy(fontUpBuf + fontUpLen, raw.buf, raw.currentSize);
-        fontUpLen += raw.currentSize;
-      }
-      break;
-    case RAW_END:
-      if (!fontUpErr) { int rc = canvasFontInstall(fontUpBuf, fontUpLen); if (rc) fontUpErr = rc; }
-      break;
-    case RAW_ABORTED:
-      fontUpErr = 400;
-      break;
+static esp_err_t handleApiCanvasFont(httpd_req_t* r) {
+  const size_t need = (size_t)r->content_len;
+  if (need < 8)                     return httpxErr(r, 400, "Bad MPFT header or truncated upload");
+  if (need > CANVAS_FONT_MAX_BYTES) return httpxErr(r, 413, "Font exceeds the 64 KB cap");
+  uint8_t* buf = nullptr; size_t cap = 0;   // small (<= 64 KB): buffered whole, freed after install
+  const size_t got = recvWhole(r, &buf, &cap, need);
+  if (!got) {
+    if (buf) free(buf);
+    return httpxErr(r, buf ? 400 : 503, buf ? "Bad MPFT header or truncated upload" : "Out of memory");
   }
-}
-static void handleApiCanvasFont() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  int e = fontUpErr; fontUpErr = 0;
-  if (e == 400) { sendJsonError(400, "Bad MPFT header or truncated upload"); return; }
-  if (e == 413) { sendJsonError(413, "Font exceeds the 64 KB cap"); return; }
-  if (e)        { sendJsonError(503, "Out of memory"); return; }
+  int rc = canvasFontInstall(buf, got);
+  free(buf);
+  if (rc == 400) return httpxErr(r, 400, "Bad MPFT header or truncated upload");
+  if (rc == 413) return httpxErr(r, 413, "Font exceeds the 64 KB cap");
+  if (rc)        return httpxErr(r, 503, "Out of memory");
   uint8_t w = 0, h = 0, a = 0;
   canvasFontInfo(w, h, a);
-  char buf[80];
-  snprintf(buf, sizeof(buf), "{\"ok\":true,\"font\":\"custom\",\"w\":%u,\"h\":%u,\"ascent\":%u}",
+  char out[80];
+  snprintf(out, sizeof(out), "{\"ok\":true,\"font\":\"custom\",\"w\":%u,\"h\":%u,\"ascent\":%u}",
            (unsigned)w, (unsigned)h, (unsigned)a);
-  server.send(200, "application/json", buf);
+  return httpxSend(r, 200, "application/json", out);
 }
 
 // Map a canvasFont* return code onto the error surface (the font twin of animRcReply).
-static void fontRcReply(int rc, const char* okBody) {
+static esp_err_t fontRcReply(httpd_req_t* r, int rc, const char* okBody) {
   switch (rc) {
-    case 0:   server.send(200, "application/json", okBody); return;
-    case 400: sendJsonError(400, "Bad name (1-24 chars a-z 0-9 - _) or bad/truncated file"); return;
-    case 404: sendJsonError(404, "No such font"); return;
-    case 409: sendJsonError(409, "No custom font loaded -- upload one first"); return;
-    case 413: sendJsonError(413, "Font exceeds the 64 KB cap"); return;
-    case 507: sendJsonError(507, "Filesystem full or write failed"); return;
-    default:  sendJsonError(503, "Filesystem or memory unavailable"); return;
+    case 0:   return httpxSend(r, 200, "application/json", okBody);
+    case 400: return httpxErr(r, 400, "Bad name (1-24 chars a-z 0-9 - _) or bad/truncated file");
+    case 404: return httpxErr(r, 404, "No such font");
+    case 409: return httpxErr(r, 409, "No custom font loaded -- upload one first");
+    case 413: return httpxErr(r, 413, "Font exceeds the 64 KB cap");
+    case 507: return httpxErr(r, 507, "Filesystem full or write failed");
+    default:  return httpxErr(r, 503, "Filesystem or memory unavailable");
   }
 }
 
 // POST /api/canvas/font/save {"name":"x"} -- persist the custom-font slot to FATFS.
-static void handleApiFontSave() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiFontSave(httpd_req_t* r) {
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   const char* name = doc["name"] | "";
   { char cd[64]; snprintf(cd, sizeof(cd), "font save '%.24s'", name); logCommand('R', cd); }
-  fontRcReply(canvasFontSave(name), "{\"ok\":true}");
+  return fontRcReply(r, canvasFontSave(name), "{\"ok\":true}");
 }
 
 // POST /api/canvas/font/delete {"name":"x"}
-static void handleApiFontDelete() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
+static esp_err_t handleApiFontDelete(httpd_req_t* r) {
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   const char* name = doc["name"] | "";
   { char cd[64]; snprintf(cd, sizeof(cd), "font delete '%.24s'", name); logCommand('R', cd); }
-  fontRcReply(canvasFontDelete(name), "{\"ok\":true}");
+  return fontRcReply(r, canvasFontDelete(name), "{\"ok\":true}");
 }
 
 // GET /api/canvas/fonts -- the font library, streamed (like /api/canvas/anims).
-static void handleApiFontList() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "application/json", "");
+static esp_err_t handleApiFontList(httpd_req_t* r) {
+  httpd_resp_set_type(r, "application/json");
+  gStreamReq = r;
   canvasFontList(animListSink);
-  server.sendContent("");
+  return httpxChunkEnd(r);
 }
 
 // POST /api/canvas/ticker -- one line of text scrolling right-to-left, rendered on-device.
 // {text, color:[r,g,b], speed:1..20, overlay:bool, band:bool}. overlay=true (v2.1)
 // composites the ticker as a lower-third over whatever else is presenting -- wall,
 // effect, animation -- and survives page changes. Empty text stops any ticker.
-static void handleApiCanvasTicker() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!gPanel.ready) { sendJsonError(503, "Panel not running"); return; }
+static esp_err_t handleApiCanvasTicker(httpd_req_t* r) {
+  if (!gPanel.ready) { httpxErr(r, 503, "Panel not running"); return ESP_OK; }
   JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) { sendJsonError(400, "Invalid JSON"); return; }
+  if (deserializeJson(doc, httpxArg(r, "plain")) != DeserializationError::Ok) { httpxErr(r, 400, "Invalid JSON"); return ESP_OK; }
   const char* text = doc["text"] | "";
   if (!text[0]) {
     canvasTickerStopForce();           // explicit stop kills an overlay ticker too
     dispReturnToWall();
-    server.send(200, "application/json", "{\"ok\":true,\"active\":false}");
-    return;
+    return httpxSend(r, 200, "application/json", "{\"ok\":true,\"active\":false}");
   }
-  if (gQuietTime) { sendJsonError(409, "Quiet Time is active"); return; }
-  uint8_t r = 255, g = 255, b = 255;
+  if (gQuietTime) { httpxErr(r, 409, "Quiet Time is active"); return ESP_OK; }
+  uint8_t cr = 255, cg = 255, cb = 255;
   if (doc["color"].is<JsonArray>() && doc["color"].size() >= 3) {
-    r = (uint8_t)(int)doc["color"][0]; g = (uint8_t)(int)doc["color"][1]; b = (uint8_t)(int)doc["color"][2];
+    cr = (uint8_t)(int)doc["color"][0]; cg = (uint8_t)(int)doc["color"][1]; cb = (uint8_t)(int)doc["color"][2];
   }
   int speed = doc["speed"] | 2;
   bool overlay = doc["overlay"] | false;
@@ -2314,11 +1978,11 @@ static void handleApiCanvasTicker() {
   // panel-sized face (NULL below); a missing font must scroll text, not 500.
   const Font1252* face = nullptr;
   if (doc["font"].is<const char*>()) face = canvasFontByName(doc["font"].as<const char*>());
-  canvasTickerSet(text, r, g, b, speed, overlay, band, face);
+  canvasTickerSet(text, cr, cg, cb, speed, overlay, band, face);
   char resp[64];
   snprintf(resp, sizeof(resp), "{\"ok\":true,\"active\":true,\"overlay\":%s}",
            overlay ? "true" : "false");
-  server.send(200, "application/json", resp);
+  return httpxSend(r, 200, "application/json", resp);
 }
 
 /* ----------------------------------------------------------
@@ -2370,7 +2034,7 @@ static void fsListDir(const char* path, int depth) {
                fsListFirst ? "" : ",", full, (unsigned)f.size());
       f.close();
       fsListFirst = false;
-      server.sendContent(row);
+      httpxChunkStr(gStreamReq, row);
     }
     wdgWebMs = millis();
   }
@@ -2379,98 +2043,78 @@ static void fsListDir(const char* path, int depth) {
 
 // GET /api/fs -- totals plus every file on the FATFS, streamed (one chunk per file,
 // like /api/flap/modules -- the list is never held in RAM whole).
-static void handleApiFsList() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!sfFsReady) { sendJsonError(503, "No filesystem"); return; }
-  server.client().setConnectionTimeout(1500);
+static esp_err_t handleApiFsList(httpd_req_t* r) {
+  if (!sfFsReady) { httpxErr(r, 503, "No filesystem"); return ESP_OK; }
   wdgWebMs = millis();
   const size_t total = FFat.totalBytes();
   const size_t used  = FFat.usedBytes();
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "application/json", "");
+  httpd_resp_set_type(r, "application/json");
   char head[80];
   snprintf(head, sizeof(head), "{\"total\":%u,\"free\":%u,\"files\":[",
            (unsigned)total, (unsigned)(total > used ? total - used : 0));
-  server.sendContent(head);
+  gStreamReq = r;
+  httpxChunkStr(r, head);
   fsListFirst = true;
   fsListDir("/", 0);
-  server.sendContent("]}");
-  server.sendContent("");   // terminate the chunked response
+  httpxChunkStr(r, "]}");
+  return httpxChunkEnd(r);   // terminate the chunked response
 }
 
 // GET /api/fs/file?path=/anim/x.mpg -- stream one file back as a download.
-static void handleApiFsFile() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!sfFsReady) { sendJsonError(503, "No filesystem"); return; }
-  const String pathArg = server.arg("path");
+static esp_err_t handleApiFsFile(httpd_req_t* r) {
+  if (!sfFsReady) { httpxErr(r, 503, "No filesystem"); return ESP_OK; }
+  const String pathArg = httpxArg(r, "path");
   if (!fsPathOk(pathArg.c_str())) {
-    sendJsonError(400, "Bad path (absolute, a-z 0-9 . _ - /, max 48 chars)"); return;
+    httpxErr(r, 400, "Bad path (absolute, a-z 0-9 . _ - /, max 48 chars)"); return ESP_OK;
   }
   File f = FFat.open(pathArg.c_str(), "r");
-  if (!f || f.isDirectory()) { if (f) f.close(); sendJsonError(404, "No such file"); return; }
-  const size_t n = f.size();
+  if (!f || f.isDirectory()) { if (f) f.close(); httpxErr(r, 404, "No such file"); return ESP_OK; }
   // The browser lands the download under the file's own name, not "file".
   const char* base = strrchr(pathArg.c_str(), '/');
   base = base ? base + 1 : pathArg.c_str();
   char cd[80];
   snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", base);
-  server.sendHeader("Content-Disposition", cd);
+  httpd_resp_set_hdr(r, "Content-Disposition", cd);
   wdgWebMs = millis();
-  // setConnectionTimeout(), NOT setTimeout() -- see handleRoot.
-  server.client().setConnectionTimeout(3000);
-  server.setContentLength(n);
-  server.send(200, "application/octet-stream", "");
+  httpd_resp_set_type(r, "application/octet-stream");
   uint8_t buf[1024];
   while (size_t got = f.read(buf, sizeof(buf))) {
-    server.sendContent((const char*)buf, got);
+    httpxChunk(r, (const char*)buf, got);
     wdgWebMs = millis();
   }
   f.close();
+  return httpxChunkEnd(r);
 }
 
 // POST /api/fs/delete {"path":"/anim/x.mpg"} -- delete a file (or an empty directory).
 // Deliberately unrestricted: it is the user's flash, and the dashboard carries the
 // warnings (the companion blob's confirm, for one).
-static void handleApiFsDelete() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  if (!sfFsReady) { sendJsonError(503, "No filesystem"); return; }
+static esp_err_t handleApiFsDelete(httpd_req_t* r) {
+  if (!sfFsReady) { httpxErr(r, 503, "No filesystem"); return ESP_OK; }
   JsonDocument doc;
-  if (!readJsonBody(doc)) return;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   const char* path = doc["path"] | "";
   if (!fsPathOk(path)) {
-    sendJsonError(400, "Bad path (absolute, a-z 0-9 . _ - /, max 48 chars)"); return;
+    httpxErr(r, 400, "Bad path (absolute, a-z 0-9 . _ - /, max 48 chars)"); return ESP_OK;
   }
-  if (!FFat.exists(path)) { sendJsonError(404, "No such file"); return; }
+  if (!FFat.exists(path)) { httpxErr(r, 404, "No such file"); return ESP_OK; }
   bool isDir = false;
   { File f = FFat.open(path, "r"); isDir = f && f.isDirectory(); if (f) f.close(); }
   if (!(isDir ? FFat.rmdir(path) : FFat.remove(path))) {
-    sendJsonError(507, isDir ? "Directory not empty or remove failed" : "Remove failed");
-    return;
+    httpxErr(r, 507, isDir ? "Directory not empty or remove failed" : "Remove failed");
+    return ESP_OK;
   }
   { char cd[64]; snprintf(cd, sizeof(cd), "fs delete %.48s", path); logCommand('R', cd); }
-  server.send(200, "application/json", "{\"ok\":true}");
+  return httpxSend(r, 200, "application/json", "{\"ok\":true}");
 }
 
-// POST /api/fs/upload -- a multipart file upload onto FATFS, the OTA upload's shape
-// (server.upload() chunk callback + a final-response handler). The target path comes
-// from the client filename, sanitized, NOT from a form field: WebServer's form-field
-// parsing is unreliable mid-multipart, and the filename is already there. Routing is
-// by extension -- .mpg lands in /anim/, .fnt in /fonts/, anything else in the root --
-// so an uploaded animation is immediately playable by name. Streamed to a .tmp then
-// renamed (the canvasAnimSave pattern), so a failed upload never clobbers a good file.
-static File   fsUpFile;
-static int    fsUpErr   = 0;    // 0 = ok, else the HTTP status to report
-static size_t fsUpRecvd = 0;    // bytes written so far this request
-static char   fsUpPath[64];     // final path
-static char   fsUpTmp[72];      // <final>.tmp while the stream is in flight (fits fsUpPath + ".tmp")
-
-// Give up on the transfer: close + delete the temp file, remember the status. The
-// WebServer keeps draining the multipart either way; later chunks are dropped.
-static void fsUploadAbort(int status) {
-  if (fsUpFile) fsUpFile.close();
-  if (sfFsReady && fsUpTmp[0]) FFat.remove(fsUpTmp);
-  fsUpErr = status;
-}
+// POST /api/fs/upload?name=<filename> -- a raw-body file upload onto FATFS (v3.0
+// breaking change: the body is the file itself, no multipart, and the filename rides
+// the `name` query param -- the Files tab and curl --data-binary both send exactly
+// this). The name is sanitized and routed by extension -- .mpg lands in /anim/, .fnt
+// in /fonts/, anything else in the root -- so an uploaded animation is immediately
+// playable by name. Streamed to a .tmp then renamed (the canvasAnimSave pattern), so
+// a failed upload never clobbers a good file.
 
 // Client filename -> target path. Lowercase and keep [a-z0-9._-]; a name that
 // sanitizes to nothing, or to more than 40 chars, is a reject (a truncated name
@@ -2494,197 +2138,128 @@ static bool fsUploadTarget(const char* fn, char* out, size_t outLen) {
   return fsPathOk(out);   // "." and friends still cannot sneak through
 }
 
-static void handleFsUpload() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  HTTPUpload& upload = server.upload();
-  if (upload.status == UPLOAD_FILE_START) {
-    fsUpErr = 0; fsUpRecvd = 0; fsUpPath[0] = 0; fsUpTmp[0] = 0;
-    if (!sfFsReady) { fsUpErr = 503; return; }
-    if (!fsUploadTarget(upload.filename.c_str(), fsUpPath, sizeof(fsUpPath))) {
-      fsUpErr = 400; return;
-    }
-    // Free-space gate, decided before anything touches flash. clientContentLength()
-    // is the whole multipart body -- slightly MORE than the file, which errs in the
-    // safe direction: an upload may never leave less than FS_UPLOAD_MIN_FREE behind.
-    const size_t total = FFat.totalBytes(), used = FFat.usedBytes();
-    const size_t freeB = total > used ? total - used : 0;
-    const size_t need  = (size_t)server.clientContentLength();
-    if (freeB < need || freeB - need < FS_UPLOAD_MIN_FREE) { fsUpErr = 413; return; }
-    if (!strncmp(fsUpPath, "/anim/",  6)) FFat.mkdir("/anim");    // idempotent
-    if (!strncmp(fsUpPath, "/fonts/", 7)) FFat.mkdir("/fonts");
-    snprintf(fsUpTmp, sizeof(fsUpTmp), "%s.tmp", fsUpPath);
-    FFat.remove(fsUpTmp);                                         // clear a stale temp
-    fsUpFile = FFat.open(fsUpTmp, "w");
-    if (!fsUpFile) fsUpErr = 507;
-  } else if (upload.status == UPLOAD_FILE_WRITE) {
-    // handleClient() does not return during a multipart upload -- feed the web
-    // watchdog here on every chunk, exactly like the OTA upload.
-    wdgWebMs = millis();
-    if (fsUpErr || !fsUpFile) return;                             // already failed: drain
-    if (fsUpFile.write(upload.buf, upload.currentSize) != upload.currentSize) {
-      fsUploadAbort(507); return;
-    }
-    fsUpRecvd += upload.currentSize;
-  } else if (upload.status == UPLOAD_FILE_END) {
-    if (fsUpErr) { fsUploadAbort(fsUpErr); return; }              // reuse the cleanup path
-    fsUpFile.close();
-    // Publish atomically: an existing file survives intact until the rename lands.
-    FFat.remove(fsUpPath);
-    if (!FFat.rename(fsUpTmp, fsUpPath)) { fsUploadAbort(507); return; }
-    { char cd[80]; snprintf(cd, sizeof(cd), "fs upload %s (%u B)",
-        fsUpPath, (unsigned)fsUpRecvd); logCommand('R', cd); }
-  } else if (upload.status == UPLOAD_FILE_ABORTED) {
-    fsUploadAbort(400);
-  }
-}
+static esp_err_t handleFsUpload(httpd_req_t* r) {
+  if (!sfFsReady) return httpxErr(r, 503, "No filesystem");
+  char path[64], tmp[72];                       // <final> and <final>.tmp while in flight
+  const String name = httpxArg(r, "name");
+  const size_t len  = (size_t)r->content_len;
+  if (!name.length() || len == 0 || !fsUploadTarget(name.c_str(), path, sizeof(path)))
+    return httpxErr(r, 400, "Bad filename (a-z 0-9 . _ -, 1-40 chars after sanitizing)");
+  // Free-space gate, decided before anything touches flash: an upload may never leave
+  // less than FS_UPLOAD_MIN_FREE behind. Content-Length IS the file (no multipart
+  // framing since v3.0), so the gate is exact.
+  const size_t total = FFat.totalBytes(), used = FFat.usedBytes();
+  const size_t freeB = total > used ? total - used : 0;
+  if (freeB < len || freeB - len < FS_UPLOAD_MIN_FREE)
+    return httpxErr(r, 413, "Not enough free space (64 KB must remain)");
+  if (!strncmp(path, "/anim/",  6)) FFat.mkdir("/anim");    // idempotent
+  if (!strncmp(path, "/fonts/", 7)) FFat.mkdir("/fonts");
+  snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+  FFat.remove(tmp);                                         // clear a stale temp
+  File f = FFat.open(tmp, "w");
+  if (!f) return httpxErr(r, 507, "Write failed");
 
-// Final response for the upload POST, after the whole multipart body has been
-// consumed -- by now fsUpErr reflects the true outcome (see sendOTAUploadResult).
-static void sendFsUploadResult() {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  const int err = fsUpErr;
-  fsUpErr = 0;                  // never leak this request's verdict into the next
-  switch (err) {
-    case 0:   break;
-    case 400: sendJsonError(400, "Bad filename (a-z 0-9 . _ -, 1-40 chars after sanitizing)"); return;
-    case 413: sendJsonError(413, "Not enough free space (64 KB must remain)"); return;
-    case 503: sendJsonError(503, "No filesystem"); return;
-    default:  sendJsonError(507, "Write failed"); return;
+  size_t recvd = 0;
+  while (recvd < len) {
+    int n = httpxRecv(r, (char*)httpxBuf, min(len - recvd, (size_t)sizeof(httpxBuf)));
+    if (n <= 0) { f.close(); FFat.remove(tmp); return httpxErr(r, 400, "Truncated upload"); }
+    if (f.write(httpxBuf, (size_t)n) != (size_t)n) { f.close(); FFat.remove(tmp); return httpxErr(r, 507, "Write failed"); }
+    recvd += (size_t)n;
   }
+  f.close();
+  // Publish atomically: an existing file survives intact until the rename lands.
+  FFat.remove(path);
+  if (!FFat.rename(tmp, path)) { FFat.remove(tmp); return httpxErr(r, 507, "Write failed"); }
+  { char cd[80]; snprintf(cd, sizeof(cd), "fs upload %s (%u B)", path, (unsigned)recvd); logCommand('R', cd); }
   char buf[112];
-  snprintf(buf, sizeof(buf), "{\"ok\":true,\"path\":\"%s\",\"bytes\":%u}",
-           fsUpPath, (unsigned)fsUpRecvd);
-  server.send(200, "application/json", buf);
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"path\":\"%s\",\"bytes\":%u}", path, (unsigned)recvd);
+  return httpxSend(r, 200, "application/json", buf);
 }
 
 void webInit() {
-  static const char* COLLECT_HDRS[] = { "If-None-Match" };
-  server.collectHeaders(COLLECT_HDRS, 1);   // so handleRoot can honour conditional GETs
-  server.on("/",                     HTTP_GET,     handleRoot);
-  server.on("/favicon.svg",          HTTP_GET,     handleFavicon);
-  server.on("/logo.svg",             HTTP_GET,     handleLogo);
-  // v1.1: one route per UI language, "/lang/<code>". Registering them individually
-  // (rather than parsing a path parameter) keeps the URI matcher plain and makes an
-  // unknown code fall through to the normal 404. English is never registered -- it is
-  // the text already in the page.
+  sseInit();                                // slot mutex + frame buffer for /api/events
+  httpxOn("/",                       HTTP_GET,  handleRoot);
+  httpxOn("/api/events",             HTTP_GET,  sseHandleRequest);   // SSE live-preview stream (v3.0)
+  httpxOn("/favicon.svg",            HTTP_GET,  handleFavicon);
+  httpxOn("/logo.svg",               HTTP_GET,  handleLogo);
+  // v1.1: one route per UI language, "/lang/<code>", all onto one handler (which reads
+  // the code back out of the URI). An unknown code falls through to the normal 404.
+  // English is never registered -- it is the text already in the page. The URI strings
+  // must outlive registration (httpxOn keeps the pointer), hence the static table.
+  static char langUri[UI_LANG_COUNT][16];
   for (size_t i = 0; i < UI_LANG_COUNT; i++) {
-    server.on((String("/lang/") + UI_LANGS[i].code).c_str(), HTTP_GET, [i]() { handleLang(i); });
+    snprintf(langUri[i], sizeof(langUri[i]), "/lang/%s", UI_LANGS[i].code);
+    httpxOn(langUri[i], HTTP_GET, handleLang);
   }
-  server.on("/ota",                  HTTP_GET,     handleOTAPage);
-  server.on("/api/ota/upload",       HTTP_POST,    sendOTAUploadResult, handleOTAUpload);
-  server.on("/api/log",              HTTP_GET,     handleApiMessages);
-  server.on("/api/frames/send",      HTTP_POST,    handleApiSend);
-  server.on("/api/frames/send",      HTTP_OPTIONS, handleOptions);
-  server.on("/api/frames/batch",     HTTP_POST,    handleApiSendBatch);
-  server.on("/api/frames/batch",     HTTP_OPTIONS, handleOptions);
-  server.on("/api/flap/modules",     HTTP_GET,     handleApiModules);
-  server.on("/api/display/state",    HTTP_GET,     handleApiDisplayState);
-  server.on("/api/display/cells",    HTTP_POST,    handleApiDisplayCells);
-  server.on("/api/display/cells",    HTTP_OPTIONS, handleOptions);
-  server.on("/api/display/brightness", HTTP_GET,     handleApiDisplayBrightness);
-  server.on("/api/display/brightness", HTTP_POST,    handleApiDisplayBrightness);
-  server.on("/api/display/brightness", HTTP_OPTIONS, handleOptions);
+  httpxOn("/ota",                    HTTP_GET,  handleOTAPage);
+  httpxOn("/api/ota/upload",         HTTP_POST, handleOTAUpload);
+  httpxOn("/api/log",                HTTP_GET,  handleApiMessages);
+  httpxOn("/api/frames/send",        HTTP_POST, handleApiSend);
+  httpxOn("/api/frames/batch",       HTTP_POST, handleApiSendBatch);
+  httpxOn("/api/flap/modules",       HTTP_GET,  handleApiModules);
+  httpxOn("/api/display/state",      HTTP_GET,  handleApiDisplayState);
+  httpxOn("/api/display/cells",      HTTP_POST, handleApiDisplayCells);
+  httpxOn("/api/display/brightness", HTTP_GET,  handleApiDisplayBrightness);
+  httpxOn("/api/display/brightness", HTTP_POST, handleApiDisplayBrightness);
   // v2.2: the FATFS file browser behind the dashboard's Files tab.
-  server.on("/api/fs",               HTTP_GET,     handleApiFsList);
-  server.on("/api/fs",               HTTP_OPTIONS, handleOptions);
-  server.on("/api/fs/file",          HTTP_GET,     handleApiFsFile);
-  server.on("/api/fs/file",          HTTP_OPTIONS, handleOptions);
-  server.on("/api/fs/delete",        HTTP_POST,    handleApiFsDelete);
-  server.on("/api/fs/delete",        HTTP_OPTIONS, handleOptions);
-  server.on("/api/fs/upload",        HTTP_POST,    sendFsUploadResult, handleFsUpload);
-  server.on("/api/fs/upload",        HTTP_OPTIONS, handleOptions);
-  server.on("/api/flap/char",        HTTP_POST,    handleApiChar);
-  server.on("/api/flap/char",        HTTP_OPTIONS, handleOptions);
-  server.on("/api/flap/index",       HTTP_POST,    handleApiIndex);
-  server.on("/api/flap/index",       HTTP_OPTIONS, handleOptions);
-  server.on("/api/flap/text",        HTTP_POST,    handleApiText);
-  server.on("/api/flap/text",        HTTP_OPTIONS, handleOptions);
-  server.on("/api/flap/home",        HTTP_POST,    handleApiHome);
-  server.on("/api/flap/home",        HTTP_OPTIONS, handleOptions);
-  server.on("/api/capabilities",     HTTP_GET,     handleApiCapabilities);
-  server.on("/api/capabilities",     HTTP_OPTIONS, handleOptions);
-  server.on("/api/status",           HTTP_GET,     handleApiStatus);
-  server.on("/api/mqtt/test",        HTTP_POST,    handleApiMqttTest);
-  server.on("/api/mqtt/test",        HTTP_OPTIONS, handleOptions);
-  server.on("/api/quiet",            HTTP_GET,     handleApiQuiet);
-  server.on("/api/quiet",            HTTP_POST,    handleApiQuiet);
-  server.on("/api/quiet",            HTTP_OPTIONS, handleOptions);
-  server.on("/api/quiet/schedule",   HTTP_GET,     handleApiQuietSchedule);
-  server.on("/api/quiet/schedule",   HTTP_POST,    handleApiQuietSchedule);
-  server.on("/api/quiet/schedule",   HTTP_OPTIONS, handleOptions);
-  server.on("/api/companion",        HTTP_GET,     handleApiCompanion);
-  server.on("/api/companion",        HTTP_POST,    handleApiCompanion);
-  server.on("/api/companion",        HTTP_OPTIONS, handleOptions);
-  // v3.1 blob store. Passing the 4th (upload) callback is what puts the PUT on the
-  // WebServer's raw-body path, so the binary gzip arrives intact.
-  server.on("/api/companion/settings", HTTP_GET,     handleApiCompanionSettingsGet);
-  server.on("/api/companion/settings", HTTP_PUT,     handleApiCompanionSettingsPut,
-                                                     handleApiCompanionSettingsRaw);
-  server.on("/api/companion/settings", HTTP_OPTIONS, handleOptions);
-  server.on("/api/config",           HTTP_GET,     handleApiConfigGet);
-  server.on("/api/config/wifi",      HTTP_POST,    handleApiConfigWifi);
-  server.on("/api/config/wifi",      HTTP_OPTIONS, handleOptions);
-  server.on("/api/config/mqtt",      HTTP_POST,    handleApiConfigMqtt);
-  server.on("/api/config/mqtt",      HTTP_OPTIONS, handleOptions);
-  server.on("/api/config/settings",  HTTP_POST,    handleApiConfigSettings);
-  server.on("/api/config/settings",  HTTP_OPTIONS, handleOptions);
+  httpxOn("/api/fs",                 HTTP_GET,  handleApiFsList);
+  httpxOn("/api/fs/file",            HTTP_GET,  handleApiFsFile);
+  httpxOn("/api/fs/delete",          HTTP_POST, handleApiFsDelete);
+  httpxOn("/api/fs/upload",          HTTP_POST, handleFsUpload);
+  httpxOn("/api/flap/char",          HTTP_POST, handleApiChar);
+  httpxOn("/api/flap/index",         HTTP_POST, handleApiIndex);
+  httpxOn("/api/flap/text",          HTTP_POST, handleApiText);
+  httpxOn("/api/flap/home",          HTTP_POST, handleApiHome);
+  httpxOn("/api/capabilities",       HTTP_GET,  handleApiCapabilities);
+  httpxOn("/api/status",             HTTP_GET,  handleApiStatus);
+  httpxOn("/api/quiet",              HTTP_GET,  handleApiQuiet);
+  httpxOn("/api/quiet",              HTTP_POST, handleApiQuiet);
+  httpxOn("/api/quiet/schedule",     HTTP_GET,  handleApiQuietSchedule);
+  httpxOn("/api/quiet/schedule",     HTTP_POST, handleApiQuietSchedule);
+  httpxOn("/api/companion",          HTTP_GET,  handleApiCompanion);
+  httpxOn("/api/companion",          HTTP_POST, handleApiCompanion);
+  // v3.1 blob store: the PUT body is binary gzip, streamed to FATFS.
+  httpxOn("/api/companion/settings", HTTP_GET,  handleApiCompanionSettingsGet);
+  httpxOn("/api/companion/settings", HTTP_PUT,  handleApiCompanionSettingsPut);
+  httpxOn("/api/config",             HTTP_GET,  handleApiConfigGet);
+  httpxOn("/api/config/wifi",        HTTP_POST, handleApiConfigWifi);
+  httpxOn("/api/config/settings",    HTTP_POST, handleApiConfigSettings);
   // Raw canvas (Matrix-only): direct pixel control of the panel.
-  server.on("/api/canvas",           HTTP_GET,     handleApiCanvas);
-  server.on("/api/canvas",           HTTP_POST,    handleApiCanvas);
-  server.on("/api/canvas",           HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/frame",     HTTP_GET,     handleApiCanvasFrameGet);
-  server.on("/api/canvas/frame",     HTTP_PUT,     handleApiCanvasFrame, handleApiCanvasFrameRaw);
-  server.on("/api/canvas/frame",     HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/rect",      HTTP_PUT,     handleApiCanvasRect,  handleApiCanvasRectRaw);
-  server.on("/api/canvas/rect",      HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/qoi",       HTTP_PUT,     handleApiCanvasQoi,   handleApiCanvasQoiRaw);
-  server.on("/api/canvas/qoi",       HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/anim",      HTTP_PUT,     handleApiCanvasAnim,  handleApiCanvasAnimRaw);
-  server.on("/api/canvas/anim",      HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/atlas",     HTTP_PUT,     handleApiCanvasAtlas, handleApiCanvasAtlasRaw);
-  server.on("/api/canvas/atlas",     HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/gif",       HTTP_PUT,     handleApiCanvasGif,   handleApiCanvasGifRaw);
-  server.on("/api/canvas/gif",       HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/font",      HTTP_PUT,     handleApiCanvasFont,  handleApiCanvasFontRaw);
-  server.on("/api/canvas/font",      HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/font/save",   HTTP_POST,    handleApiFontSave);
-  server.on("/api/canvas/font/save",   HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/font/delete", HTTP_POST,    handleApiFontDelete);
-  server.on("/api/canvas/font/delete", HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/fonts",       HTTP_GET,     handleApiFontList);
-  server.on("/api/canvas/anim/save",   HTTP_POST,    handleApiAnimSave);
-  server.on("/api/canvas/anim/save",   HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/anim/play",   HTTP_POST,    handleApiAnimPlay);
-  server.on("/api/canvas/anim/play",   HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/anim/delete", HTTP_POST,    handleApiAnimDelete);
-  server.on("/api/canvas/anim/delete", HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/anims",       HTTP_GET,     handleApiAnimList);
-  server.on("/api/system/reboot",      HTTP_POST,    handleApiSystemReboot);
-  server.on("/api/system/reboot",      HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/transition",  HTTP_POST,    handleApiCanvasTransition);
-  server.on("/api/canvas/transition",  HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/ticker",    HTTP_POST,    handleApiCanvasTicker);
-  server.on("/api/canvas/ticker",    HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/ops",       HTTP_POST,    handleApiCanvasOps);
-  server.on("/api/canvas/ops",       HTTP_OPTIONS, handleOptions);
-  server.on("/api/canvas/effect",    HTTP_POST,    handleApiCanvasEffect);
-  server.on("/api/canvas/effect",    HTTP_OPTIONS, handleOptions);
-  server.begin();
+  httpxOn("/api/canvas",             HTTP_GET,  handleApiCanvas);
+  httpxOn("/api/canvas",             HTTP_POST, handleApiCanvas);
+  httpxOn("/api/canvas/frame",       HTTP_GET,  handleApiCanvasFrameGet);
+  httpxOn("/api/canvas/frame",       HTTP_PUT,  handleApiCanvasFrame);
+  httpxOn("/api/canvas/rect",        HTTP_PUT,  handleApiCanvasRect);
+  httpxOn("/api/canvas/qoi",         HTTP_PUT,  handleApiCanvasQoi);
+  httpxOn("/api/canvas/anim",        HTTP_PUT,  handleApiCanvasAnim);
+  httpxOn("/api/canvas/atlas",       HTTP_PUT,  handleApiCanvasAtlas);
+  httpxOn("/api/canvas/gif",         HTTP_PUT,  handleApiCanvasGif);
+  httpxOn("/api/canvas/font",        HTTP_PUT,  handleApiCanvasFont);
+  httpxOn("/api/canvas/font/save",   HTTP_POST, handleApiFontSave);
+  httpxOn("/api/canvas/font/delete", HTTP_POST, handleApiFontDelete);
+  httpxOn("/api/canvas/fonts",       HTTP_GET,  handleApiFontList);
+  httpxOn("/api/canvas/anim/save",   HTTP_POST, handleApiAnimSave);
+  httpxOn("/api/canvas/anim/play",   HTTP_POST, handleApiAnimPlay);
+  httpxOn("/api/canvas/anim/delete", HTTP_POST, handleApiAnimDelete);
+  httpxOn("/api/canvas/anims",       HTTP_GET,  handleApiAnimList);
+  httpxOn("/api/system/reboot",      HTTP_POST, handleApiSystemReboot);
+  httpxOn("/api/canvas/transition",  HTTP_POST, handleApiCanvasTransition);
+  httpxOn("/api/canvas/ticker",      HTTP_POST, handleApiCanvasTicker);
+  httpxOn("/api/canvas/ops",         HTTP_POST, handleApiCanvasOps);
+  httpxOn("/api/canvas/effect",      HTTP_POST, handleApiCanvasEffect);
+  httpxStart();
   printf("[Web] HTTP server %s (port 80)\n",
-         server.listening() ? "started" : "FAILED to bind -- taskWeb will retry");
+         httpxUp() ? "started" : "FAILED to start -- taskWeb will retry");
 }
 
-// server.begin() is called exactly once, at boot, and its result was never checked; a silent bind
-// failure there refuses every request for the whole uptime because nothing re-calls begin(). This
-// is that retry. listening() is the ground truth (NetworkServer::_listening), so on a healthy
-// server this is a no-op -- it re-establishes the listener only when it is genuinely down, which
-// also recovers the case where begin() ran (at setup) before the network stack was ready. Called
-// every 20s from taskWeb. Returns true when the listener is live.
+// httpxStart() is called once at boot; if it failed (transient no-memory spell before the
+// network stack settled), nothing would ever retry it. This is that retry -- a no-op on a
+// healthy server. Called every 20s from taskWeb. Returns true when the server is up.
 bool webEnsureListening() {
-  if (server.listening()) return true;
-  printf("[Web] port 80 listener is down -- re-establishing\n");
-  server.begin();
-  const bool up = server.listening();
-  printf("[Web] listener %s\n", up ? "restored" : "still down (will retry)");
+  if (httpxUp()) return true;
+  printf("[Web] HTTP server is down -- re-establishing\n");
+  httpxStart();
+  const bool up = httpxUp();
+  printf("[Web] server %s\n", up ? "restored" : "still down (will retry)");
   return up;
 }

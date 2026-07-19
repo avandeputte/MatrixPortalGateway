@@ -8,7 +8,7 @@
  * board's final version, v1.25.0, lives on the `matrixportal` git branch.)
  *
  * A port of the Split-Flap Gateway (v3.1) that keeps the entire gateway -- web UI,
- * REST API, MQTT/Home Assistant, OTA, command monitor -- and replaces
+ * REST API, OTA, command monitor -- and replaces
  * the physical gateway's serial transceiver with an in-process frame link and
  * a panel full of *virtual* split-flap modules. Nothing is wired to a real reel: every module the gateway
  * drives is emulated in firmware and drawn as a flap cell on the LED matrix.
@@ -17,7 +17,7 @@
  * sanitized and "transmitted" exactly as before; the virtual modules parse those
  * bytes and reply with real protocol frames, staggered the way the physical
  * modules' replies would be. The gateway cannot tell the difference, so the
- * companion app and any MQTT client keep working unchanged.
+ * companion app keeps working unchanged.
  *
  * Copyright (c) 2026 Alex Van de Putte
  *
@@ -49,17 +49,14 @@
  *        PSRAM, PCF85063 battery RTC, TF slot, QMI8658 IMU, ES8311 audio --
  *        of which this firmware uses the RTC; the rest is future headroom)
  * Libraries: none for the panel -- see panel.cpp, a direct LCD_CAM + GDMA driver.
- *            PubSubClient, ArduinoJson.
+ *            ArduinoJson.
  */
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WebServer.h>
 #include <Preferences.h>
-#include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
 #include <time.h>
-#include <ArduinoOTA.h>
 #include <Update.h>
 #include <FFat.h>
 #include <ESPmDNS.h>
@@ -85,7 +82,7 @@ static inline uint32_t boardId24() {          // 6 hex digits -- hostname suffix
   esp_efuse_mac_get_default(m);
   return ((uint32_t)m[3] << 16) | ((uint32_t)m[4] << 8) | (uint32_t)m[5];
 }
-static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id, HA node id
+static inline uint32_t boardId32() {          // 8 hex digits -- historical unique id (kept for reuse)
   uint8_t m[6] = {0};
   esp_efuse_mac_get_default(m);
   return ((uint32_t)m[2] << 24) | ((uint32_t)m[3] << 16)
@@ -148,8 +145,8 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define RTC_YEAR_OFFSET   2000   // PCF85063 reg 6 is 0-99 = 2000-2099
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "2.2.4"   // this product's version (UI + boot log)
-// The gateway REST/MQTT surface this firmware implements, reported as "version"
+#define FW_VERSION           "3.0.0"   // this product's version (UI + boot log)
+// The gateway REST surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it
 // must answer 3.1.0 -- not FW_VERSION. GET /api/config also returns "product"
@@ -175,15 +172,13 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define DEFAULT_WIFI_SSID    ""
 #define DEFAULT_WIFI_PASS    ""
 
-// Hostname: mDNS name, ArduinoOTA name, DHCP name and the fallback-AP SSID all come
+// Hostname: mDNS name, DHCP name and the fallback-AP SSID all come
 // from cfgHostname(). The default carries the low 24 bits of the eFuse MAC, because
 // several gateways on one LAN cannot all answer to "splitflap-gw.local". Override it
 // from Settings; blank means "derive it".
 #define HOSTNAME_MAX         32
 #define HOSTNAME_PREFIX      "splitflap-gw"
 #define DEFAULT_AP_PASS      "12345678"       // SoftAP password (>= 8 chars)
-#define DEFAULT_MQTT_PORT    1883
-#define DEFAULT_MQTT_PREFIX  "splitflap"
 #define DEFAULT_NTP_SERVER   "pool.ntp.org"
 #define NTP_TIMEOUT_MS       8000UL
 
@@ -291,20 +286,11 @@ static inline uint32_t boardId32() {          // 8 hex digits -- MQTT client id,
 #define SF_MAX_TEXT          256   // longest text sfSendText will lay across modules
 
 /* ---- Buffer / queue sizes ----
-   TX_MAX_BYTES (512) is kept generous for raw frame sends. MSG_MAX_BYTES caps
-   what the MQTT wire mirror records per frame; it also sizes mqttPublishMsg's
-   stack buffer (MSG_MAX_BYTES*3 + 80, since a flap byte can expand to a 3-byte
-   UTF-8 glyph), which MQTT_BUF_SIZE must be able to hold. */
+   TX_MAX_BYTES (512) is kept generous for raw frame sends. */
 #define MSG_RING_SIZE        64    // command log: number of entries retained
-#define MSG_MAX_BYTES        320   // MQTT wire mirror: bytes stored per frame
 #define TX_MAX_BYTES         512   // max bytes frameSend will transmit in one frame
-#define MQTT_BUF_SIZE        1280  // MQTT packet buffer + queue slot: >= the worst-case
-                                   // rx/tx monitor JSON (320 wire bytes -> 3-byte UTF-8
-                                   // glyphs = ~960B + prefix) and any dump payload
-#define MQTT_Q_SIZE          32    // outbound MQTT publish queue depth
 
 /* ---- Housekeeping cadences ---- */
-#define STATUS_INTERVAL_MS      60000UL   // MQTT status publish cadence (1/min)
 // Longer than a companion heartbeat (~30 s) ON PURPOSE. Each change RESTARTS this
 // clock, so two companions flipping the URL between them never hold still long enough
 // to be written -- which is the point. A single, real change persists after two quiet
@@ -356,7 +342,6 @@ extern volatile unsigned long gCompanionSeenMs;
 // heartbeat of any reboot, so nothing is lost by not persisting it.
 extern volatile bool          gCompanionUrlDirty;
 extern volatile unsigned long gCompanionUrlDirtyMs;
-extern volatile bool gDisplayDirty;
 extern volatile bool gOtaInProgress;
 // Raw-canvas mode: HTTP owns the panel and the reel renderer stands down (see /api/canvas).
 extern volatile bool gCanvasMode;
@@ -370,7 +355,7 @@ extern volatile unsigned long wdgFramesMs;
 extern volatile unsigned long wdgNetMs;
 extern volatile unsigned long wdgWebMs;
 extern volatile unsigned long wdgDispMs;
-extern TaskHandle_t hTaskRTC, hTaskFrames, hTaskOTA, hTaskWeb, hTaskNet, hTaskDisp;
+extern TaskHandle_t hTaskRTC, hTaskFrames, hTaskWeb, hTaskNet, hTaskDisp;
 extern bool ntpSynced;
 extern unsigned long staDownSince;
 

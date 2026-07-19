@@ -1,5 +1,73 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.0.0 — 2026-07-19
+
+### Changed
+
+- **The HTTP server is now ESP-IDF's `esp_http_server`, spoken natively.** The Arduino
+  `WebServer` (one connection at a time; a slow stream starved every other client) is
+  gone. Handlers are plain `esp_err_t fn(httpd_req_t*)` functions over a thin helper
+  layer (`src/httpx.*`: dispatch hook with CORS + watchdog instrumentation, JSON/chunk/
+  query helpers). The old cross-callback upload state machines (OTA, fs, companion blob,
+  seven canvas uploads) collapsed into linear recv loops with local state. Multiple
+  concurrent sockets, per-socket recv/send timeouts, LRU purge, and async requests.
+- **BREAKING: `POST /api/ota/upload` and `POST /api/fs/upload` take raw bodies, not
+  multipart.** OTA: `curl --data-binary @firmware.bin http://<gw>/api/ota/upload`.
+  Files: `curl --data-binary @x.mpg 'http://<gw>/api/fs/upload?name=x.mpg'`. The `/ota`
+  page and the Files tab already send this form. Everything else on the API surface is
+  unchanged — every endpoint, schema and status code.
+
+### Added
+
+- **`GET /api/events` — SSE push stream for the live preview** (the `events` capability
+  token). `text/event-stream`: a `display` event carries the same JSON as
+  `GET /api/display/state`, pushed within ~150 ms of the wall changing (max ~7 events/s
+  so a flip cascade streams as motion), snapshot on connect, `: ka` keepalive every 15 s,
+  up to 3 concurrent streams (a 4th gets `503`). taskWeb — freed from serving HTTP — is
+  the push pump, hashing the reels and broadcasting on change.
+- **The dashboard's Live Display rides the stream**: near-real-time preview via
+  `EventSource`, with the old 1.5 s poll kept as an automatic fallback.
+
+### Removed
+
+- **MQTT and Home Assistant support, entirely.** The broker connection, the topic tree
+  (`<prefix>/frames|flap|display|quiet/*`, status, availability), HA auto-discovery, the
+  per-frame wire mirror, the MQTT/HA settings cards, `POST /api/config/mqtt` and
+  `POST /api/mqtt/test` are all gone; `/api/status` and `/api/config` lost their
+  `mqtt`/`mq*`/`haEnabled` fields, `/api/capabilities` its `ha` token, and PubSubClient
+  left the build. Nothing in this deployment used them — the companion is pure REST and
+  the dashboard now has SSE — and the permanently-open broker socket + client buffers
+  were weight exactly where this board is tightest. taskNetwork is now pure WiFi
+  supervision. **Note for HA users upgrading:** previously-published retained discovery
+  configs will leave ghost entities; remove the device from HA (or purge
+  `homeassistant/+/sfgw_*` retained topics on the broker) after flashing.
+
+- **ArduinoOTA (the Arduino-IDE espota push path), its task and its password.** Never
+  used — every flash is the web/curl upload or esptool over USB — and it cost a 4 KB
+  task, a UDP listener and a Settings card. mDNS (`http://<hostname>.local`) stays; the
+  `otaPassword`/`otaPasswordSet` config fields and the Settings-page card are gone.
+  Recovery path is unchanged: hold-BOOT + esptool.
+
+### Optimized
+
+- **~5 KB static RAM back**: the three per-handler 1.4 KB raw-body buffers merged into
+  one shared `httpxBuf`; task stacks right-sized from watermark telemetry (Frames
+  6144→5120, Network 8192→6144, plus taskOTA's 4096 gone entirely).
+- **Concurrent-socket ceiling tightened to 4** (with LRU purge) after bisection showed
+  overlapping large streams stacking TCP buffers ~20 KB per round — this bounds the
+  worst-case heap dip that multi-socket serving makes possible.
+- **Flash 32 KB smaller than v2.2.4** (1,370 KB vs 1,402 KB) despite the new features —
+  dropping WebServer + ArduinoOTA outweighed everything added.
+- **`stkhttpd` replaces `stkota`** in `/api/status` and the MQTT status payload: the
+  esp_http_server worker's stack watermark is the one that now matters.
+
+### Fixed
+
+- **Heap backpressure now covers every large stream, both directions** (the OTA war's
+  lesson, generalized): inbound raw bodies and outbound chunked replies pace themselves
+  when internal heap runs low, closing the TCP window before buffer buildup can approach
+  loop()'s reboot floor. Observed adversarial-soak watermark improved accordingly.
+
 ## v2.2.4 — 2026-07-19
 
 ### Fixed

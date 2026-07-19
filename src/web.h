@@ -1,28 +1,19 @@
 // web.h -- HTTP server entry point (webInit). Handlers are file-private.
+//
+// v3.0: the server is ESP-IDF's esp_http_server, spoken natively -- httpx.h carries the
+// server lifecycle, the dispatch hook and the small helper set every handler uses.
+// Multiple sockets, per-socket timeouts, and the async request support behind
+// GET /api/events (sse.h) replaced the one-connection Arduino WebServer.
 
 #ifndef SFGW_WEB_H
 #define SFGW_WEB_H
 
 #include "common.h"
+#include "httpx.h"   // also declares webInit() / webEnsureListening()
 
-// A WebServer that can be asked whether its listen socket is actually up. WebServer::begin()
-// returns void and swallows a bind/listen failure, so a silent failure at boot (seen once after
-// NVS corruption left the stack able to associate and pass traffic but unable to open a new inbound
-// listener) otherwise refuses every request for the whole uptime, with nothing to detect or retry
-// it. NetworkServer::operator bool() is the ground truth (_listening, protected in WebServer),
-// surfaced here so taskWeb can re-establish a dead listener. See webEnsureListening().
-class HealWebServer : public WebServer {
-public:
-  using WebServer::WebServer;
-  bool listening() { return (bool)_server; }
-};
-
-// ---- owned globals (defined in globals.cpp) ----
-extern HealWebServer server;
-
-void webInit();
-// Re-establish port 80 if its listen socket is silently down. No-op when already listening, so it
-// is safe to call often; called every 20s from taskWeb. Returns true if the listener is live.
-bool webEnsureListening();
+// Serialize the display state -- {"rows":..,"cols":..,"cells":[..]} exactly as
+// GET /api/display/state reports it -- into out. Returns bytes written. Takes vmMutex.
+// Used by the SSE pump; the REST handler streams the same shape itself.
+size_t dispStateJson(char* out, size_t cap);
 
 #endif // SFGW_WEB_H

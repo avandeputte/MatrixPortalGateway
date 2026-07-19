@@ -57,7 +57,7 @@ void sfHome(int addr) {
 
 // Send a text string across a sequence of module IDs starting at startAddr.
 //
-// `text` arrives as UTF-8 (web UI / MQTT / JSON). Transcode it to the single-byte flap
+// `text` arrives as UTF-8 (web UI / JSON). Transcode it to the single-byte flap
 // encoding first, so one displayed glyph -- including a euro sign or an accented letter,
 // which are multi-byte in UTF-8 -- maps to exactly one module. Unrepresentable code points
 // are dropped.

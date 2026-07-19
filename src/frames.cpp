@@ -45,7 +45,6 @@ void* gwPsramAlloc(const char* name, size_t bytes) {
 // task touches these buffers.
 void psramAllocInit() {
   logRing   = (GwLogEntry*)gwPsramAlloc("command log",    sizeof(GwLogEntry) * MSG_RING_SIZE);
-  mqttQueue = (MqttQItem*)gwPsramAlloc("MQTT queue",      sizeof(MqttQItem) * MQTT_Q_SIZE);
   txQueue   = (TxQItem*)  gwPsramAlloc("scheduled TX",    sizeof(TxQItem)   * TXQ_SIZE);
 }
 
@@ -307,37 +306,24 @@ void frameSend(const uint8_t* data, size_t len, bool raw) {
     DBG("[QUIET] suppressed display frame (%u bytes)\n", (unsigned)bare);
     return;
   }
-  // From here through mqttPublishMsg is the critical section: a static scratch
-  // buffer, txCount, and vmDispatch's writes to the module array. txMutex
-  // serializes it across taskWeb / taskNetwork / taskFrames so two senders
+  // The critical section: txCount and vmDispatch's writes to the module array.
+  // txMutex serializes it across the httpd task and taskFrames so two senders
   // cannot interleave. There are no early returns inside, so the mutex is
-  // always released. Lock order is txMutex -> {msgMutex, vmMutex}, never
-  // inverted: nothing takes txMutex while holding either of those -- which is
-  // exactly why no caller may hold vmMutex across frameSend.
+  // always released. Lock order is txMutex -> vmMutex, never inverted: nothing
+  // takes txMutex while holding vmMutex -- which is exactly why no caller may
+  // hold vmMutex across frameSend. (v3.0 note: `appendNL` shaped only what the
+  // removed MQTT wire mirror recorded; the flag stays so the sanitizer's
+  // callers read unchanged, but nothing consumes it any more.)
   if (txMutex) xSemaphoreTake(txMutex, portMAX_DELAY);
   // Deliver the finished frame to the virtual modules. They strip any trailing
-  // terminator themselves, so `bare` is handed over as-is and `appendNL` only
-  // affects what the MQTT mirror records as the on-wire bytes. Wait for the
-  // lock rather than time out: dropping a command here would lose a character
-  // off the wall with no error anywhere.
+  // terminator themselves, so `bare` is handed over as-is. Wait for the lock
+  // rather than time out: dropping a command here would lose a character off
+  // the wall with no error anywhere.
   if (vmMutex) xSemaphoreTake(vmMutex, portMAX_DELAY);
   vmDispatch(data, bare);
   if (vmMutex) xSemaphoreGive(vmMutex);
   txCount = txCount + 1;
-  gDisplayDirty = true;   // HA display sensor refresh (network task, rate-limited)
-  // Mirror the frame to MQTT (<prefix>/frames/tx) -- that surface is about the wire
-  // format, which the companion app really does speak. It does NOT go to the web
-  // Monitor: 45 identical 'm00-' rows per page are noise, and there is no wire
-  // for them to be "transmitted" on. The command that produced them is logged
-  // once, by logCommand().
-  FrameMsg m;
-  m.timestamp = millis();
-  size_t ringLen = (bare > MSG_MAX_BYTES) ? MSG_MAX_BYTES : bare;
-  memcpy(m.data, data, ringLen);
-  if (appendNL && ringLen < MSG_MAX_BYTES) m.data[ringLen++] = '\n';
-  m.len = ringLen;
-  rtcFormatTime(m.wallTime, sizeof(m.wallTime));
-  mqttPublishMsg(m);
+  (void)appendNL;
   if (txMutex) xSemaphoreGive(txMutex);
 }
 
