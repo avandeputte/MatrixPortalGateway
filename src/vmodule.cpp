@@ -64,7 +64,15 @@ int  vmFlapIndexOfCodepoint(uint32_t cp) { return reelIndexOfCodepoint(sReel, cp
 
 static void vmSetTarget(VModule& m, int idx) {
   if (idx < 0 || idx >= SF_MAX_FLAPS) return;     // out of range: ignored, as in fw
-  if (idx == m.curIndex) { m.target = -1; m.flipPhase = 0; return; }
+  if (idx == m.curIndex) {
+    // Already showing it -- but if the reel is MID-FLIP the panel currently has
+    // the half-flap composite painted, and clearing flipPhase without a repaint
+    // freezes that composite on screen until some unrelated repaint (observed as
+    // a cell "stuck between letters"). Ask for one.
+    if (m.flipPhase) dispMarkDirty();
+    m.target = -1; m.flipPhase = 0;
+    return;
+  }
   int dist = (idx - m.curIndex + SF_MAX_FLAPS) % SF_MAX_FLAPS;
   int cap  = cfg.flapMax ? cfg.flapMax : DEFAULT_FLAP_MAX;
   if (dist > cap) m.curIndex = (int16_t)((idx - cap + SF_MAX_FLAPS) % SF_MAX_FLAPS);

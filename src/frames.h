@@ -69,7 +69,13 @@ void frameSendStr(const char* s);
 // immediately. taskFrames -- which already wakes every 5 ms -- sends each frame when its
 // due time arrives. The web server never blocks, and the cascade is unaffected (the 5 ms
 // tick quantises step_ms, which is 5..30 ms anyway).
-#define TXQ_SIZE       128     // scheduled frames in flight (~3 full 45-frame pages)
+#define TXQ_SIZE       512     // scheduled frames in flight. MUST hold multiple FULL pages
+                               // of the LARGEST wall (VM_MAX_MODULES = 192): when the ring
+                               // overflows, the fallback sends inline -- which JUMPS THE
+                               // QUEUE and lands before still-scheduled earlier frames, so
+                               // an older page can overwrite a newer one (observed: 121 of
+                               // 160 cells stale on a 32x5 wall whose one page overflowed
+                               // the old 128-slot ring). ~28 KB of PSRAM.
 #define TXQ_FRAME_MAX  48      // display/index/home frames fit; longer ones send inline
 struct TxQItem { uint32_t dueMs; uint16_t len; uint8_t data[TXQ_FRAME_MAX]; };
 extern TxQItem* txQueue;                 // PSRAM ring (SPSC: taskWeb in, taskFrames out)
