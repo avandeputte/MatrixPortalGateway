@@ -198,7 +198,28 @@ function fsPlay(n){var r=document.getElementById("fsR");apiFlapCmd("/api/canvas/
 function fsBoot(n){var r=document.getElementById("fsR");apiFlapCmd("/api/config/settings",{bootAnim:n}).then(function(j){if(j.ok){_fsBoot=n;r.textContent=n?t("Boot animation set"):t("Boot animation cleared");fsLoad();}else{r.textContent=t("Error: ")+(j.error||"failed");}}).catch(function(e){r.textContent=t("Error: ")+e;});}
 function fsDel(p){if(!confirm(p==="/compset.gz"?t("This file holds the companion app's settings and playlists. Deleting it means the companion loses them. Delete anyway?"):t("Delete this file?")+"\n"+p))return;var r=document.getElementById("fsR");apiFlapCmd("/api/fs/delete",{path:p}).then(function(j){if(j.ok){r.textContent=t("Deleted")+" "+p;fsLoad();}else{r.textContent=t("Error: ")+(j.error||"failed");}}).catch(function(e){r.textContent=t("Error: ")+e;});}
 function fsUpload(){var inp=document.getElementById("fsFile");var f=inp.files[0];var r=document.getElementById("fsUpR");if(!f){r.textContent=t("Choose a file first");return;}r.textContent=t("Uploading...");var xhr=new XMLHttpRequest();xhr.onload=function(){var j=null;try{j=JSON.parse(xhr.responseText);}catch(e){}if(xhr.status===200&&j&&j.ok){r.textContent=t("Uploaded")+" "+(j.path||f.name)+" ("+fsFmtBytes(j.bytes||f.size)+")";inp.value="";fsLoad();}else{r.textContent=t("Error: ")+((j&&j.error)||xhr.status);}};xhr.onerror=function(){r.textContent=t("Upload failed (connection error).");};xhr.open("POST","/api/fs/upload?name="+encodeURIComponent(f.name));xhr.setRequestHeader("Content-Type","application/octet-stream");xhr.send(f);}</script>
-<script>(function(){function syncTabs(){fetch('/api/companion').then(function(r){return r.json();}).then(function(j){var u=(j.url||'').replace(/\/$/,'');var c=document.querySelectorAll('.comp-tab');for(var i=0;i<c.length;i++){if(u){c[i].href=u+'/#'+c[i].getAttribute('data-cp');c[i].style.display='';}else{c[i].style.display='none';}}}).catch(function(){});}syncTabs();setInterval(function(){pollGated(syncTabs);},4000);var M={display:'display',monitor:'monitor',busmonitor:'monitor',files:'files',settings:'settings',status:'statusp',statusp:'statusp'};function go(){var h=(location.hash||'').replace('#','').toLowerCase();var p=M[h];if(!p)return;var a=document.querySelectorAll('nav a');for(var i=0;i<a.length;i++){if((a[i].getAttribute('onclick')||'').indexOf("'"+p+"'")>=0){a[i].click();break;}}}window.addEventListener('hashchange',go);go();})();</script>
+<script>(function(){function syncTabs(){fetch('/api/companion').then(function(r){return r.json();}).then(function(j){
+var u=(j.url||'').replace(/\/$/,'');
+var adv=(u&&j.tabs&&j.tabs.length)?j.tabs:null;
+var key=u+"|"+(adv?JSON.stringify(adv):"builtin");
+if(window._tabsKey===key)return;   // rebuild only on change: no 4s DOM churn
+window._tabsKey=key;
+if(adv){
+  // v3.0.1: render EXACTLY what the companion advertised (it can add tabs, e.g.
+  // "Panel"), replacing the built-in set -- which remains the no-advert fallback.
+  var nav=document.querySelector('nav');
+  document.querySelectorAll('.comp-tab').forEach(function(a){a.remove();});
+  var first=nav.querySelector('a:not(.comp-tab)');
+  adv.forEach(function(tb){
+    var a=document.createElement('a');a.className='comp-tab';a.target='_top';
+    a.href=u+'/#'+(tb.id||'');a.textContent=tb.label||tb.id||'?';
+    nav.insertBefore(a,first);});
+}else{
+  var c=document.querySelectorAll('.comp-tab');
+  for(var i=0;i<c.length;i++){if(u&&c[i].getAttribute('data-cp')){c[i].href=u+'/#'+c[i].getAttribute('data-cp');c[i].style.display='';}else{c[i].style.display='none';}}
+}
+}).catch(function(){});}
+syncTabs();setInterval(function(){pollGated(syncTabs);},4000);var M={display:'display',monitor:'monitor',busmonitor:'monitor',files:'files',settings:'settings',status:'statusp',statusp:'statusp'};function go(){var h=(location.hash||'').replace('#','').toLowerCase();var p=M[h];if(!p)return;var a=document.querySelectorAll('nav a');for(var i=0;i<a.length;i++){if((a[i].getAttribute('onclick')||'').indexOf("'"+p+"'")>=0){a[i].click();break;}}}window.addEventListener('hashchange',go);go();})();</script>
 <script>/* i18n-settings */
 (function(){
   var sel=document.getElementById("uiLang");

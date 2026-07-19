@@ -1639,9 +1639,12 @@ static esp_err_t handleApiCanvasFrameGet(httpd_req_t* r) {
   }
   if (!rbBuf) { httpxErr(r, 503, "Out of memory"); return ESP_OK; }
   panelReadback(rbBuf, rgb565);                    // snapshot fast, then stream at leisure
-  char v[16];
-  snprintf(v, sizeof(v), "%u", (unsigned)gPanel.panelW);  httpd_resp_set_hdr(r, "X-Canvas-Width", v);
-  snprintf(v, sizeof(v), "%u", (unsigned)gPanel.panelH);  httpd_resp_set_hdr(r, "X-Canvas-Height", v);
+  // Two SEPARATE buffers, static: httpd_resp_set_hdr stores the POINTER until the
+  // response is sent, so a shared stack buffer made both headers read the LAST value
+  // written (the width header said "64" -- the sheared-preview bug).
+  static char wv[16], hv[16];
+  snprintf(wv, sizeof(wv), "%u", (unsigned)gPanel.panelW);  httpd_resp_set_hdr(r, "X-Canvas-Width", wv);
+  snprintf(hv, sizeof(hv), "%u", (unsigned)gPanel.panelH);  httpd_resp_set_hdr(r, "X-Canvas-Height", hv);
   httpd_resp_set_hdr(r, "X-Canvas-Format", rgb565 ? "rgb565" : "rgb888");
   httpd_resp_set_type(r, "application/octet-stream");
   for (size_t off = 0; off < need; off += 1024) {
@@ -1702,9 +1705,13 @@ static esp_err_t handleApiCanvasRect(httpd_req_t* r) {
 }
 
 // ---- QOI image decode (https://qoiformat.org) --------------------------------------------------
-// Decode a full-panel QOI image to the back buffer. False if the magic or the dimensions do not
-// match this panel. Alpha is ignored (the panel has none). One pass, 64-entry running index.
-static bool qoiDecodeToPanel(const uint8_t* d, size_t len) {
+// Decode a full-panel QOI image to the back buffer -- or, with toStage (v3.0.1), into the
+// transition stage buffer (the decoder emits pixels row-major, exactly what canvasStageFeed
+// expects), so a QOI upload can tween like a raw frame PUT: the companion always sends QOI,
+// which is why "transitions do nothing with the companion" was true through v3.0.0.
+// False if the magic or the dimensions do not match this panel. Alpha is ignored (the panel
+// has none). One pass, 64-entry running index.
+static bool qoiDecodeToPanel(const uint8_t* d, size_t len, bool toStage = false) {
   if (len < 14 || d[0] != 'q' || d[1] != 'o' || d[2] != 'i' || d[3] != 'f') return false;
   uint32_t w = ((uint32_t)d[4] << 24) | ((uint32_t)d[5] << 16) | ((uint32_t)d[6] << 8) | d[7];
   uint32_t h = ((uint32_t)d[8] << 24) | ((uint32_t)d[9] << 16) | ((uint32_t)d[10] << 8) | d[11];
@@ -1728,7 +1735,8 @@ static bool qoiDecodeToPanel(const uint8_t* d, size_t len) {
       int k = (r * 3 + g * 5 + b * 7 + a * 11) & 63;
       ir[k] = r; ig[k] = g; ib[k] = b; ia[k] = a;
     } else return false;
-    panelPixel(cx, cy, r, g, b);
+    if (toStage) { uint8_t px[3] = {r, g, b}; canvasStageFeed(px, 3); }
+    else         panelPixel(cx, cy, r, g, b);
     if (++cx >= (int)w) { cx = 0; cy++; }
   }
   return true;
@@ -1768,11 +1776,15 @@ static esp_err_t handleApiCanvasQoi(httpd_req_t* r) {
   canvasStandDown();
   const size_t got = recvWhole(r, &qoiBuf, &qoiCap, need);
   if (!got) { dispReturnToWall(); return httpxErr(r, 503, "Panel not running or out of memory"); }
-  if (!qoiDecodeToPanel(qoiBuf, got)) {
+  // Transition configured: decode into the stage buffer and tween old -> new, exactly
+  // like the raw frame PUT. Stage-allocation failure falls back to the hard cut.
+  const bool staged = (gTransType != 0) && canvasStageBegin(3);
+  if (!qoiDecodeToPanel(qoiBuf, got, staged)) {
     dispReturnToWall();                               // bad image: don't leave the panel parked
     return httpxErr(r, 400, "Not a QOI image matching the panel size");
   }
-  panelShow();
+  if (staged) canvasStagePresent();
+  else        panelShow();
   char buf[96];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"width\":%u,\"height\":%u}", (unsigned)gPanel.panelW, (unsigned)gPanel.panelH);
   return httpxSend(r, 200, "application/json", buf);
