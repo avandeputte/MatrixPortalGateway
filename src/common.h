@@ -145,7 +145,7 @@ static inline uint32_t boardId32() {          // 8 hex digits -- historical uniq
 #define RTC_YEAR_OFFSET   2000   // PCF85063 reg 6 is 0-99 = 2000-2099
 
 /* ---- Firmware identity ---- */
-#define FW_VERSION           "3.0.0"   // this product's version (UI + boot log)
+#define FW_VERSION           "3.0.1"   // this product's version (UI + boot log)
 // The gateway REST surface this firmware implements, reported as "version"
 // by GET /api/config. The companion app gates its features on reading >= 3.1
 // there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it

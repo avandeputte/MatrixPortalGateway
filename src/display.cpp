@@ -153,6 +153,10 @@ void dispInit() {
 // so this is safe to call from any task (the render task owns effectReset). Called when a display
 // command arrives (so content the user sends is actually shown), on canvas release, and by Quiet
 // Time. A no-op when the wall already owns the panel.
+bool dispPixelsMode() {
+  return gCanvasMode || gAnimActive || gTickerActive || gEffect != EFFECT_NONE;
+}
+
 void dispReturnToWall() {
   if (gEffect == EFFECT_NONE && gEffectReq == EFFECT_REQ_IDLE && !gCanvasMode
       && !gAnimActive && !gTickerActive) return;

@@ -70,6 +70,11 @@ void dispMarkDirty();
 // Drop any running/pending effect and release the raw canvas, then repaint the reel wall. Safe
 // from any task. Called when a split-flap command arrives, on canvas release, and by Quiet Time.
 void dispReturnToWall();
+// True while the panel is showing PIXELS rather than the flap wall -- raw canvas, an
+// effect, an on-device animation or a ticker. The display-state JSON reports it as
+// "mode":"pixels" so the dashboard preview knows to render the framebuffer readback
+// instead of flap cells (v3.0.1).
+bool dispPixelsMode();
 
 // Blit font rows [rowFrom,rowTo) of the glyph for CP1252 byte `ch` at (px,py),
 // solid colour, bit 15 = leftmost column. The one shared glyph blitter -- the

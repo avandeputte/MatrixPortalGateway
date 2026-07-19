@@ -140,6 +140,9 @@ void taskWeb(void* pv) {
             h *= 16777619u;
           }
           xSemaphoreGive(vmMutex);
+          // A mode flip (wall <-> canvas/effect/anim/ticker) must push an event even
+          // though no reel moved: the preview switches renderer on it (v3.0.1).
+          if (dispPixelsMode()) h ^= 0x9E3779B9u;
           if (h != lastHash) {
             lastHash = h;
             lastPush = now;

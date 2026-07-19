@@ -1,5 +1,21 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.0.1 — 2026-07-19
+
+### Fixed
+
+- **The dashboard live preview now follows the panel into canvas mode.** The display
+  state (REST + SSE) gained an additive `"mode":"wall"|"pixels"` field; when canvas, an
+  effect, an animation or a ticker owns the panel, the preview switches from flap cells
+  to a true pixel rendering of `GET /api/canvas/frame` (1 Hz readback into a scaled
+  `<canvas>`), and back automatically. A mode flip pushes an SSE event even when no
+  reel moved.
+- **Lowercase r/o/y/g/b/p/w no longer render as colour swatches in the preview.** The
+  state JSON's `cells` letter is identical for a colour flap and its lowercase letter —
+  indistinguishable by design of the legacy protocol. The state now also carries the
+  additive `"flaps":[index…]` array (colour flaps are exactly indices 156–162), and the
+  preview colours only those. Clients that ignore the new fields see no change.
+
 ## v3.0.0 — 2026-07-19
 
 ### Changed

@@ -463,7 +463,20 @@ static esp_err_t handleApiDisplayState(httpd_req_t* r) {
     httpxChunkStr(r, one);
     if ((i & 31) == 0) wdgWebMs = millis();
   }
-  httpxChunkStr(r, "]}");
+  // v3.0.1, both additive: "flaps" is the raw flap INDEX per cell (-1 = no module), the
+  // only way a client can tell a colour flap (156..162) from a lowercase r/o/y/g/b/p/w --
+  // the "cells" letter is identical for both. "mode" says whether the PANEL is currently
+  // showing this wall at all: "pixels" means canvas/effect/animation/ticker owns it, and
+  // a live preview should render GET /api/canvas/frame instead of these cells.
+  httpxChunkStr(r, "],\"flaps\":[");
+  for (int i = 0; i < cells; i++) {
+    char one[12];
+    snprintf(one, sizeof(one), "%s%d", i ? "," : "", i < n ? (int)flap[i] : -1);
+    httpxChunkStr(r, one);
+  }
+  char tail[32];
+  snprintf(tail, sizeof(tail), "],\"mode\":\"%s\"}", dispPixelsMode() ? "pixels" : "wall");
+  httpxChunkStr(r, tail);
   return httpxChunkEnd(r);
 }
 
@@ -506,7 +519,10 @@ size_t dispStateJson(char* out, size_t cap) {
         o += (size_t)snprintf(out + o, cap - o, "%s\"%s\"", i ? "," : "", utf8);
     }
   }
-  o += (size_t)snprintf(out + o, cap - o, "]}");
+  o += (size_t)snprintf(out + o, cap - o, "],\"flaps\":[");
+  for (int i = 0; i < cells && o + 12 < cap; i++)
+    o += (size_t)snprintf(out + o, cap - o, "%s%d", i ? "," : "", i < n ? (int)flap[i] : -1);
+  o += (size_t)snprintf(out + o, cap - o, "],\"mode\":\"%s\"}", dispPixelsMode() ? "pixels" : "wall");
   return o;
 }
 
