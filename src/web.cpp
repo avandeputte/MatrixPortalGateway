@@ -1566,10 +1566,14 @@ static esp_err_t handleApiCanvasOps(httpd_req_t* r) {
     } else continue;                      // unknown op: skip, do not count
     applied++;
   }
-  if (!shown) panelShow();
+  // Answer BEFORE the auto-show: panelShow parks ~one frame as its tear-guard, and
+  // serializing that inside the request cost every ops frame ~14 ms of round-trip.
+  // Sent after the reply, the wait overlaps the client preparing its next frame.
   char buf[48];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"applied\":%d}", applied);
-  return httpxSend(r, 200, "application/json", buf);
+  esp_err_t rc = httpxSend(r, 200, "application/json", buf);
+  if (!shown) panelShow();
+  return rc;
 }
 
 // PUT /api/canvas/frame -- a full raw frame, width*height pixels, row-major, top-left origin.
@@ -1646,8 +1650,8 @@ static esp_err_t handleApiCanvasFrameGet(httpd_req_t* r) {
   snprintf(hv, sizeof(hv), "%u", (unsigned)gPanel.panelH);  httpd_resp_set_hdr(r, "X-Canvas-Height", hv);
   httpd_resp_set_hdr(r, "X-Canvas-Format", rgb565 ? "rgb565" : "rgb888");
   httpd_resp_set_type(r, "application/octet-stream");
-  for (size_t off = 0; off < need; off += 1024) {
-    size_t c = (need - off < 1024) ? (need - off) : 1024;
+  for (size_t off = 0; off < need; off += 4096) {   // bigger chunks: fewer writes, faster drain
+    size_t c = (need - off < 4096) ? (need - off) : 4096;
     httpxChunk(r, (const char*)(rbBuf + off), c);
     wdgWebMs = millis();                              // feed the web watchdog on a ~48 KB send
   }

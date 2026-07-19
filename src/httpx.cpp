@@ -1,5 +1,6 @@
 #include "httpx.h"
 #include "common.h"   // wdgWebMs, gOtaInProgress
+#include <lwip/sockets.h>
 
 // httpx.cpp -- see httpx.h. The route table is ours (exact-match lookup in the dispatch
 // hook) rather than one httpd registration per route: httpd's per-handler bookkeeping is
@@ -200,6 +201,14 @@ bool httpxReadJson(httpd_req_t* r, JsonDocument& doc) {
 static esp_err_t dispatch(httpd_req_t* r) {
   gBusySince = millis();
   wdgWebMs   = millis();
+  // TCP_NODELAY: httpd writes headers and body separately, and with Nagle on, the
+  // second write stalls ~40 ms waiting for the client's delayed ACK -- measured as a
+  // hard 38-40 ms floor on every keep-alive request (an ops animation at that floor
+  // is a slideshow). The old server never saw it only because it closed the socket
+  // after every response. Setting it per-request is redundant but costs microseconds.
+  { int fd = httpd_req_to_sockfd(r);
+    int one = 1;
+    if (fd >= 0) setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)); }
   // Every REST answer carried this by hand in the WebServer era; set it once here.
   httpd_resp_set_hdr(r, "Access-Control-Allow-Origin", "*");
 

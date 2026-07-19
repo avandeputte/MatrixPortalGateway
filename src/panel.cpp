@@ -449,7 +449,32 @@ void panelVLine(int x, int y, int h, uint8_t r, uint8_t g, uint8_t b) {
   for (int i = 0; i < h; i++) panelPixel(x, y + i, r, g, b);
 }
 void panelFillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b) {
-  for (int j = 0; j < h; j++) panelHLine(x, y + j, w, r, g, b);
+  // Fast path (v3.0.1): a fill is the hottest canvas op -- ops apps clear the whole
+  // panel every frame -- and per-pixel panelPixel calls made a 256x64 clear cost
+  // ~25 ms (50K branchy read-modify-writes). Hoist the per-(row,plane) masks and run
+  // a tight word loop instead: same quant, same bit assembly, ~5x faster.
+  if (!info.ok) return;
+  int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+  int x1 = (x + w > W) ? W : x + w, y1 = (y + h > H) ? H : y + h;
+  if (x0 >= x1 || y0 >= y1) return;
+  if (bgrOrder) { uint8_t t = r; r = b; b = t; }
+  const uint8_t qr = quant(r), qg = quant(g), qb = quant(b);
+  for (int yy = y0; yy < y1; yy++) {
+    const bool lower = (yy >= ROWS);
+    const int  row   = lower ? (yy - ROWS) : yy;
+    const word_t rb = lower ? BIT_R2 : BIT_R1;
+    const word_t gb = lower ? BIT_G2 : BIT_G1;
+    const word_t bb = lower ? BIT_B2 : BIT_B1;
+    const word_t mask = (word_t)~(rb | gb | bb);
+    for (int p = 0; p < DEPTH; p++) {
+      word_t set = 0;
+      if ((qr >> p) & 1) set |= rb;
+      if ((qg >> p) & 1) set |= gb;
+      if ((qb >> p) & 1) set |= bb;
+      word_t* wp = blockPtr(drawBuf, row, p) + x0;
+      for (int i = x1 - x0; i > 0; i--, wp++) *wp = (word_t)((*wp & mask) | set);
+    }
+  }
 }
 
 // Bresenham line from (x0,y0) to (x1,y1). panelPixel clamps, so off-panel endpoints are fine.
