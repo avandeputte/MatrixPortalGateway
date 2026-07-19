@@ -1,5 +1,18 @@
 # Matrix Portal Gateway — Release Notes
 
+## v2.2.4 — 2026-07-19
+
+### Fixed
+
+- **Stale flaps, root-caused twice over.** (1) The scheduled-frame ring (`TXQ_SIZE`) was
+  still sized for 45-module pages; one page of a 160-module wall overflowed it, and
+  overflow frames fell back to inline sends that jump the queue — so an older page's
+  queued frames could land *after* a newer page's and stick (reproduced deterministically:
+  121 of 160 cells stale; zero after the fix; ring now 512 slots / ~28 KB PSRAM).
+  (2) Setting a cell to the value it already shows *while mid-flip* cleared the flip state
+  without a repaint, freezing the half-flap composite on the panel — the "letter stuck
+  between characters" — until an unrelated repaint. Cancelling a mid-flip now repaints.
+
 ## v2.2.3 — 2026-07-19
 
 ### Added
