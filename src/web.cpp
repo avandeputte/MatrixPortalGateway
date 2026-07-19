@@ -1492,9 +1492,8 @@ static esp_err_t handleApiAnimList(httpd_req_t* r) {
 static esp_err_t handleApiCanvasOps(httpd_req_t* r) {
   if (!gPanel.ready) { httpxErr(r, 503, "Panel not running"); return ESP_OK; }
   JsonDocument doc;
-  if (deserializeJson(doc, httpxArg(r, "plain")) != DeserializationError::Ok || !doc.is<JsonArray>()) {
-    httpxErr(r, 400, "Body must be a JSON array of ops"); return ESP_OK;
-  }
+  if (!httpxReadJson(r, doc)) return ESP_OK;
+  if (!doc.is<JsonArray>()) { httpxErr(r, 400, "Body must be a JSON array of ops"); return ESP_OK; }
   canvasEnter(false);
   int applied = 0; bool shown = false;
   for (JsonVariantConst op : doc.as<JsonArrayConst>()) {
@@ -1986,7 +1985,7 @@ static esp_err_t handleApiFontList(httpd_req_t* r) {
 static esp_err_t handleApiCanvasTicker(httpd_req_t* r) {
   if (!gPanel.ready) { httpxErr(r, 503, "Panel not running"); return ESP_OK; }
   JsonDocument doc;
-  if (deserializeJson(doc, httpxArg(r, "plain")) != DeserializationError::Ok) { httpxErr(r, 400, "Invalid JSON"); return ESP_OK; }
+  if (!httpxReadJson(r, doc)) return ESP_OK;
   const char* text = doc["text"] | "";
   if (!text[0]) {
     canvasTickerStopForce();           // explicit stop kills an overlay ticker too
