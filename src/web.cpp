@@ -19,6 +19,12 @@ static void handleApiConfigMqtt();
 static void handleApiConfigSettings();
 static void handleApiConfigWifi();
 static void handleApiDisplayState();
+static void handleApiDisplayBrightness();
+static void handleApiFsList();
+static void handleApiFsFile();
+static void handleApiFsDelete();
+static void handleFsUpload();
+static void sendFsUploadResult();
 static void handleApiHome();
 static void handleApiIndex();
 static void handleApiMessages();
@@ -497,6 +503,30 @@ static void handleApiDisplayState() {
 }
 
 
+// GET/POST /api/display/brightness -- the panel's global brightness (v2.2).
+// GET reports it; POST {"brightness":1..255} applies it to the NEXT FRAME (the same
+// path handleApiConfigSettings takes: panelSetBrightness only sets a pending flag,
+// and the next panelShow in any mode -- wall, effect, canvas, animation -- writes
+// the new duty) and persists it. Advertised as the "brightness" capability token.
+static void handleApiDisplayBrightness() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  if (server.method() == HTTP_POST) {
+    JsonDocument doc;
+    if (!readJsonBody(doc)) return;
+    if (!doc["brightness"].is<int>()) { sendJsonError(400, "'brightness' (1-255) required"); return; }
+    int v = doc["brightness"].as<int>();
+    if (v < 1 || v > 255) { sendJsonError(400, "'brightness' (1-255) required"); return; }
+    cfg.panelBright = (uint8_t)v;
+    panelSetBrightness(cfg.panelBright);   // pending flag; the next panelShow applies it
+    dispMarkDirty();                       // an idle wall repaints, so the change is visible now
+    saveConfig();
+    { char cd[LOG_TEXT_MAX]; snprintf(cd, sizeof(cd), "brightness %d", v); logCommand('R', cd); }
+  }
+  char out[48];
+  snprintf(out, sizeof(out), "{\"ok\":true,\"brightness\":%u}", (unsigned)cfg.panelBright);
+  server.send(200, "application/json", out);
+}
+
 // POST /api/flap/char   {"id":5,"char":"A"}   id=-1 for broadcast
 static void handleApiChar() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -712,7 +742,7 @@ static void handleApiCapabilities() {
   // What the wall can DO, not just show, so a client reads this instead of sniffing the
   // firmware version and guessing.
   capPut("\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
-         "\"quiet\",\"ha\",\"ota\",\"canvas\",\"effects\",\"ticker\"]}");
+         "\"quiet\",\"ha\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\"]}");
   capFlush();
   server.sendContent("");
 }
@@ -1142,8 +1172,8 @@ static void handleApiQuietSchedule() {
    the companion reads it to learn the wall.) Advertising a tab that does not exist would
    send the companion linking into thin air. The id is the public one used in the URL hash ("status", not the pane id
    "statusp"); keep it in step with the <nav> in ui/index.html and the M map beside it. */
-static const char* const GW_TAB_ID[]  = {"display", "settings", "status"};
-static const char* const GW_TAB_LBL[] = {"Display", "Settings", "Status"};
+static const char* const GW_TAB_ID[]  = {"display", "files", "settings", "status"};
+static const char* const GW_TAB_LBL[] = {"Display", "Files", "Settings", "Status"};
 static const size_t GW_TAB_N = sizeof(GW_TAB_ID) / sizeof(GW_TAB_ID[0]);
 
 // Store the tab list a companion advertised, re-serialised into gCompanionTabs.
@@ -2279,6 +2309,242 @@ static void handleApiCanvasTicker() {
   server.send(200, "application/json", resp);
 }
 
+/* ----------------------------------------------------------
+   FATFS file browser  (v2.2)
+   ----------------------------------------------------------
+   The dashboard's Files tab: list, download, delete and upload files on the FATFS
+   partition. Everything on the filesystem is the user's -- animations (/anim), fonts
+   (/fonts), the companion blob (/compset.gz) -- so nothing is off limits to delete;
+   the UI's job is to warn, not this API's to refuse. Paths are a deliberately narrow
+   grammar (absolute, [a-z0-9._/-], no "..", <= 48 chars -- everything this firmware
+   ever writes fits it), so a request can be validated by inspection.
+---------------------------------------------------------- */
+#define FS_UPLOAD_MIN_FREE  (64u * 1024u)   // free space an upload must leave behind
+
+// The path grammar above, applied everywhere a client names a file.
+static bool fsPathOk(const char* p) {
+  if (!p || p[0] != '/' || !p[1]) return false;   // absolute, and never the bare root
+  const size_t n = strlen(p);
+  if (n > 48) return false;
+  for (size_t i = 0; i < n; i++) {
+    const char c = p[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+          c == '.' || c == '_' || c == '-' || c == '/')) return false;
+  }
+  if (strstr(p, "..")) return false;
+  return true;
+}
+
+// Recursive walk for the list below. Depth-bounded: this filesystem is the root plus
+// /anim and /fonts, so four levels is already generous -- and the bound also caps the
+// open directory handles the recursion holds at once.
+static bool fsListFirst = true;
+static void fsListDir(const char* path, int depth) {
+  if (depth > 3) return;
+  File dir = FFat.open(path);
+  if (!dir) return;
+  if (!dir.isDirectory()) { dir.close(); return; }
+  File f;
+  while ((f = dir.openNextFile())) {
+    // f.name() is the basename on FFat (see canvasAnimList); rebuild the full path.
+    char full[96];
+    snprintf(full, sizeof(full), "%s/%s", strcmp(path, "/") ? path : "", f.name());
+    if (f.isDirectory()) {
+      f.close();
+      fsListDir(full, depth + 1);
+    } else {
+      char row[160];
+      snprintf(row, sizeof(row), "%s{\"path\":\"%s\",\"size\":%u}",
+               fsListFirst ? "" : ",", full, (unsigned)f.size());
+      f.close();
+      fsListFirst = false;
+      server.sendContent(row);
+    }
+    wdgWebMs = millis();
+  }
+  dir.close();
+}
+
+// GET /api/fs -- totals plus every file on the FATFS, streamed (one chunk per file,
+// like /api/flap/modules -- the list is never held in RAM whole).
+static void handleApiFsList() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  if (!sfFsReady) { sendJsonError(503, "No filesystem"); return; }
+  server.client().setConnectionTimeout(1500);
+  wdgWebMs = millis();
+  const size_t total = FFat.totalBytes();
+  const size_t used  = FFat.usedBytes();
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+  char head[80];
+  snprintf(head, sizeof(head), "{\"total\":%u,\"free\":%u,\"files\":[",
+           (unsigned)total, (unsigned)(total > used ? total - used : 0));
+  server.sendContent(head);
+  fsListFirst = true;
+  fsListDir("/", 0);
+  server.sendContent("]}");
+  server.sendContent("");   // terminate the chunked response
+}
+
+// GET /api/fs/file?path=/anim/x.mpg -- stream one file back as a download.
+static void handleApiFsFile() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  if (!sfFsReady) { sendJsonError(503, "No filesystem"); return; }
+  const String pathArg = server.arg("path");
+  if (!fsPathOk(pathArg.c_str())) {
+    sendJsonError(400, "Bad path (absolute, a-z 0-9 . _ - /, max 48 chars)"); return;
+  }
+  File f = FFat.open(pathArg.c_str(), "r");
+  if (!f || f.isDirectory()) { if (f) f.close(); sendJsonError(404, "No such file"); return; }
+  const size_t n = f.size();
+  // The browser lands the download under the file's own name, not "file".
+  const char* base = strrchr(pathArg.c_str(), '/');
+  base = base ? base + 1 : pathArg.c_str();
+  char cd[80];
+  snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", base);
+  server.sendHeader("Content-Disposition", cd);
+  wdgWebMs = millis();
+  // setConnectionTimeout(), NOT setTimeout() -- see handleRoot.
+  server.client().setConnectionTimeout(3000);
+  server.setContentLength(n);
+  server.send(200, "application/octet-stream", "");
+  uint8_t buf[1024];
+  while (size_t got = f.read(buf, sizeof(buf))) {
+    server.sendContent((const char*)buf, got);
+    wdgWebMs = millis();
+  }
+  f.close();
+}
+
+// POST /api/fs/delete {"path":"/anim/x.mpg"} -- delete a file (or an empty directory).
+// Deliberately unrestricted: it is the user's flash, and the dashboard carries the
+// warnings (the companion blob's confirm, for one).
+static void handleApiFsDelete() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  if (!sfFsReady) { sendJsonError(503, "No filesystem"); return; }
+  JsonDocument doc;
+  if (!readJsonBody(doc)) return;
+  const char* path = doc["path"] | "";
+  if (!fsPathOk(path)) {
+    sendJsonError(400, "Bad path (absolute, a-z 0-9 . _ - /, max 48 chars)"); return;
+  }
+  if (!FFat.exists(path)) { sendJsonError(404, "No such file"); return; }
+  bool isDir = false;
+  { File f = FFat.open(path, "r"); isDir = f && f.isDirectory(); if (f) f.close(); }
+  if (!(isDir ? FFat.rmdir(path) : FFat.remove(path))) {
+    sendJsonError(507, isDir ? "Directory not empty or remove failed" : "Remove failed");
+    return;
+  }
+  { char cd[64]; snprintf(cd, sizeof(cd), "fs delete %.48s", path); logCommand('R', cd); }
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// POST /api/fs/upload -- a multipart file upload onto FATFS, the OTA upload's shape
+// (server.upload() chunk callback + a final-response handler). The target path comes
+// from the client filename, sanitized, NOT from a form field: WebServer's form-field
+// parsing is unreliable mid-multipart, and the filename is already there. Routing is
+// by extension -- .mpg lands in /anim/, .fnt in /fonts/, anything else in the root --
+// so an uploaded animation is immediately playable by name. Streamed to a .tmp then
+// renamed (the canvasAnimSave pattern), so a failed upload never clobbers a good file.
+static File   fsUpFile;
+static int    fsUpErr   = 0;    // 0 = ok, else the HTTP status to report
+static size_t fsUpRecvd = 0;    // bytes written so far this request
+static char   fsUpPath[64];     // final path
+static char   fsUpTmp[72];      // <final>.tmp while the stream is in flight (fits fsUpPath + ".tmp")
+
+// Give up on the transfer: close + delete the temp file, remember the status. The
+// WebServer keeps draining the multipart either way; later chunks are dropped.
+static void fsUploadAbort(int status) {
+  if (fsUpFile) fsUpFile.close();
+  if (sfFsReady && fsUpTmp[0]) FFat.remove(fsUpTmp);
+  fsUpErr = status;
+}
+
+// Client filename -> target path. Lowercase and keep [a-z0-9._-]; a name that
+// sanitizes to nothing, or to more than 40 chars, is a reject (a truncated name
+// would silently save under a name the user never chose).
+static bool fsUploadTarget(const char* fn, char* out, size_t outLen) {
+  char name[41];
+  size_t n = 0;
+  for (const char* p = fn; *p; p++) {
+    const char c = (char)tolower((unsigned char)*p);
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+          c == '.' || c == '_' || c == '-')) continue;   // dropped, not fatal
+    if (n >= sizeof(name) - 1) return false;             // sanitized name > 40 chars
+    name[n++] = c;
+  }
+  name[n] = 0;
+  if (!n) return false;
+  const char* dir = "/";
+  if      (n > 4 && strcmp(name + n - 4, ".mpg") == 0) dir = "/anim/";
+  else if (n > 4 && strcmp(name + n - 4, ".fnt") == 0) dir = "/fonts/";
+  snprintf(out, outLen, "%s%s", dir, name);
+  return fsPathOk(out);   // "." and friends still cannot sneak through
+}
+
+static void handleFsUpload() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  HTTPUpload& upload = server.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    fsUpErr = 0; fsUpRecvd = 0; fsUpPath[0] = 0; fsUpTmp[0] = 0;
+    if (!sfFsReady) { fsUpErr = 503; return; }
+    if (!fsUploadTarget(upload.filename.c_str(), fsUpPath, sizeof(fsUpPath))) {
+      fsUpErr = 400; return;
+    }
+    // Free-space gate, decided before anything touches flash. clientContentLength()
+    // is the whole multipart body -- slightly MORE than the file, which errs in the
+    // safe direction: an upload may never leave less than FS_UPLOAD_MIN_FREE behind.
+    const size_t total = FFat.totalBytes(), used = FFat.usedBytes();
+    const size_t freeB = total > used ? total - used : 0;
+    const size_t need  = (size_t)server.clientContentLength();
+    if (freeB < need || freeB - need < FS_UPLOAD_MIN_FREE) { fsUpErr = 413; return; }
+    if (!strncmp(fsUpPath, "/anim/",  6)) FFat.mkdir("/anim");    // idempotent
+    if (!strncmp(fsUpPath, "/fonts/", 7)) FFat.mkdir("/fonts");
+    snprintf(fsUpTmp, sizeof(fsUpTmp), "%s.tmp", fsUpPath);
+    FFat.remove(fsUpTmp);                                         // clear a stale temp
+    fsUpFile = FFat.open(fsUpTmp, "w");
+    if (!fsUpFile) fsUpErr = 507;
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    // handleClient() does not return during a multipart upload -- feed the web
+    // watchdog here on every chunk, exactly like the OTA upload.
+    wdgWebMs = millis();
+    if (fsUpErr || !fsUpFile) return;                             // already failed: drain
+    if (fsUpFile.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      fsUploadAbort(507); return;
+    }
+    fsUpRecvd += upload.currentSize;
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (fsUpErr) { fsUploadAbort(fsUpErr); return; }              // reuse the cleanup path
+    fsUpFile.close();
+    // Publish atomically: an existing file survives intact until the rename lands.
+    FFat.remove(fsUpPath);
+    if (!FFat.rename(fsUpTmp, fsUpPath)) { fsUploadAbort(507); return; }
+    { char cd[80]; snprintf(cd, sizeof(cd), "fs upload %s (%u B)",
+        fsUpPath, (unsigned)fsUpRecvd); logCommand('R', cd); }
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    fsUploadAbort(400);
+  }
+}
+
+// Final response for the upload POST, after the whole multipart body has been
+// consumed -- by now fsUpErr reflects the true outcome (see sendOTAUploadResult).
+static void sendFsUploadResult() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  const int err = fsUpErr;
+  fsUpErr = 0;                  // never leak this request's verdict into the next
+  switch (err) {
+    case 0:   break;
+    case 400: sendJsonError(400, "Bad filename (a-z 0-9 . _ -, 1-40 chars after sanitizing)"); return;
+    case 413: sendJsonError(413, "Not enough free space (64 KB must remain)"); return;
+    case 503: sendJsonError(503, "No filesystem"); return;
+    default:  sendJsonError(507, "Write failed"); return;
+  }
+  char buf[112];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"path\":\"%s\",\"bytes\":%u}",
+           fsUpPath, (unsigned)fsUpRecvd);
+  server.send(200, "application/json", buf);
+}
+
 void webInit() {
   static const char* COLLECT_HDRS[] = { "If-None-Match" };
   server.collectHeaders(COLLECT_HDRS, 1);   // so handleRoot can honour conditional GETs
@@ -2303,6 +2569,18 @@ void webInit() {
   server.on("/api/display/state",    HTTP_GET,     handleApiDisplayState);
   server.on("/api/display/cells",    HTTP_POST,    handleApiDisplayCells);
   server.on("/api/display/cells",    HTTP_OPTIONS, handleOptions);
+  server.on("/api/display/brightness", HTTP_GET,     handleApiDisplayBrightness);
+  server.on("/api/display/brightness", HTTP_POST,    handleApiDisplayBrightness);
+  server.on("/api/display/brightness", HTTP_OPTIONS, handleOptions);
+  // v2.2: the FATFS file browser behind the dashboard's Files tab.
+  server.on("/api/fs",               HTTP_GET,     handleApiFsList);
+  server.on("/api/fs",               HTTP_OPTIONS, handleOptions);
+  server.on("/api/fs/file",          HTTP_GET,     handleApiFsFile);
+  server.on("/api/fs/file",          HTTP_OPTIONS, handleOptions);
+  server.on("/api/fs/delete",        HTTP_POST,    handleApiFsDelete);
+  server.on("/api/fs/delete",        HTTP_OPTIONS, handleOptions);
+  server.on("/api/fs/upload",        HTTP_POST,    sendFsUploadResult, handleFsUpload);
+  server.on("/api/fs/upload",        HTTP_OPTIONS, handleOptions);
   server.on("/api/flap/char",        HTTP_POST,    handleApiChar);
   server.on("/api/flap/char",        HTTP_OPTIONS, handleOptions);
   server.on("/api/flap/index",       HTTP_POST,    handleApiIndex);

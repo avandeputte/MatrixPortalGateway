@@ -35,6 +35,9 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Automatically enable Quiet Time on a daily schedule. When the window opens the gateway blanks the display and stops moving flaps for normal updates. The display is restored when the window ends. Times are in your browser's local time zone.` | Settings tab | HELP TEXT (a full sentence) |
 | `Azores (UTC-1/0)` | Settings tab | DROPDOWN OPTION |
 | `Bangkok (UTC+7 no DST)` | Settings tab | DROPDOWN OPTION |
+| `Boot animation` | Status tab (diagnostics) | INLINE TEXT |
+| `Boot animation cleared` | — | RUNTIME MESSAGE (shown after an action, in fsBoot()) |
+| `Boot animation set` | — | RUNTIME MESSAGE (shown after an action, in fsBoot()) |
 | `Brightness (1-255)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Brightness and the flip settings take effect on the next frame. Width is the whole chain: two 64×32 panels in series are 128×32.` | — | (built at runtime) |
 | `Broker Host / IP` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
@@ -42,7 +45,9 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Browser default` | — | RUNTIME MESSAGE (shown after an action, in g()) |
 | `Changing it creates or destroys modules — reboot to apply.` | Settings tab | EMPHASIS |
 | `Character` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
+| `Choose a file first` | — | RUNTIME MESSAGE (shown after an action, in fsUpload()) |
 | `Choose a layout…` | Settings tab | DROPDOWN OPTION |
+| `Clear boot animation` | Status tab (diagnostics) | BUTTON (an action -- use the imperative) |
 | `Clock` | Status tab (diagnostics) | HEADING |
 | `Color depth (bitplanes, 1-6)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Columns` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
@@ -51,11 +56,16 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Compose` | — | TAB / LINK LABEL (a noun) |
 | `Connected` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
 | `Could not load display state` | — | RUNTIME MESSAGE (shown after an action, in refreshWall()) |
+| `Could not load the file list` | — | RUNTIME MESSAGE (shown after an action, in fsLoad()) |
 | `Currently` | — | (built at runtime) |
 | `Debug disabled` | — | RUNTIME MESSAGE (shown after an action, in saveDebug()) |
 | `Debug enabled` | — | RUNTIME MESSAGE (shown after an action, in saveDebug()) |
+| `Delete` | Status tab (diagnostics) | BUTTON (an action -- use the imperative) |
+| `Delete this file?` | — | RUNTIME MESSAGE (shown after an action, in fsDel()) |
+| `Deleted` | — | RUNTIME MESSAGE (shown after an action, in fsDel()) |
 | `Dhaka (UTC+6 no DST)` | Settings tab | DROPDOWN OPTION |
 | `Display` | — | TAB / LINK LABEL (a noun) |
+| `Download` | Status tab (diagnostics) | BUTTON (an action -- use the imperative) |
 | `Dubai (UTC+4 no DST)` | Settings tab | DROPDOWN OPTION |
 | `Enable Home Assistant integration` | — | (built at runtime) |
 | `Enable Serial Debug Output` | — | (built at runtime) |
@@ -63,12 +73,16 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Enable verbose serial output on the native USB serial port (115200 baud). Shows every RX/TX frame, MQTT events, and module activity.` | Settings tab | HELP TEXT (a full sentence) |
 | `Enter a character` | — | RUNTIME MESSAGE (shown after an action, in sendChar()) |
 | `Error` | — | RUNTIME MESSAGE (shown after an action, in g()) |
-| `Error:` | — | RUNTIME MESSAGE (shown after an action); RUNTIME MESSAGE (shown after an action, in applyGeomPreset()); RUNTIME MESSAGE (shown after an action, in g()); RUNTIME MESSAGE (shown after an action, in saveDebug()); RUNTIME MESSAGE (shown after an action, in saveGrid()); RUNTIME MESSAGE (shown after an action, in saveHa()); RUNTIME MESSAGE (shown after an action, in saveHost()); RUNTIME MESSAGE (shown after an action, in saveMqtt()); RUNTIME MESSAGE (shown after an action, in saveOTA()); RUNTIME MESSAGE (shown after an action, in savePanel()); RUNTIME MESSAGE (shown after an action, in saveTz()); RUNTIME MESSAGE (shown after an action, in saveWifi()); RUNTIME MESSAGE (shown after an action, in sendChar()); RUNTIME MESSAGE (shown after an action, in sendIndex()); RUNTIME MESSAGE (shown after an action, in sendText()); RUNTIME MESSAGE (shown after an action, in testMqtt()) |
+| `Error:` | — | RUNTIME MESSAGE (shown after an action); RUNTIME MESSAGE (shown after an action, in applyGeomPreset()); RUNTIME MESSAGE (shown after an action, in fsBoot()); RUNTIME MESSAGE (shown after an action, in fsDel()); RUNTIME MESSAGE (shown after an action, in fsPlay()); RUNTIME MESSAGE (shown after an action, in fsUpload()); RUNTIME MESSAGE (shown after an action, in g()); RUNTIME MESSAGE (shown after an action, in saveDebug()); RUNTIME MESSAGE (shown after an action, in saveGrid()); RUNTIME MESSAGE (shown after an action, in saveHa()); RUNTIME MESSAGE (shown after an action, in saveHost()); RUNTIME MESSAGE (shown after an action, in saveMqtt()); RUNTIME MESSAGE (shown after an action, in saveOTA()); RUNTIME MESSAGE (shown after an action, in savePanel()); RUNTIME MESSAGE (shown after an action, in saveTz()); RUNTIME MESSAGE (shown after an action, in saveWifi()); RUNTIME MESSAGE (shown after an action, in sendChar()); RUNTIME MESSAGE (shown after an action, in sendIndex()); RUNTIME MESSAGE (shown after an action, in sendText()); RUNTIME MESSAGE (shown after an action, in testMqtt()) |
 | `Failed:` | — | RUNTIME MESSAGE (shown after an action, in testMqtt()) |
+| `File` | Files tab (FATFS file browser: storage, list, upload) | TH |
+| `Files` | Files tab (FATFS file browser: storage, list, upload) | HEADING (card title -- a noun phrase); TAB / LINK LABEL (a noun) |
+| `Files land by type: .mpg animations go to /anim, .fnt fonts to /fonts, everything else to the root. Names are lowercased and limited to a-z 0-9 . _ - (40 chars max).` | Files tab (FATFS file browser: storage, list, upload) | HELP TEXT (a full sentence) |
 | `Flap Index (0-236)` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Flip speed (ms per flap)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Frames TX` | Status tab (diagnostics) | TEXT |
 | `Free Heap` | Status tab (diagnostics) | TEXT |
+| `Free:` | — | RUNTIME MESSAGE (shown after an action, in fsRender()) |
 | `From` | — | (built at runtime) |
 | `GATEWAY` | — | INLINE TEXT |
 | `Gateway Time` | Status tab (diagnostics) | TEXT |
@@ -81,7 +95,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Home Assistant integration enabled` | — | RUNTIME MESSAGE (shown after an action, in saveHa()) |
 | `Hostname (a-z, 0-9, hyphen)` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Hostname of the time server used to sync the clock. Default: pool.ntp.org` | Settings tab | HELP TEXT (a full sentence) |
-| `KB` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
+| `KB` | — | RUNTIME MESSAGE (shown after an action, in fsFmtBytes()); RUNTIME MESSAGE (shown after an action, in pollStatus()) |
 | `Karachi (UTC+5 no DST)` | Settings tab | DROPDOWN OPTION |
 | `LED Panel` | Settings tab | HEADING (card title -- a noun phrase) |
 | `Language` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
@@ -90,7 +104,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Leave blank for no password` | Settings tab | INPUT PLACEHOLDER (example text) |
 | `Leave blank for open network` | Settings tab | INPUT PLACEHOLDER (example text) |
 | `Live Display` | Display tab (send text/characters to the wall) | HEADING (card title -- a noun phrase) |
-| `Loading...` | Display tab (send text/characters to the wall) | TEXT |
+| `Loading...` | Display tab (send text/characters to the wall); Files tab (FATFS file browser: storage, list, upload) | RUNTIME MESSAGE (shown after an action, in fsLoad()); TEXT |
 | `Localization` | Settings tab | HEADING (card title -- a noun phrase) |
 | `London (UTC+0/+1)` | Settings tab | DROPDOWN OPTION |
 | `Lowest minimum-ever free stack across tasks. Trending toward 0 warns of a stack overflow before it crashes.` | Status tab (diagnostics) | TOOLTIP |
@@ -109,6 +123,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `NTP Sync` | Status tab (diagnostics) | TEXT |
 | `Network` | Settings tab; Status tab (diagnostics) | HEADING; HEADING (card title -- a noun phrase) |
 | `Network name` | Settings tab | INPUT PLACEHOLDER (example text) |
+| `No files stored yet` | Status tab (diagnostics) | TD |
 | `Not registered` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
 | `OTA Firmware Update` | Settings tab | HEADING (card title -- a noun phrase) |
 | `OTA Password` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
@@ -123,6 +138,8 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Paris/Berlin (UTC+1/+2)` | Settings tab | DROPDOWN OPTION |
 | `Password` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Pending` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
+| `Play` | Status tab (diagnostics) | BUTTON (an action -- use the imperative) |
+| `Playing` | — | RUNTIME MESSAGE (shown after an action, in fsPlay()) |
 | `Playlists` | — | TAB / LINK LABEL (a noun) |
 | `Port` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Power-cycle the gateway to apply.` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()) |
@@ -133,6 +150,7 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Quiet Time Schedule` | Settings tab | HEADING (card title -- a noun phrase) |
 | `Reboot (power-cycle) to apply.` | Settings tab | EMPHASIS |
 | `Reboot to apply.` | Settings tab | EMPHASIS |
+| `Refresh` | Files tab (FATFS file browser: storage, list, upload) | BUTTON (an action -- use the imperative) |
 | `Rows` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `SSID` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Sao Paulo (UTC-3/-2)` | Settings tab | DROPDOWN OPTION |
@@ -155,15 +173,18 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Send to Display` | Display tab (send text/characters to the wall) | BUTTON (an action -- use the imperative) |
 | `Sent` | — | RUNTIME MESSAGE (shown after an action, in sendChar()); RUNTIME MESSAGE (shown after an action, in sendIndex()); RUNTIME MESSAGE (shown after an action, in sendText()) |
 | `Serial Debug` | Settings tab | HEADING (card title -- a noun phrase) |
+| `Set as boot` | Status tab (diagnostics) | BUTTON (an action -- use the imperative) |
 | `Set by the ?lang= in the URL.` | — | RUNTIME MESSAGE (shown after an action, in go()) |
 | `Settings` | — | TAB / LINK LABEL (a noun) |
 | `Settings not loaded yet -- reload the page first.` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()) |
 | `Settings not loaded yet — reload the page before saving.` | — | (built at runtime) |
 | `Shanghai/HK/Singapore (UTC+8)` | Settings tab | DROPDOWN OPTION |
+| `Size` | Files tab (FATFS file browser: storage, list, upload) | TH |
 | `Split-Flap-GW` | Settings tab | STRONG |
 | `Stack Min (task)` | Status tab (diagnostics) | TEXT |
 | `Start Module ID` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `Status` | — | TAB / LINK LABEL (a noun) |
+| `Storage` | Files tab (FATFS file browser: storage, list, upload) | HEADING (card title -- a noun phrase) |
 | `Sub: .../frames/send   .../flap/set   .../flap/home   .../display/set   .../quiet/set` | — | (built at runtime) |
 | `Sydney (UTC+10/+11)` | Settings tab | DROPDOWN OPTION |
 | `Synced` | — | RUNTIME MESSAGE (shown after an action, in pollStatus()) |
@@ -172,8 +193,10 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `Testing...` | — | RUNTIME MESSAGE (shown after an action, in testMqtt()) |
 | `Text` | Display tab (send text/characters to the wall) | FORM LABEL (names the input below it -- a noun phrase) |
 | `The companion registers this itself. There is nothing to set here.` | Status tab (diagnostics) | HELP TEXT (a full sentence) |
+| `The gateway's FATFS flash partition: animations in /anim, fonts in /fonts, and the companion app's settings blob.` | Files tab (FATFS file browser: storage, list, upload) | HELP TEXT (a full sentence) |
 | `The mDNS name, the OTA name, the DHCP name and the fallback AP SSID. Leave blank to derive a unique one from this board's MAC.` | — | (built at runtime) |
 | `The wall of virtual split-flap modules drawn on the LED panel. One module per cell, IDs assigned left-to-right, top-to-bottom (module 0 = top-left). This also lays out the Live Display on the Display tab.` | — | (built at runtime) |
+| `This file holds the companion app's settings and playlists. Deleting it means the companion loses them. Delete anyway?` | — | RUNTIME MESSAGE (shown after an action, in fsDel()) |
 | `Tick this if red comes out blue. HUB75 panels vary: a BGR panel draws red as blue, blue as orange and yellow as cyan, while green and white look perfectly normal — which is why it is easy to miss. Takes effect immediately.` | Settings tab | HELP TEXT (a full sentence) |
 | `Time settings saved` | — | RUNTIME MESSAGE (shown after an action, in saveTz()) |
 | `Timezone` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
@@ -187,9 +210,15 @@ to this base; `en-GB` and `en-AU` are thin spelling diffs layered over it.
 | `US Mountain AZ (UTC-7 no DST)` | Settings tab | DROPDOWN OPTION |
 | `US Pacific (UTC-8/-7)` | Settings tab | DROPDOWN OPTION |
 | `UTC` | Settings tab | DROPDOWN OPTION |
+| `Upload` | Files tab (FATFS file browser: storage, list, upload) | HEADING (card title -- a noun phrase) |
+| `Upload File` | Files tab (FATFS file browser: storage, list, upload) | BUTTON (an action -- use the imperative) |
+| `Upload failed (connection error).` | — | RUNTIME MESSAGE (shown after an action, in fsUpload()) |
 | `Upload new firmware directly from your browser — no USB cable or Arduino IDE required.` | Settings tab | HELP TEXT (a full sentence) |
+| `Uploaded` | — | RUNTIME MESSAGE (shown after an action, in fsUpload()) |
+| `Uploading...` | — | RUNTIME MESSAGE (shown after an action, in fsUpload()) |
 | `Uptime` | Status tab (diagnostics) | TEXT |
 | `Used for command log timestamps. Takes effect immediately after saving.` | Settings tab | HELP TEXT (a full sentence) |
+| `Used:` | — | RUNTIME MESSAGE (shown after an action, in fsRender()) |
 | `Username` | Settings tab | FORM LABEL (names the input below it -- a noun phrase) |
 | `Wall` | — | RUNTIME MESSAGE (shown after an action, in applyGeomPreset()) |
 | `WiFi IP` | Status tab (diagnostics) | TEXT |

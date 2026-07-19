@@ -38,6 +38,26 @@ module registry. See **New in 1.10**.)
 
 ---
 
+## New in 2.2
+
+The filesystem gets a front door. (`GET /api/config` now reports `fwVersion` `2.2.0`; the
+API level stays `3.1.0`.)
+
+- **A Files tab on the dashboard**, between Display and Settings: a storage-usage bar, the
+  full FATFS file list with per-file **Download** and **Delete** (deleting `/compset.gz`
+  warns that it is the companion's settings), **Play** / **Set as boot** on `/anim/*.mpg`
+  rows — the current boot animation is marked, with a one-click clear — and a drag-free
+  **Upload** card. Uploads are routed by extension (`.mpg` → `/anim/`, `.fnt` → `/fonts/`,
+  else the root), so an uploaded animation is immediately playable by name.
+- **The `/api/fs` surface behind it**, usable without the dashboard: `GET /api/fs` (totals +
+  recursive file list), `GET /api/fs/file?path=…` (download), `POST /api/fs/delete
+  {"path"}`, and `POST /api/fs/upload` (multipart, part name `file`; streamed to a `.tmp`
+  then renamed; `413` when less than 64 KB would remain free).
+- **Live brightness, capability-advertised.** `GET`/`POST /api/display/brightness`
+  (`{"brightness":1..255}`) applies on the next presented frame and persists — the same
+  value as `panelBright` — and `GET /api/capabilities` now advertises the `brightness`
+  feature token so clients can light up a slider without sniffing versions.
+
 ## New in 2.1
 
 The canvas learns to keep things. Six additions, all Matrix-only and all additive — every

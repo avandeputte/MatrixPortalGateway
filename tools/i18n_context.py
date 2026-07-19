@@ -32,6 +32,7 @@ OUT = ROOT / "ui" / "strings" / "CONTEXT.md"
 PANE = {
     "modules": "Modules tab (the module grid)",
     "display": "Display tab (send text/characters to the wall)",
+    "files": "Files tab (FATFS file browser: storage, list, upload)",
     "monitor": "Monitor tab (live REST/MQTT command log)",
     "settings": "Settings tab",
     "statusp": "Status tab (diagnostics)",

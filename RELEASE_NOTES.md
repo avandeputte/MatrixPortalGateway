@@ -1,5 +1,31 @@
 # Matrix Portal Gateway — Release Notes
 
+## v2.2.0 — 2026-07-18
+
+The FATFS partition gets a front door: a Files tab on the dashboard and the `/api/fs`
+surface behind it.
+
+### Added
+
+- **Files tab** (between Display and Settings): storage-usage bar; the full file list
+  with per-row **Download** and **Delete** (the `/compset.gz` confirm warns it is the
+  companion's settings); **Play** and **Set as boot** on `/anim/*.mpg` rows, with the
+  current boot animation marked and a one-click **Clear boot animation**; and an upload
+  card that refreshes the list on success. Translated in all 11 full UI languages.
+- **File API.** `GET /api/fs` streams `{total, free, files:[{path,size}]}` (recursive,
+  bytes); `GET /api/fs/file?path=…` streams a download with the basename as its
+  attachment name; `POST /api/fs/delete {"path"}`; `POST /api/fs/upload` takes a
+  multipart part named `file`, sanitizes the client filename (lowercase, `a-z 0-9 . _ -`,
+  1–40 chars), routes by extension (`.mpg` → `/anim/`, `.fnt` → `/fonts/`, else `/`),
+  streams to a `.tmp` and renames — `413` when less than 64 KB would remain free, `507`
+  on write failure. Paths are validated everywhere (absolute, `a-z 0-9 . _ - /`, no
+  `..`, ≤ 48 chars).
+- **`GET`/`POST /api/display/brightness`.** Reads or sets the panel brightness
+  (`1..255`) live — applied on the next presented frame, whatever is presenting — and
+  persists it (the same value as `panelBright`).
+- `GET /api/capabilities` now advertises a **`brightness`** feature token pointing at
+  that endpoint, and the gateway's advertised tabs (`gwTabs`) include **Files**.
+
 ## v2.1.0 — 2026-07-18
 
 The canvas grows into the new memory. Everything below lives in the 16 MB PSRAM and
