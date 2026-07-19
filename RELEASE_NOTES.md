@@ -1,5 +1,20 @@
 # Matrix Portal Gateway — Release Notes
 
+## v2.2.1 — 2026-07-19
+
+### Fixed
+
+- **Web OTA no longer reboots the board mid-upload on fast links.** On a strong WiFi
+  link the sender fills this build's large TCP receive window (~95 KB) faster than
+  flash writes drain it; free heap transiently dives, and `loop()`'s 20 KB emergency
+  floor — designed to catch leaks — was rebooting the board in the middle of writing
+  its own firmware. Every "mystery OTA reboot" observed on the bench was this. Two-part
+  fix: the OTA handler now applies graded heap backpressure per chunk (paces the sender
+  via TCP flow control), and the emergency floor stands down while an upload is in
+  flight (`gOtaInProgress`), where a transient is expected, bounded, and self-clearing —
+  and where a reboot is the one genuinely destructive response. Verified: the previously
+  always-failing bench-distance OTA now completes with HTTP 200 at full speed.
+
 ## v2.2.0 — 2026-07-18
 
 The FATFS partition gets a front door: a Files tab on the dashboard and the `/api/fs`

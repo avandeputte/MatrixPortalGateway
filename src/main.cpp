@@ -241,8 +241,15 @@ void loop() {
         ESP.restart();
       }
     }
-    // Emergency reboot if heap falls critically low.
-    if ((unsigned)ESP.getFreeHeap() < 20000) {
+    // Emergency reboot if heap falls critically low -- EXCEPT during a web OTA.
+    // A fast sender fills the TCP receive window (~95 KB on this build's lwIP
+    // config) faster than flash writes drain it, which transiently dives below
+    // this floor on a strong link; the OTA handler's own throttle keeps it
+    // survivable, the transient ends with the upload, and rebooting mid-flash
+    // is the one genuinely destructive response. Every observed "mystery OTA
+    // reboot" on the bench was this check firing. Outside an upload the floor
+    // keeps its original meaning: a leak has won, reboot before malloc chaos.
+    if ((unsigned)ESP.getFreeHeap() < 20000 && !gOtaInProgress) {
       printf("[WDG] CRITICAL: heap=%u -- rebooting\n", (unsigned)ESP.getFreeHeap());
       delay(200);
       ESP.restart();

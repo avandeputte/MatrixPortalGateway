@@ -216,6 +216,23 @@ void handleOTAUpload() {
     // can't touch its watchdog from its loop -- feed it here on every chunk so a
     // large/slow upload can't trip the 120 s web-stall reboot.
     wdgWebMs = millis();
+    // Heap backpressure (v2.2.1). On a fast sender the upload's TCP segments can
+    // queue in internal RAM faster than flash writes drain them; observed on a
+    // board with 115 KB free at rest: min-heap driven to 1.2 KB mid-upload, at
+    // which point lwIP fails an allocation and RESETS the connection -- the
+    // upload dies with no crash and each side blames the other. Slow the
+    // consumer when heap runs low: lwIP's receive window closes and TCP flow
+    // control paces the sender, bounding the queue. Costs at most ~25 s on a
+    // full-size image, well inside the 120 s web watchdog.
+    // Graded and EARLY: by the time heap is scarce the queue has already
+    // ballooned (observed: 95 KB consumed within seconds on a board with lots
+    // of free heap -- more headroom just lets the queue grow further before
+    // anything pushes back, then loop()'s heap floor reboots the board).
+    { uint32_t h = ESP.getFreeHeap();
+      if      (h < 40000) { delay(40); }
+      else if (h < 60000) { delay(15); }
+      else if (h < 85000) { delay(6);  }
+      wdgWebMs = millis(); }
     // Skip writing once we've failed, so we don't keep feeding a dead Update.
     if (!otaUploadFailed) {
       if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
