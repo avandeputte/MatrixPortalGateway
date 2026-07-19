@@ -68,6 +68,13 @@ uint8_t cp1252ToUpper(uint8_t b);   // returns `b` unchanged if it is not a lowe
 // does not start a valid sequence. `*cp` receives the code point.
 size_t utf8Next(const char* in, uint32_t* cp);
 
+// Transcode a UTF-8 string to CP1252 GLYPH bytes for the pixel-text paths (canvas ops
+// text, the ticker) -- one byte per code point, '?' where the repertoire has no byte
+// (v3.0.1). Distinct from utf8ToFlap on purpose: that one feeds the flap PROTOCOL and
+// applies its rules; this one feeds the 216-glyph font and never rejects, because a
+// drawn string must render SOMETHING for every character.
+size_t utf8ToCp1252(const char* in, char* out, size_t outSize);
+
 // The CP1252 byte for a Unicode code point, or -1 if it has none. A heart has none --
 // which is exactly why the pictograph flaps are reachable only by index.
 int cp1252FromUnicode(uint32_t cp);

@@ -590,7 +590,9 @@ void canvasTickerSet(const char* text, uint8_t r, uint8_t g, uint8_t b, int spee
   gTickerActive = false;                     // stop the renderer reading half-updated state
   panelSetOverlay(nullptr);
   gTickerOverlay = false;
-  strlcpy(tickText, text ? text : "", sizeof(tickText));
+  // UTF-8 -> CP1252 at the door (v3.0.1): the renderer walks bytes, so a raw copy drew
+  // multi-byte characters as garbage pairs and inflated tickTextW.
+  utf8ToCp1252(text ? text : "", tickText, sizeof(tickText));
   tickR = r; tickG = g; tickB = b; tickBand = band;
   tickSpeed = speed < 1 ? 1 : (speed > 20 ? 20 : speed);
   tickFont = font ? font : tickerFace();     // v2.1: an uploaded face, or the panel-sized default

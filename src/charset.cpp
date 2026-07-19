@@ -162,3 +162,17 @@ size_t utf8Next(const char* in, uint32_t* cpOut) {
   if (cpOut) *cpOut = cp;
   return (size_t)n;
 }
+
+size_t utf8ToCp1252(const char* in, char* out, size_t outSize) {
+  size_t o = 0;
+  while (*in && o + 1 < outSize) {
+    uint32_t cp = 0;
+    size_t n = utf8Next(in, &cp);
+    if (!n) { in++; continue; }          // invalid/continuation byte: skip it
+    in += n;
+    const int b = cp1252FromUnicode(cp);
+    out[o++] = (b < 0) ? '?' : (char)b;
+  }
+  out[o] = 0;
+  return o;
+}

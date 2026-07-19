@@ -1248,12 +1248,17 @@ static const Font1252* canvasFace(int size) {
     default: return &FONT_6x10;
   }
 }
-// One CP1252 string at (x,y) top-left, one flap-font glyph per byte, solid colour. Fixed-width
-// faces, so the advance is just the face width; bit 15 of each row is the leftmost column.
+// One string at (x,y) top-left, one flap-font glyph per CHARACTER, solid colour. The
+// input is UTF-8 (it came out of JSON) and is transcoded to CP1252 first (v3.0.1) --
+// walking raw bytes drew a multi-byte "\u00b0" as two garbage glyphs, which is why the
+// companion had been ASCII-only in its ops apps. Fixed-width faces, so the advance is
+// just the face width; bit 15 of each row is the leftmost column.
 static void canvasText(int x, int y, const char* s, uint8_t r, uint8_t g, uint8_t b,
                        const Font1252* f) {
+  char enc[256];
+  utf8ToCp1252(s, enc, sizeof(enc));
   int cx = x;
-  for (const uint8_t* p = (const uint8_t*)s; *p; ++p) {
+  for (const uint8_t* p = (const uint8_t*)enc; *p; ++p) {
     dispDrawGlyph1252(cx, y, f, *p, 0, 255, r, g, b);
     cx += f->width;
   }
@@ -1557,7 +1562,8 @@ static esp_err_t handleApiCanvasOps(httpd_req_t* r) {
         if (cf) f = cf;
       }
       const char* al = op["align"] | "left";
-      int tx = x, tw = (int)strlen(s) * f->width;
+      char twenc[256];   // glyph count, not byte count: multi-byte UTF-8 skewed centre/right
+      int tx = x, tw = (int)utf8ToCp1252(s, twenc, sizeof(twenc)) * f->width;
       if      (!strcmp(al, "center")) tx = x - tw / 2;
       else if (!strcmp(al, "right"))  tx = x - tw;
       canvasText(tx, y, s, r, g, b, f);
