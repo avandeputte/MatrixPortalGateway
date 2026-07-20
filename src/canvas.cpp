@@ -543,6 +543,19 @@ bool canvasAtlasBlitFrom(int handle, uint16_t i, int x, int y) {
   return true;
 }
 
+const uint8_t* canvasAtlasData(const char* name, uint8_t hdr[12], size_t* bytes) {
+  const int i = atlasFindResident(name);
+  if (i < 0) return nullptr;
+  const AtlasSheet& a = atlasTab[i];
+  const uint8_t h[12] = { 'M','P','T','A', 1, a.fmt,
+                          (uint8_t)(a.tileW >> 8), (uint8_t)a.tileW,
+                          (uint8_t)(a.tileH >> 8), (uint8_t)a.tileH,
+                          (uint8_t)(a.tiles >> 8), (uint8_t)a.tiles };
+  memcpy(hdr, h, 12);
+  *bytes = a.bytes;
+  return a.buf;
+}
+
 int canvasAtlasSave(const char* name) {
   if (!sfFsReady)                return 503;
   const int i = atlasFindResident(name);

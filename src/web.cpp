@@ -1902,6 +1902,40 @@ static esp_err_t handleApiAtlasList(httpd_req_t* r) {
   return httpxChunkEnd(r);
 }
 
+// GET /api/canvas/atlas/<name> -- the sheet back as its MPTA image, from PSRAM when
+// resident, else from the persisted file. Mirrors the PUT; the Files tab's preview
+// renders it in the browser.
+static esp_err_t handleApiAtlasGet(httpd_req_t* r) {
+  const String name = httpxPathTail(r, "/api/canvas/atlas/");
+  if (!canvasAtlasNameOk(name.c_str())) return atlasRawReply(r, 404);
+  httpd_resp_set_type(r, "application/octet-stream");
+  uint8_t hdr[12]; size_t bytes = 0;
+  const uint8_t* buf = canvasAtlasData(name.c_str(), hdr, &bytes);
+  if (buf) {
+    httpxChunk(r, (const char*)hdr, 12);
+    for (size_t off = 0; off < bytes; off += 4096) {
+      size_t c = (bytes - off < 4096) ? (bytes - off) : 4096;
+      httpxChunk(r, (const char*)(buf + off), c);
+      wdgWebMs = millis();
+    }
+    return httpxChunkEnd(r);
+  }
+  if (sfFsReady) {                                    // persisted but not resident
+    char path[64];
+    snprintf(path, sizeof(path), "/atlas/%s.mpta", name.c_str());
+    File f = FFat.open(path, "r");
+    if (f && !f.isDirectory()) {
+      uint8_t fb[1024];
+      size_t got;
+      while ((got = f.read(fb, sizeof(fb))) > 0) { httpxChunk(r, (const char*)fb, got); wdgWebMs = millis(); }
+      f.close();
+      return httpxChunkEnd(r);
+    }
+    if (f) f.close();
+  }
+  return atlasRawReply(r, 404);
+}
+
 // POST /api/canvas/atlas/<name>/save + DELETE /api/canvas/atlas/<name>
 static esp_err_t handleApiAtlasPost(httpd_req_t* r) {
   String tail = httpxPathTail(r, "/api/canvas/atlas/");
@@ -2303,6 +2337,7 @@ void webInit() {
   httpxOn("/api/canvas/qoi",         HTTP_PUT,  handleApiCanvasQoi);
   httpxOn("/api/canvas/anim",        HTTP_PUT,  handleApiCanvasAnim);
   httpxOn("/api/canvas/atlas",        HTTP_GET,    handleApiAtlasList);
+  httpxOnPrefix("/api/canvas/atlas/", HTTP_GET,    handleApiAtlasGet);
   httpxOnPrefix("/api/canvas/atlas/", HTTP_PUT,    handleApiAtlasPut);
   httpxOnPrefix("/api/canvas/atlas/", HTTP_POST,   handleApiAtlasPost);
   httpxOnPrefix("/api/canvas/atlas/", HTTP_DELETE, handleApiAtlasDelete);

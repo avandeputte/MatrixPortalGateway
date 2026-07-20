@@ -65,6 +65,7 @@ bool canvasAtlasBlitFrom(int handle, uint16_t i, int x, int y);
 int  canvasAtlasSave(const char* name);                    // 0 / 404 / 507 / 503
 int  canvasAtlasDelete(const char* name);                  // 0 / 404
 void canvasAtlasListJson(void (*sink)(const char*));       // [{name,tiles,w,h,fmt,bytes,resident,persisted},…]
+const uint8_t* canvasAtlasData(const char* name, uint8_t hdr[12], size_t* bytes);   // resident sheet bytes + its MPTA header
 void canvasAtlasStateJson(char* out, size_t cap);          // {"bound":…,"loaded":[…]} for GET /api/canvas
 
 // ---- GIF import (v2.1) -------------------------------------------------------------------------
