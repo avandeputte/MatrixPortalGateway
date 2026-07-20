@@ -189,6 +189,11 @@ int httpxRecv(httpd_req_t* r, char* buf, size_t len) {
       if      (h < 30000) delay(40);
       else if (h < 45000) delay(20);
       else if (h < 60000) delay(5);
+      // Boot-burst guard: on a gateway reboot the companion re-pushes EVERYTHING at
+      // once (page + canvas frames, several sockets) while boot bring-up still owns
+      // part of the heap -- observed 6 KB watermark from that one overlap. Pace all
+      // inbound streams gently for the first 30 s; costs nothing in steady state.
+      else if (millis() < 30000UL) delay(5);
     }
   }
   return n;
