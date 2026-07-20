@@ -8,7 +8,11 @@
 
 static httpd_handle_t gHttpd = nullptr;
 
-#define HTTPX_MAX_ROUTES 72
+// Sized with headroom: the v3.1 atlas routes silently pushed the count past the old cap
+// of 72 and the LAST-registered route (/api/canvas/effect) fell off the table -- 404s on
+// a feature that worked the day before. webInit() now prints the count at boot; if you
+// see "table full" on serial, raise this.
+#define HTTPX_MAX_ROUTES 112
 struct Route {
   const char*    uri;
   httpd_method_t method;
@@ -20,6 +24,7 @@ static int   gRouteCount = 0;
 
 static volatile unsigned long gBusySince = 0;
 unsigned long httpxBusySince() { return gBusySince; }
+int httpxRouteCount() { return gRouteCount; }
 
 uint8_t httpxBuf[HTTPX_BUF_LEN];
 

@@ -2356,8 +2356,8 @@ void webInit() {
   httpxOn("/api/canvas/ops",         HTTP_POST, handleApiCanvasOps);
   httpxOn("/api/canvas/effect",      HTTP_POST, handleApiCanvasEffect);
   httpxStart();
-  printf("[Web] HTTP server %s (port 80)\n",
-         httpxUp() ? "started" : "FAILED to start -- taskWeb will retry");
+  printf("[Web] HTTP server %s (port 80), %d routes\n",
+         httpxUp() ? "started" : "FAILED to start -- taskWeb will retry", httpxRouteCount());
 }
 
 // httpxStart() is called once at boot; if it failed (transient no-memory spell before the

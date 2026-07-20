@@ -48,6 +48,8 @@ bool httpxUp();
 // millis() when the request now being served entered its handler, 0 when idle.
 // taskWeb covers the web watchdog only while this is recent (tasks.cpp).
 unsigned long httpxBusySince();
+// Registered route count (webInit prints it at boot; a drop means HTTPX_MAX_ROUTES is full).
+int httpxRouteCount();
 
 // ---- responses ----
 // Reply `code` with a preformatted JSON body (CORS is already on the request).
