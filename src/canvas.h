@@ -44,13 +44,28 @@ bool canvasAnimNameOk(const char* name);         // 1..24 chars of [a-z0-9_-]
 // One tile sheet in PSRAM (PUT /api/canvas/atlas), blitted by the ops path's "sprite" op. Kept
 // across uses; replaced by the next upload. Same streamed Begin/Feed/Commit shape as the
 // animation store; Begin/Commit return 0 or an HTTP status (400 bad, 413 too big, 503 no RAM).
-int  canvasAtlasBegin(uint8_t fmt, uint16_t tileW, uint16_t tileH, uint16_t tiles);
+// ---- named atlas library (v3.1) ----
+// Up to ATLAS_MAX_SHEETS resident named sheets under one shared PSRAM budget, LRU-evicted,
+// optionally persisted to /atlas/<name>.mpta and lazy-loaded on bind. Uploads build into a
+// NEW allocation and publish at Commit (double-buffer), so a bound sheet is never blitted
+// half-written and there is no "atlasReady=false" blind window.
+#define ATLAS_MAX_SHEETS       16
+#define ATLAS_NAME_MAX         32
+#define ATLAS_MAX_SHEET_BYTES  (2048u * 1024u)
+#define ATLAS_TOTAL_BUDGET     (4096u * 1024u)
+bool canvasAtlasNameOk(const char* name);                  // ^[a-z0-9._-]{1,32}$
+int  canvasAtlasBegin(const char* name, uint8_t fmt, uint16_t tileW, uint16_t tileH, uint16_t tiles);
 void canvasAtlasFeed(const uint8_t* data, size_t n);
-int  canvasAtlasCommit();
-// Blit tile i at (x,y) via panelPixel, skipping the transparent colour (rgb565 0xF81F /
-// rgb888 magenta). False when no atlas is loaded or i is out of range -- the op then errors.
-bool canvasAtlasBlit(uint16_t i, int x, int y);
-bool canvasAtlasInfo(uint16_t& tiles, uint16_t& w, uint16_t& h);   // false when none loaded
+int  canvasAtlasCommit();                                  // publish: swap in, evict LRU over budget
+// Blit tile i of the bound sheet at (x,y) via panelPixel, skipping the transparent colour
+// (rgb565 0xF81F / rgb888 magenta). False when the handle is stale or i is out of range.
+int  canvasAtlasBind(const char* name);                    // handle, or -1 (lazy FS load inside)
+int  canvasAtlasBoundHandle();                             // the sticky bind, -1 = none
+bool canvasAtlasBlitFrom(int handle, uint16_t i, int x, int y);
+int  canvasAtlasSave(const char* name);                    // 0 / 404 / 507 / 503
+int  canvasAtlasDelete(const char* name);                  // 0 / 404
+void canvasAtlasListJson(void (*sink)(const char*));       // [{name,tiles,w,h,fmt,bytes,resident,persisted},…]
+void canvasAtlasStateJson(char* out, size_t cap);          // {"bound":…,"loaded":[…]} for GET /api/canvas
 
 // ---- GIF import (v2.1) -------------------------------------------------------------------------
 // Decode a whole GIF (already buffered in PSRAM) into the animation store above, composited to

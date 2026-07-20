@@ -351,67 +351,185 @@ void canvasAnimList(void (*sink)(const char*)) {
 }
 
 // ---- sprite atlas (v2.1) -----------------------------------------------------------------------
-// One tile sheet in PSRAM: tiles*tileW*tileH pixels back-to-back, rgb565 BE or rgb888, as
-// uploaded (PUT /api/canvas/atlas). The ops path blits tiles with the "sprite" op. Kept across
-// uses; the next upload replaces it. Streamed through the same Begin/Feed/Commit shape as the
-// animation store, so the web handler stays a mirror of the anim one.
+// ---- named atlas library (v3.1) ----------------------------------------------------------------
+// Up to ATLAS_MAX_SHEETS resident named tile sheets sharing ATLAS_TOTAL_BUDGET of PSRAM,
+// LRU-evicted, optionally persisted as /atlas/<name>.mpta (the raw MPTA image: 12-byte
+// header + tiles) and lazy-loaded on bind. Uploads build into a NEW allocation and publish
+// at Commit, so a bound sheet is never observed half-written (the old single-sheet design
+// cleared atlasReady during an upload and every sprite silently no-opped meanwhile).
+// Everything here runs on the httpd task only -- no locking needed, including eviction.
 
-#define ATLAS_MAX_BYTES  (2048u * 1024u)   // most PSRAM the tile sheet may claim
+struct AtlasSheet {
+  char          name[ATLAS_NAME_MAX + 1];  // "" = free slot
+  uint8_t       fmt;                       // 2 = rgb565 BE, 3 = rgb888
+  uint16_t      tileW, tileH, tiles;
+  size_t        tileBytes, bytes;
+  uint8_t*      buf;                       // PSRAM; always non-NULL for an occupied slot
+  unsigned long lastUsedMs;
+  bool          persisted;                 // a same-named /atlas file exists
+};
+static AtlasSheet atlasTab[ATLAS_MAX_SHEETS];
+static int        atlasBound = -1;         // sticky bind (the ops "atlas" op); -1 = none
 
-static uint8_t*  atlasBuf = nullptr;       // tiles back-to-back in PSRAM, as uploaded
-static size_t    atlasCap = 0;             // bytes currently allocated
-static uint16_t  atlasW = 0, atlasH = 0, atlasTiles = 0;
-static uint8_t   atlasFmt = 2;             // 2 = rgb565 BE, 3 = rgb888
-static size_t    atlasTileBytes = 0;
-static size_t    atlasTotal = 0, atlasWriteOff = 0;
-static bool      atlasReady = false;       // false while an upload is (re)filling the buffer
+// In-flight upload staging (double buffer: published only at Commit)
+static uint8_t*  atlasStage = nullptr;
+static size_t    atlasStageTotal = 0, atlasStageOff = 0, atlasStageTileBytes = 0;
+static uint8_t   atlasStageFmt = 2;
+static uint16_t  atlasStageW = 0, atlasStageH = 0, atlasStageTiles = 0;
+static char      atlasStageName[ATLAS_NAME_MAX + 1] = "";
 
-int canvasAtlasBegin(uint8_t fmt, uint16_t tileW, uint16_t tileH, uint16_t tiles) {
+bool canvasAtlasNameOk(const char* name) {
+  if (!name || !*name) return false;
+  size_t n = strlen(name);
+  if (n > ATLAS_NAME_MAX) return false;
+  for (size_t i = 0; i < n; i++) {
+    const char c = name[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+          c == '.' || c == '_' || c == '-')) return false;
+  }
+  return true;
+}
+
+static void atlasPath(const char* name, char* out, size_t cap) {
+  snprintf(out, cap, "/atlas/%s.mpta", name);
+}
+
+static int atlasFindResident(const char* name) {
+  for (int i = 0; i < ATLAS_MAX_SHEETS; i++)
+    if (atlasTab[i].name[0] && strcmp(atlasTab[i].name, name) == 0) return i;
+  return -1;
+}
+
+static size_t atlasResidentBytes() {
+  size_t sum = 0;
+  for (int i = 0; i < ATLAS_MAX_SHEETS; i++)
+    if (atlasTab[i].name[0]) sum += atlasTab[i].bytes;
+  return sum;
+}
+
+static void atlasFreeSlot(int i) {
+  if (!atlasTab[i].name[0]) return;
+  if (atlasBound == i) atlasBound = -1;
+  free(atlasTab[i].buf);
+  memset(&atlasTab[i], 0, sizeof(AtlasSheet));
+}
+
+// Evict least-recently-used resident sheets (sparing `keep`) until `need` more bytes fit
+// the budget. A persisted victim reloads on next bind; a non-persisted one is simply gone
+// -- the client can see the list and re-upload. Always satisfiable: one sheet <= budget.
+static void atlasEvictFor(size_t need, int keep) {
+  while (atlasResidentBytes() + need > ATLAS_TOTAL_BUDGET) {
+    int lru = -1;
+    for (int i = 0; i < ATLAS_MAX_SHEETS; i++) {
+      if (!atlasTab[i].name[0] || i == keep) continue;
+      if (lru < 0 || atlasTab[i].lastUsedMs < atlasTab[lru].lastUsedMs) lru = i;
+    }
+    if (lru < 0) return;                   // nothing evictable left
+    DBG("[ATLAS] evicting '%s' (%u KB, %s)\n", atlasTab[lru].name,
+        (unsigned)(atlasTab[lru].bytes / 1024), atlasTab[lru].persisted ? "persisted" : "gone");
+    atlasFreeSlot(lru);
+  }
+}
+
+static int atlasFreeSlotIndex() {
+  for (int i = 0; i < ATLAS_MAX_SHEETS; i++) if (!atlasTab[i].name[0]) return i;
+  // table full: evict the LRU outright to make a slot
+  int lru = -1;
+  for (int i = 0; i < ATLAS_MAX_SHEETS; i++)
+    if (lru < 0 || atlasTab[i].lastUsedMs < atlasTab[lru].lastUsedMs) lru = i;
+  if (lru >= 0) atlasFreeSlot(lru);
+  return lru;
+}
+
+int canvasAtlasBegin(const char* name, uint8_t fmt, uint16_t tileW, uint16_t tileH, uint16_t tiles) {
+  if (!canvasAtlasNameOk(name))      return 400;
   if (fmt != 2 && fmt != 3)          return 400;
   if (!tileW || !tileH || !tiles)    return 400;
   const size_t tileBytes = (size_t)tileW * tileH * fmt;
   const size_t total     = tileBytes * tiles;
-  if (total > ATLAS_MAX_BYTES)       return 413;
-  atlasReady = false;                        // an in-flight ops batch must not blit a half sheet
-  if (atlasCap < total) {                    // (re)allocate; a 2 MB sheet only ever fits PSRAM
-    if (atlasBuf) free(atlasBuf);
-    atlasBuf = (uint8_t*)ps_malloc(total);
-    atlasCap = atlasBuf ? total : 0;
-    if (!atlasBuf) return 503;
-  }
-  atlasW = tileW; atlasH = tileH; atlasTiles = tiles; atlasFmt = fmt;
-  atlasTileBytes = tileBytes; atlasTotal = total; atlasWriteOff = 0;
+  if (total > ATLAS_MAX_SHEET_BYTES) return 413;
+  if (atlasStage) { free(atlasStage); atlasStage = nullptr; }   // a prior aborted upload
+  atlasEvictFor(total, atlasFindResident(name));                // make room BEFORE allocating
+  atlasStage = (uint8_t*)ps_malloc(total);
+  if (!atlasStage) return 503;
+  strlcpy(atlasStageName, name, sizeof(atlasStageName));
+  atlasStageFmt = fmt; atlasStageW = tileW; atlasStageH = tileH; atlasStageTiles = tiles;
+  atlasStageTileBytes = tileBytes; atlasStageTotal = total; atlasStageOff = 0;
   return 0;
 }
 
 void canvasAtlasFeed(const uint8_t* data, size_t n) {
-  if (!atlasBuf) return;
-  if (atlasWriteOff + n > atlasTotal) n = atlasTotal - atlasWriteOff;   // ignore trailing overrun
-  memcpy(atlasBuf + atlasWriteOff, data, n);
-  atlasWriteOff += n;
+  if (!atlasStage) return;
+  if (atlasStageOff + n > atlasStageTotal) n = atlasStageTotal - atlasStageOff;
+  memcpy(atlasStage + atlasStageOff, data, n);
+  atlasStageOff += n;
 }
 
 int canvasAtlasCommit() {
-  if (!atlasBuf || atlasWriteOff != atlasTotal) return 400;             // short upload
-  atlasReady = true;
+  if (!atlasStage || atlasStageOff != atlasStageTotal) {        // short upload
+    if (atlasStage) { free(atlasStage); atlasStage = nullptr; }
+    return 400;
+  }
+  int i = atlasFindResident(atlasStageName);
+  if (i < 0) i = atlasFreeSlotIndex();
+  if (i < 0) { free(atlasStage); atlasStage = nullptr; return 503; }
+  const bool persisted = atlasTab[i].name[0] ? atlasTab[i].persisted : false;
+  const bool wasBound  = (atlasBound == i);
+  atlasFreeSlot(i);                       // publish: free the old copy, swap the new one in
+  strlcpy(atlasTab[i].name, atlasStageName, sizeof(atlasTab[i].name));
+  atlasTab[i].fmt = atlasStageFmt; atlasTab[i].tileW = atlasStageW; atlasTab[i].tileH = atlasStageH;
+  atlasTab[i].tiles = atlasStageTiles; atlasTab[i].tileBytes = atlasStageTileBytes;
+  atlasTab[i].bytes = atlasStageTotal; atlasTab[i].buf = atlasStage;
+  atlasTab[i].lastUsedMs = millis();
+  atlasTab[i].persisted = persisted;      // replacing the resident copy doesn't touch the file
+  if (wasBound) atlasBound = i;           // a bound sheet stays bound across its own replacement
+  atlasStage = nullptr;
   return 0;
 }
 
-bool canvasAtlasInfo(uint16_t& tiles, uint16_t& w, uint16_t& h) {
-  if (!atlasReady) return false;
-  tiles = atlasTiles; w = atlasW; h = atlasH;
-  return true;
+// Load a persisted sheet into the table (used by bind misses). -1 on any failure.
+static int atlasLoadFromFs(const char* name) {
+  if (!sfFsReady || !canvasAtlasNameOk(name)) return -1;
+  char path[64];
+  atlasPath(name, path, sizeof(path));
+  File f = FFat.open(path, "r");
+  if (!f) return -1;
+  uint8_t hdr[12];
+  if (f.read(hdr, 12) != 12 || memcmp(hdr, "MPTA", 4) != 0 || hdr[4] != 1) { f.close(); return -1; }
+  const uint8_t  fmt = hdr[5];
+  const uint16_t tw = (hdr[6] << 8) | hdr[7], th = (hdr[8] << 8) | hdr[9];
+  const uint16_t tn = (hdr[10] << 8) | hdr[11];
+  if (canvasAtlasBegin(name, fmt, tw, th, tn) != 0) { f.close(); return -1; }
+  uint8_t chunk[4096];
+  size_t got;
+  while ((got = f.read(chunk, sizeof(chunk))) > 0) { canvasAtlasFeed(chunk, got); wdgWebMs = millis(); }
+  f.close();
+  if (canvasAtlasCommit() != 0) return -1;
+  int i = atlasFindResident(name);
+  if (i >= 0) atlasTab[i].persisted = true;
+  return i;
 }
 
-// Blit tile i at (x,y). Magenta is the transparent colour -- 0xF81F in rgb565, (255,0,255) in
-// rgb888 -- so sprites can carry holes. panelPixel clamps, so an off-panel sprite just clips.
-bool canvasAtlasBlit(uint16_t i, int x, int y) {
-  if (!atlasReady || i >= atlasTiles) return false;
-  const uint8_t* t = atlasBuf + (size_t)i * atlasTileBytes;
-  for (int row = 0; row < atlasH; row++)
-    for (int col = 0; col < atlasW; col++) {
-      const uint8_t* p = t + ((size_t)row * atlasW + col) * atlasFmt;
-      if (atlasFmt == 3) {
+int canvasAtlasBind(const char* name) {
+  int i = atlasFindResident(name);
+  if (i < 0) i = atlasLoadFromFs(name);    // lazy load; -1 when it exists nowhere
+  atlasBound = i;
+  if (i >= 0) atlasTab[i].lastUsedMs = millis();
+  return i;
+}
+
+int canvasAtlasBoundHandle() { return atlasBound; }
+
+bool canvasAtlasBlitFrom(int handle, uint16_t i, int x, int y) {
+  if (handle < 0 || handle >= ATLAS_MAX_SHEETS || !atlasTab[handle].name[0]) return false;
+  AtlasSheet& a = atlasTab[handle];
+  if (i >= a.tiles) return false;
+  a.lastUsedMs = millis();
+  const uint8_t* t = a.buf + (size_t)i * a.tileBytes;
+  for (int row = 0; row < a.tileH; row++)
+    for (int col = 0; col < a.tileW; col++) {
+      const uint8_t* p = t + ((size_t)row * a.tileW + col) * a.fmt;
+      if (a.fmt == 3) {
         if (p[0] == 255 && p[1] == 0 && p[2] == 255) continue;          // transparent
         panelPixel(x + col, y + row, p[0], p[1], p[2]);
       } else {
@@ -423,6 +541,112 @@ bool canvasAtlasBlit(uint16_t i, int x, int y) {
       }
     }
   return true;
+}
+
+int canvasAtlasSave(const char* name) {
+  if (!sfFsReady)                return 503;
+  const int i = atlasFindResident(name);
+  if (i < 0)                     return 404;
+  FFat.mkdir("/atlas");                                    // idempotent
+  char tmp[64], path[64];
+  snprintf(tmp, sizeof(tmp), "/atlas/%s.tmp", name);
+  atlasPath(name, path, sizeof(path));
+  File f = FFat.open(tmp, "w");
+  if (!f) return 507;
+  const AtlasSheet& a = atlasTab[i];
+  uint8_t hdr[12] = { 'M','P','T','A', 1, a.fmt,
+                      (uint8_t)(a.tileW >> 8), (uint8_t)a.tileW,
+                      (uint8_t)(a.tileH >> 8), (uint8_t)a.tileH,
+                      (uint8_t)(a.tiles >> 8), (uint8_t)a.tiles };
+  bool ok = f.write(hdr, sizeof(hdr)) == sizeof(hdr);
+  for (size_t off = 0; ok && off < a.bytes; off += 8192) {
+    size_t c = (a.bytes - off < 8192) ? (a.bytes - off) : 8192;
+    ok = f.write(a.buf + off, c) == c;
+    wdgWebMs = millis();
+  }
+  f.close();
+  if (!ok) { FFat.remove(tmp); return 507; }
+  FFat.remove(path);
+  FFat.rename(tmp, path);
+  atlasTab[i].persisted = true;
+  return 0;
+}
+
+int canvasAtlasDelete(const char* name) {
+  bool any = false;
+  const int i = atlasFindResident(name);
+  if (i >= 0) { atlasFreeSlot(i); any = true; }
+  if (sfFsReady && canvasAtlasNameOk(name)) {
+    char path[64];
+    atlasPath(name, path, sizeof(path));
+    if (FFat.remove(path)) any = true;
+  }
+  return any ? 0 : 404;
+}
+
+// One list row. resident sheets come from the table; persisted-but-not-resident ones from
+// a /atlas directory walk (their shape read from the 12-byte header).
+static void atlasRowJson(char* out, size_t cap, const char* name, uint16_t tiles, uint16_t w,
+                         uint16_t h, uint8_t fmt, size_t bytes, bool resident, bool persisted,
+                         bool first) {
+  snprintf(out, cap,
+    "%s{\"name\":\"%.32s\",\"tiles\":%u,\"w\":%u,\"h\":%u,\"fmt\":%u,\"bytes\":%u,"
+    "\"resident\":%s,\"persisted\":%s}",
+    first ? "" : ",", name, (unsigned)tiles, (unsigned)w, (unsigned)h, (unsigned)fmt,
+    (unsigned)bytes, resident ? "true" : "false", persisted ? "true" : "false");
+}
+
+void canvasAtlasListJson(void (*sink)(const char*)) {
+  char row[192];
+  bool first = true;
+  sink("[");
+  for (int i = 0; i < ATLAS_MAX_SHEETS; i++) {
+    if (!atlasTab[i].name[0]) continue;
+    const AtlasSheet& a = atlasTab[i];
+    atlasRowJson(row, sizeof(row), a.name, a.tiles, a.tileW, a.tileH, a.fmt, a.bytes,
+                 true, a.persisted, first);
+    sink(row); first = false;
+  }
+  if (sfFsReady) {
+    File dir = FFat.open("/atlas");
+    if (dir && dir.isDirectory()) {
+      File f;
+      while ((f = dir.openNextFile())) {
+        char name[ATLAS_NAME_MAX + 8];
+        strlcpy(name, f.name(), sizeof(name));
+        char* dot = strstr(name, ".mpta");
+        if (!dot || f.isDirectory()) { f.close(); continue; }
+        *dot = 0;
+        if (atlasFindResident(name) >= 0) { f.close(); continue; }   // already listed
+        uint8_t hdr[12];
+        uint16_t tw = 0, th = 0, tn = 0; uint8_t fmt = 0;
+        if (f.read(hdr, 12) == 12 && memcmp(hdr, "MPTA", 4) == 0) {
+          fmt = hdr[5]; tw = (hdr[6] << 8) | hdr[7]; th = (hdr[8] << 8) | hdr[9];
+          tn = (hdr[10] << 8) | hdr[11];
+        }
+        size_t bytes = (size_t)tw * th * fmt * tn;
+        atlasRowJson(row, sizeof(row), name, tn, tw, th, fmt, bytes, false, true, first);
+        sink(row); first = false;
+        f.close();
+        wdgWebMs = millis();
+      }
+    }
+    if (dir) dir.close();
+  }
+  sink("]");
+}
+
+void canvasAtlasStateJson(char* out, size_t cap) {
+  size_t o = (size_t)snprintf(out, cap, "{\"bound\":%s%s%s,\"loaded\":[",
+    atlasBound >= 0 ? "\"" : "", atlasBound >= 0 ? atlasTab[atlasBound].name : "null",
+    atlasBound >= 0 ? "\"" : "");
+  bool first = true;
+  for (int i = 0; i < ATLAS_MAX_SHEETS && o + 40 < cap; i++) {
+    if (!atlasTab[i].name[0]) continue;
+    o += (size_t)snprintf(out + o, cap - o, "%s\"%s\"", first ? "" : ",", atlasTab[i].name);
+    first = false;
+  }
+  snprintf(out + o, cap - o, "]}");
 }
 
 // ---- GIF import (v2.1) -------------------------------------------------------------------------

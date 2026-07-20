@@ -1,5 +1,34 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.1.0 — 2026-07-19
+
+### Changed (breaking)
+
+- **The sprite atlas is now a named, persistent library** — the single global sheet (and
+  its "any upload replaces it, and blits no-op mid-upload" coordination problem) is gone.
+  Up to **16 resident named sheets** share a **4 MB** PSRAM budget (2 MB per-sheet cap),
+  LRU-evicted; uploads build in a fresh allocation and publish atomically at commit, so a
+  bound sheet is never observed half-written. The old unnamed `PUT /api/canvas/atlas` is
+  **removed**.
+
+### Added
+
+- `PUT /api/canvas/atlas/<name>` — upload a named MPTA sheet (12-byte header unchanged;
+  name grammar `[a-z0-9._-]{1,32}`).
+- `GET /api/canvas/atlas` — the library: `[{name,tiles,w,h,fmt,bytes,resident,persisted}]`,
+  covering resident sheets and persisted `/atlas/<name>.mpta` files.
+- `POST /api/canvas/atlas/<name>/save`, `DELETE /api/canvas/atlas/<name>` — persist to
+  FATFS / remove everywhere. A persisted sheet that gets LRU-evicted **lazy-loads on its
+  next bind**; nothing preloads at boot.
+- Ops: `{"op":"atlas","name":"…"}` binds a sheet for subsequent `sprite` ops (sticky
+  across batches — bind explicitly per batch when using content-fingerprint names). A
+  `sprite` with nothing bound, or a bind to an unknown name, no-ops rather than failing
+  the batch.
+- `GET /api/canvas` reports `atlas: {bound, loaded:[…]}`; `GET /api/capabilities`
+  advertises `canvas.atlas = {named, persist, maxSheets, maxBytes, maxSheetBytes}` for
+  feature detection.
+- Files-tab uploads route `.mpta` files to `/atlas/` automatically.
+
 ## v3.0.1 — 2026-07-19
 
 ### Fixed

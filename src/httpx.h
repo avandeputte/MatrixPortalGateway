@@ -36,6 +36,11 @@ bool webEnsureListening();
 // ---- registration ----
 // Register `fn` for exact path `uri` and `method`, wrapped in the dispatch hook.
 void httpxOn(const char* uri, httpd_method_t method, esp_err_t (*fn)(httpd_req_t*));
+// Prefix route: matches any path beginning with `prefix` (which should end in '/');
+// the handler reads the remainder out of r->uri. Exact routes win over prefix routes.
+void httpxOnPrefix(const char* prefix, httpd_method_t method, esp_err_t (*fn)(httpd_req_t*));
+// The path remainder after `prefix` (query stripped), for prefix-route handlers.
+String httpxPathTail(httpd_req_t* r, const char* prefix);
 // Start httpd and bind everything registered so far (idempotent).
 void httpxStart();
 bool httpxUp();

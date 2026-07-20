@@ -750,10 +750,14 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
     snprintf(cv, sizeof(cv),
              "\"canvas\":{\"formats\":[\"rgb888\",\"rgb565\",\"qoi\"],\"width\":%u,\"height\":%u,"
              "\"rect\":true,\"anim\":true,\"ticker\":true,\"readback\":true,"
+             "\"atlas\":{\"named\":true,\"persist\":true,\"maxSheets\":%u,"
+             "\"maxBytes\":%u,\"maxSheetBytes\":%u},"
              "\"ops\":[\"clear\",\"pixel\",\"hline\",\"vline\",\"line\",\"rect\",\"circle\",\"ellipse\","
              "\"triangle\",\"roundrect\",\"gradient\",\"polyline\",\"text\",\"image\",\"sprite\",\"scroll\",\"show\"]},"
              "\"effects\":%s,\"effectParams\":[\"hue\",\"density\"],",
-             (unsigned)gPanel.panelW, (unsigned)gPanel.panelH, effectListJson());
+             (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
+             (unsigned)ATLAS_MAX_SHEETS, (unsigned)ATLAS_TOTAL_BUDGET,
+             (unsigned)ATLAS_MAX_SHEET_BYTES, effectListJson());
     capPut(cv); }
 
   // What the wall can DO, not just show, so a client reads this instead of sniffing the
@@ -1292,16 +1296,10 @@ static esp_err_t handleApiCanvas(httpd_req_t* r) {
     return httpxSend(r, 200, "application/json", buf);
     return ESP_OK;
   }
-  // The atlas field says what the "sprite" op can blit right now: the loaded sheet's
-  // shape, or null when none has been uploaded yet.
-  char atlas[48];
-  uint16_t atTiles = 0, atW = 0, atH = 0;
-  if (canvasAtlasInfo(atTiles, atW, atH))
-    snprintf(atlas, sizeof(atlas), "{\"tiles\":%u,\"w\":%u,\"h\":%u}",
-             (unsigned)atTiles, (unsigned)atW, (unsigned)atH);
-  else
-    strlcpy(atlas, "null", sizeof(atlas));
-  char buf[288];
+  // The atlas field (v3.1): the sticky-bound sheet and every resident one.
+  char atlas[320];
+  canvasAtlasStateJson(atlas, sizeof(atlas));
+  char buf[560];
   snprintf(buf, sizeof(buf),
            "{\"active\":%s,\"width\":%u,\"height\":%u,\"formats\":[\"rgb888\",\"rgb565\",\"qoi\"],"
            "\"effect\":\"%s\",\"anim\":%s,\"ticker\":%s,\"atlas\":%s,\"effects\":%s}",
@@ -1529,11 +1527,16 @@ static esp_err_t handleApiCanvasOps(httpd_req_t* r) {
       panelCircle(x, y, op["r"] | 0, op["fill"] | false, r, g, b);
     } else if (!strcmp(k, "image")) {
       canvasOpImage(op, x, y, w, h);
+    } else if (!strcmp(k, "atlas")) {
+      // {"op":"atlas","name":"weather"} (v3.1): bind a named sheet for subsequent sprite
+      // ops. Sticky (it survives this batch); an unknown name binds nothing -- later
+      // sprites no-op rather than failing the batch. Lazy-loads a persisted sheet.
+      canvasAtlasBind(op["name"] | "");
     } else if (!strcmp(k, "sprite")) {
-      // {"op":"sprite","i":N,"x":X,"y":Y}: blit atlas tile N (PUT /api/canvas/atlas) at (x,y),
-      // transparent pixels skipped. No atlas loaded or i out of range: skip, do not count.
+      // {"op":"sprite","i":N,"x":X,"y":Y}: blit tile N of the BOUND sheet at (x,y),
+      // transparent pixels skipped. Nothing bound or i out of range: skip, don't count.
       const int ti = op["i"] | -1;
-      if (ti < 0 || !canvasAtlasBlit((uint16_t)ti, x, y)) continue;
+      if (ti < 0 || !canvasAtlasBlitFrom(canvasAtlasBoundHandle(), (uint16_t)ti, x, y)) continue;
     } else if (!strcmp(k, "scroll")) {
       uint8_t r = 0, g = 0, b = 0; canvasColor(op["color"], r, g, b);   // vacated pixels: black default
       panelScroll(op["dx"] | 0, op["dy"] | 0, r, g, b);
@@ -1843,18 +1846,21 @@ static esp_err_t handleApiCanvasAnim(httpd_req_t* r) {
   return httpxSend(r, 200, "application/json", buf);
 }
 
-// PUT /api/canvas/atlas -- upload a sprite tile sheet for the ops path's "sprite" op (v2.1).
-// Header (12 B, big-endian): "MPTA"(4) ver(1)=1 fmt(1: 2=rgb565BE, 3=rgb888) tileW(2) tileH(2)
-// tiles(2), then tiles*tileW*tileH*fmt bytes of tile data. Streamed straight into PSRAM; kept
-// across uses and replaced by the next upload. No panel takeover -- it is data, not pixels.
+// ---- named atlas library (v3.1) ----------------------------------------------------------------
+// PUT /api/canvas/atlas/<name> -- upload one named MPTA sheet (12 B header unchanged:
+// "MPTA"(4) ver(1)=1 fmt(1: 2=rgb565BE, 3=rgb888) tileW(2) tileH(2) tiles(2), then tile data).
+// Built in a NEW allocation and published at Commit, so a bound sheet never blits half-written.
 static esp_err_t atlasRawReply(httpd_req_t* r, int e) {
-  if (e == 400) return httpxErr(r, 400, "Bad MPTA header or truncated upload");
-  if (e == 413) return httpxErr(r, 413, "Atlas exceeds the 2 MB budget");
+  if (e == 400) return httpxErr(r, 400, "Bad name (1-32 chars a-z 0-9 . _ -), bad MPTA header or truncated upload");
+  if (e == 404) return httpxErr(r, 404, "No such atlas");
+  if (e == 413) return httpxErr(r, 413, "Sheet exceeds the 2 MB per-sheet cap");
   if (e == 507) return httpxErr(r, 507, "Low on memory -- try again in a moment");
   return httpxErr(r, 503, "Out of memory");
 }
-static esp_err_t handleApiCanvasAtlas(httpd_req_t* r) {
+static esp_err_t handleApiAtlasPut(httpd_req_t* r) {
   if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) return atlasRawReply(r, 507);   // stressed: back off
+  const String name = httpxPathTail(r, "/api/canvas/atlas/");
+  if (!canvasAtlasNameOk(name.c_str())) return atlasRawReply(r, 400);
   const size_t len = (size_t)r->content_len;
   if (len < 12) return atlasRawReply(r, 400);       // empty body: never reaches the header
 
@@ -1873,7 +1879,7 @@ static esp_err_t handleApiCanvasAtlas(httpd_req_t* r) {
       uint16_t tw = (hdr[6]  << 8) | hdr[7];
       uint16_t th = (hdr[8]  << 8) | hdr[9];
       uint16_t tn = (hdr[10] << 8) | hdr[11];
-      int rc = canvasAtlasBegin(hdr[5], tw, th, tn);
+      int rc = canvasAtlasBegin(name.c_str(), hdr[5], tw, th, tn);
       if (rc) return atlasRawReply(r, rc);
       begun = true;
     }
@@ -1881,12 +1887,38 @@ static esp_err_t handleApiCanvasAtlas(httpd_req_t* r) {
   }
   int rc = begun ? canvasAtlasCommit() : 400;
   if (rc) return atlasRawReply(r, rc);
-  uint16_t tiles = 0, w = 0, h = 0;
-  canvasAtlasInfo(tiles, w, h);
-  char buf[64];
-  snprintf(buf, sizeof(buf), "{\"ok\":true,\"tiles\":%u,\"w\":%u,\"h\":%u}",
-           (unsigned)tiles, (unsigned)w, (unsigned)h);
+  { char cd[64]; snprintf(cd, sizeof(cd), "atlas '%.32s' uploaded", name.c_str()); logCommand('R', cd); }
+  char buf[96];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"name\":\"%s\",\"bytes\":%u}",
+           name.c_str(), (unsigned)(len - 12));
   return httpxSend(r, 200, "application/json", buf);
+}
+
+// GET /api/canvas/atlas -- the library, streamed (resident sheets + persisted files).
+static esp_err_t handleApiAtlasList(httpd_req_t* r) {
+  httpd_resp_set_type(r, "application/json");
+  gStreamReq = r;
+  canvasAtlasListJson(animListSink);
+  return httpxChunkEnd(r);
+}
+
+// POST /api/canvas/atlas/<name>/save + DELETE /api/canvas/atlas/<name>
+static esp_err_t handleApiAtlasPost(httpd_req_t* r) {
+  String tail = httpxPathTail(r, "/api/canvas/atlas/");
+  if (!tail.endsWith("/save")) return httpxErr(r, 404, "not found");
+  const String name = tail.substring(0, tail.length() - 5);
+  int rc = canvasAtlasSave(name.c_str());
+  if (rc == 404) return atlasRawReply(r, 404);
+  if (rc == 507) return httpxErr(r, 507, "Filesystem full or write failed");
+  if (rc)        return httpxErr(r, 503, "No filesystem");
+  { char cd[64]; snprintf(cd, sizeof(cd), "atlas '%.32s' saved", name.c_str()); logCommand('R', cd); }
+  return httpxSend(r, 200, "application/json", "{\"ok\":true}");
+}
+static esp_err_t handleApiAtlasDelete(httpd_req_t* r) {
+  const String name = httpxPathTail(r, "/api/canvas/atlas/");
+  if (canvasAtlasDelete(name.c_str()) != 0) return atlasRawReply(r, 404);
+  { char cd[64]; snprintf(cd, sizeof(cd), "atlas '%.32s' deleted", name.c_str()); logCommand('R', cd); }
+  return httpxSend(r, 200, "application/json", "{\"ok\":true}");
 }
 
 // PUT /api/canvas/gif -- import a GIF into the animation store (v2.1). The whole file is
@@ -2171,6 +2203,7 @@ static bool fsUploadTarget(const char* fn, char* out, size_t outLen) {
   const char* dir = "/";
   if      (n > 4 && strcmp(name + n - 4, ".mpg") == 0) dir = "/anim/";
   else if (n > 4 && strcmp(name + n - 4, ".fnt") == 0) dir = "/fonts/";
+  else if (n > 5 && strcmp(name + n - 5, ".mpta") == 0) dir = "/atlas/";
   snprintf(out, outLen, "%s%s", dir, name);
   return fsPathOk(out);   // "." and friends still cannot sneak through
 }
@@ -2269,7 +2302,10 @@ void webInit() {
   httpxOn("/api/canvas/rect",        HTTP_PUT,  handleApiCanvasRect);
   httpxOn("/api/canvas/qoi",         HTTP_PUT,  handleApiCanvasQoi);
   httpxOn("/api/canvas/anim",        HTTP_PUT,  handleApiCanvasAnim);
-  httpxOn("/api/canvas/atlas",       HTTP_PUT,  handleApiCanvasAtlas);
+  httpxOn("/api/canvas/atlas",        HTTP_GET,    handleApiAtlasList);
+  httpxOnPrefix("/api/canvas/atlas/", HTTP_PUT,    handleApiAtlasPut);
+  httpxOnPrefix("/api/canvas/atlas/", HTTP_POST,   handleApiAtlasPost);
+  httpxOnPrefix("/api/canvas/atlas/", HTTP_DELETE, handleApiAtlasDelete);
   httpxOn("/api/canvas/gif",         HTTP_PUT,  handleApiCanvasGif);
   httpxOn("/api/canvas/font",        HTTP_PUT,  handleApiCanvasFont);
   httpxOn("/api/canvas/font/save",   HTTP_POST, handleApiFontSave);

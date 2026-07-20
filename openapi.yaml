@@ -26,7 +26,7 @@ info:
     multipart. Everything else on this surface is unchanged.
 
     **Firmware 2.1 grows the canvas surface** — an animation library persisted to FATFS (plus a
-    `bootAnim` config field), an overlay ticker, full-frame transitions, a sprite atlas for the
+    `bootAnim` config field), an overlay ticker, full-frame transitions, a sprite atlas (a **named, persistent library** since 3.1) for the
     ops path, on-device GIF import and uploadable fonts. All additive: every pre-2.1 client
     keeps working unchanged, and the new features are visible in `GET /api/capabilities`
     (the `sprite` op) and `GET /api/canvas` (the `atlas` field).
@@ -422,8 +422,8 @@ paths:
 
         This GET reports whether a canvas is active, the panel dimensions (so a client can size
         the frames it pushes), which on-device `effect` (if any) is currently running, whether
-        an uploaded animation (`anim`) or a ticker is playing, and (v2.1) the shape of the
-        loaded sprite `atlas` — or `null` when none has been uploaded yet.
+        an uploaded animation (`anim`) or a ticker is playing, and (v3.1) the atlas library
+        state: the sticky-**bound** sheet (or null) and every resident sheet name.
       responses:
         "200":
           description: OK
@@ -440,12 +440,11 @@ paths:
                   anim:    { type: boolean, example: false, description: An uploaded animation is playing. }
                   ticker:  { type: boolean, example: false, description: A ticker is scrolling. }
                   atlas:
-                    type: [object, "null"]
-                    description: "The loaded sprite atlas the ops `sprite` op can blit (v2.1), or null when none is loaded."
+                    type: object
+                    description: "Atlas library state (v3.1): the sheet the ops `sprite` op blits from, and every resident sheet."
                     properties:
-                      tiles: { type: integer, example: 16 }
-                      w:     { type: integer, example: 16, description: "Tile width in px" }
-                      h:     { type: integer, example: 16, description: "Tile height in px" }
+                      bound:  { type: [string, "null"], example: "weather-3fa2" }
+                      loaded: { type: array, items: { type: string }, example: ["weather-3fa2","icons-77c1"] }
                   effects: { type: array, items: { type: string }, example: [plasma, fire, matrix, fliporama, clock, life] }
     post:
       tags: [Canvas]
@@ -873,14 +872,44 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
   /api/canvas/atlas:
+    get:
+      tags: [Canvas]
+      summary: List the named atlas library (v3.1)
+      description: |
+        Every sheet the gateway knows: **resident** ones (in PSRAM, blittable right now) and
+        **persisted** ones (`/atlas/<name>.mpta` on FATFS, lazy-loaded on their next bind).
+        A sheet can be both. Content-fingerprint names (e.g. `dash-a1b2c3`) make "name is in
+        this list" mean "exactly these tiles are available" — the gateway does no hashing.
+      responses:
+        "200":
+          description: The library
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:      { type: string,  example: "weather-3fa2" }
+                    tiles:     { type: integer, example: 16 }
+                    w:         { type: integer, example: 16 }
+                    h:         { type: integer, example: 16 }
+                    fmt:       { type: integer, example: 2, description: "2 = rgb565 BE, 3 = rgb888" }
+                    bytes:     { type: integer, example: 8192 }
+                    resident:  { type: boolean, example: true }
+                    persisted: { type: boolean, example: false }
+
+  /api/canvas/atlas/{name}:
     put:
       tags: [Canvas]
-      summary: Upload a sprite tile sheet for the ops "sprite" op (v2.1)
+      summary: Upload a named sprite tile sheet (v3.1 — replaces the unnamed PUT)
       description: |
-        One tile sheet, streamed into PSRAM, that `POST /api/canvas/ops` blits from with
-        `{"op":"sprite","i":N,"x":X,"y":Y}`. Kept across uses; the next upload replaces it. No
-        panel takeover — it is data, not pixels. `GET /api/canvas` reports the loaded sheet's
-        shape in its `atlas` field.
+        One named tile sheet for the ops `sprite` op. Up to **16 resident sheets** share a
+        **4 MB** PSRAM budget (per-sheet cap **2 MB**), least-recently-used sheets evicted
+        when it fills — a persisted victim lazy-reloads on its next bind; a non-persisted one
+        is gone (the client can see the list and re-upload). The upload builds in a fresh
+        allocation and **publishes atomically at commit**, so a bound sheet is never blitted
+        half-written. Name grammar: `[a-z0-9._-]{1,32}` (it is a filename when persisted).
 
         The body is a **12-byte big-endian header** followed by the tile pixels:
 
@@ -894,8 +923,12 @@ paths:
         | 10 | 2 | Tile count |
 
         …then `tiles × tileW × tileH × bpp` bytes, tile after tile, row-major. **Magenta is
-        transparent** — `0xF81F` in rgb565, `(255, 0, 255)` in rgb888 — so sprites can carry
-        holes. The sheet is capped at 2 MB.
+        transparent** — `0xF81F` in rgb565, `(255, 0, 255)` in rgb888.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z0-9._-]{1,32}$" }
       requestBody:
         required: true
         content:
@@ -903,27 +936,58 @@ paths:
             schema: { type: string, format: binary }
       responses:
         "200":
-          description: Atlas stored
+          description: Sheet stored (resident; not persisted until /save)
           content:
             application/json:
               schema:
                 type: object
                 properties:
                   ok:    { type: boolean, example: true }
-                  tiles: { type: integer, example: 16 }
-                  w:     { type: integer, example: 16 }
-                  h:     { type: integer, example: 16 }
+                  name:  { type: string,  example: "weather-3fa2" }
+                  bytes: { type: integer, example: 8192 }
         "400":
-          description: Bad MPTA header (magic/version/format/zero dimension) or truncated upload
+          description: Bad name, bad MPTA header, or truncated upload
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "413":
-          description: Atlas exceeds the 2 MB budget
+          description: Sheet exceeds the 2 MB per-sheet cap
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "503":
-          description: The tile-sheet buffer could not be allocated
+          description: Out of memory
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
         "507":
-          description: Internal heap is low — the upload is refused rather than risking a reboot; retry shortly
+          description: Internal heap is low — refused rather than risking a reboot; retry shortly
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    delete:
+      tags: [Canvas]
+      summary: Delete a named sheet — resident and persisted (v3.1)
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404":
+          description: No such atlas anywhere
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/canvas/atlas/{name}/save:
+    post:
+      tags: [Canvas]
+      summary: Persist a resident sheet to FATFS (v3.1)
+      description: Writes `/atlas/<name>.mpta` (the raw MPTA image). An LRU-evicted persisted sheet lazy-reloads on its next bind. Nothing preloads at boot.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404":
+          description: No such resident atlas
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "507":
+          description: Filesystem full or write failed
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
   /api/canvas/gif:
@@ -1207,8 +1271,11 @@ paths:
           the built-in face, never error
         * `{"op":"image","x":,"y":,"w":,"h":,"fmt":"rgb888"|"rgb565","data":"<base64>"}` — blit a small
           base64 sprite (≤ 8 KB decoded; use `PUT /api/canvas/frame` for a full panel) *(v1.25)*
-        * `{"op":"sprite","i":N,"x":,"y":}` — blit tile `N` of the uploaded atlas
-          (`PUT /api/canvas/atlas`) at (x, y), magenta pixels transparent. With no atlas loaded
+        * `{"op":"atlas","name":"…"}` — *(v3.1)* bind a named sheet (lazy-loading it from
+          FATFS if persisted) for subsequent `sprite` ops. Sticky across batches; binding an
+          unknown name binds nothing — later sprites no-op rather than failing the batch.
+        * `{"op":"sprite","i":N,"x":,"y":}` — blit tile `N` of the **bound** sheet
+          at (x, y), magenta pixels transparent. With nothing bound
           or `i` out of range the op is skipped and not counted *(v2.1)*
         * `{"op":"scroll","dx":,"dy":,"color":[…]}` — shift the current frame by (dx, dy), filling the
           vacated pixels with `color` (black by default). Make it the batch's first op, then draw the

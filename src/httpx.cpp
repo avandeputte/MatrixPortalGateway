@@ -13,6 +13,7 @@ struct Route {
   const char*    uri;
   httpd_method_t method;
   esp_err_t    (*fn)(httpd_req_t*);
+  bool           prefix;
 };
 static Route gRoutes[HTTPX_MAX_ROUTES];
 static int   gRouteCount = 0;
@@ -27,7 +28,26 @@ void httpxOn(const char* uri, httpd_method_t method, esp_err_t (*fn)(httpd_req_t
     printf("[WEB] route table full -- %s dropped\n", uri);
     return;
   }
-  gRoutes[gRouteCount++] = {uri, method, fn};
+  gRoutes[gRouteCount++] = {uri, method, fn, false};
+}
+
+void httpxOnPrefix(const char* prefix, httpd_method_t method, esp_err_t (*fn)(httpd_req_t*)) {
+  if (gRouteCount >= HTTPX_MAX_ROUTES) {
+    printf("[WEB] route table full -- %s dropped\n", prefix);
+    return;
+  }
+  gRoutes[gRouteCount++] = {prefix, method, fn, true};
+}
+
+String httpxPathTail(httpd_req_t* r, const char* prefix) {
+  const size_t pl = strlen(prefix);
+  const char* q = strchr(r->uri, '?');
+  const size_t pathLen = q ? (size_t)(q - r->uri) : strlen(r->uri);
+  if (pathLen <= pl) return String();
+  String t;
+  t.reserve(pathLen - pl);
+  for (size_t i = pl; i < pathLen; i++) t += r->uri[i];
+  return t;
 }
 
 /* ----------------------------------------------------------
@@ -217,13 +237,21 @@ static esp_err_t dispatch(httpd_req_t* r) {
   const size_t pathLen = q ? (size_t)(q - r->uri) : strlen(r->uri);
   esp_err_t rc = ESP_OK;
   bool found = false;
-  for (int i = 0; i < gRouteCount; i++) {
+  for (int i = 0; i < gRouteCount && !found; i++) {    // pass 1: exact routes
     const Route& rt = gRoutes[i];
-    if ((int)rt.method == (int)r->method &&
+    if (!rt.prefix && (int)rt.method == (int)r->method &&
         strlen(rt.uri) == pathLen && strncmp(rt.uri, r->uri, pathLen) == 0) {
       rc = rt.fn(r);
       found = true;
-      break;
+    }
+  }
+  for (int i = 0; i < gRouteCount && !found; i++) {    // pass 2: prefix routes
+    const Route& rt = gRoutes[i];
+    const size_t pl = strlen(rt.uri);
+    if (rt.prefix && (int)rt.method == (int)r->method &&
+        pathLen > pl && strncmp(rt.uri, r->uri, pl) == 0) {
+      rc = rt.fn(r);
+      found = true;
     }
   }
   if (!found) {
