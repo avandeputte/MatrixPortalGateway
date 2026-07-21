@@ -200,9 +200,11 @@ int httpxRecv(httpd_req_t* r, char* buf, size_t len) {
       if      (h < 30000) delay(40);
       else if (h < 45000) delay(10);
       // Boot-burst guard: on a gateway reboot the companion re-pushes EVERYTHING at
-      // once while boot bring-up still owns part of the heap -- observed 6 KB
-      // watermark from that overlap. Gentle pacing for the first 30 s only.
-      else if (millis() < 30000UL) delay(5);
+      // once while boot bring-up still owns part of the heap -- observed 6-9 KB
+      // watermarks from that overlap (worse once the cruise tier went away, which is
+      // when this got its own stronger tier). Firm pacing for the first 30 s only;
+      // steady state pays nothing.
+      else if (millis() < 30000UL) delay(15);
     }
   }
   return n;
