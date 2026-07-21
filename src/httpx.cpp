@@ -191,14 +191,17 @@ int httpxRecv(httpd_req_t* r, char* buf, size_t len) {
     // old 50/35 K thresholds).
     if (!gOtaInProgress) {
       uint32_t h = ESP.getFreeHeap();
-      // Danger tiers only. There USED to be a <60 K cruise tier, but with a ~75 K
-      // baseline every ordinary 32 KB frame push dipped into it and paid 5 ms x 23
-      // chunks -- my own backpressure was the throughput floor (measured: full-frame
-      // p50 103 ms; ~45 ms with the tier gone). Concurrent-stream stacking is already
-      // bounded by max_open_sockets=4 (~20 KB/round from a 75 K baseline lands above
-      // 45 K), so cruise pacing bought nothing but latency.
+      // The FULL graded ladder, exactly as the v3.0.0 2-hour certification ran it
+      // (min-heap 44 K). Removing the <60 K cruise tier was tried for throughput --
+      // full-frame pushes did get faster (p50 103 -> 60 ms) -- but the very next
+      // adversarial soak dove to 1.5 KB: reactive pacing must engage ABOVE the danger
+      // zone because in-flight data keeps landing while we sleep, and neither the
+      // 4-socket cap nor SO_RCVBUF bounds the initial commit on this lwIP build.
+      // Deltas (/api/canvas/rects) stay quick regardless: a 2 KB body only crosses
+      // this ladder twice.
       if      (h < 30000) delay(40);
-      else if (h < 45000) delay(10);
+      else if (h < 45000) delay(20);
+      else if (h < 60000) delay(5);
       // Boot-burst guard: on a gateway reboot the companion re-pushes EVERYTHING at
       // once while boot bring-up still owns part of the heap -- observed 6-9 KB
       // watermarks from that overlap (worse once the cruise tier went away, which is
@@ -244,7 +247,12 @@ static esp_err_t dispatch(httpd_req_t* r) {
   // after every response. Setting it per-request is redundant but costs microseconds.
   { int fd = httpd_req_to_sockfd(r);
     int one = 1;
-    if (fd >= 0) setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)); }
+    if (fd >= 0) {
+      setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+      // (SO_RCVBUF window-capping was tried here and did nothing on this prebuilt
+      // lwIP -- a 3-way concurrent hammer still drove min-heap to 268 bytes. The
+      // graded recv pacing in httpxRecv is what actually bounds buffer stacking.)
+    } }
   // Every REST answer carried this by hand in the WebServer era; set it once here.
   httpd_resp_set_hdr(r, "Access-Control-Allow-Origin", "*");
 

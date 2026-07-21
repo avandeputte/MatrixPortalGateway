@@ -46,6 +46,17 @@ The push pump: taskWeb hashes the reels (FNV over `curIndex` under `vmMutex`) ev
 `dispStateJson`, the same shape `/api/display/state` serves) to every parked SSE socket.
 One sender task means no two writers ever interleave on a socket — keep it that way.
 
+**Known bound — concurrent large streams.** This lwIP build's per-socket TCP buffers are
+large and not capped by anything we control (`SO_RCVBUF` is a no-op; the window scale is
+baked into the precompiled stack). The graded recv pacing in `httpxRecv` (60/45/30 K →
+5/20/40 ms per chunk, firmer for the first 30 s after boot) is what holds the certified
+soak profile — one sequential heavy client + SSE + dashboard polls + a live companion —
+at a ~44 K min-heap. A *synthetic* pattern of three independent clients hammering 32 KB
+streams in tight loops with connection churn can still transiently run the heap to near
+zero; the board recovers (lwIP sheds a connection, loop()'s floor is the backstop) and
+no real deployment here looks like that, but if one ever does, the fix is Option B from
+the old heap notes: a custom-sdkconfig framework rebuild with small TCP_WND/SND_BUF.
+
 ---
 
 ## The emulation seam is the UART, not the API
