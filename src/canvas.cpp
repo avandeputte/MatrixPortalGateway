@@ -90,21 +90,12 @@ void canvasAnimRender() {
   animLastMs = now;
   const uint8_t* f = animBuf + (size_t)animIdx * animFrameBytes;
   const int W = animW, H = animH;
+  // Row blits straight out of the PSRAM store (v3.1): ~4-6x the per-pixel path, which
+  // is what lifts the playable animation frame rate.
   if (animFmt == 3) {
-    for (int y = 0; y < H; y++)
-      for (int x = 0; x < W; x++) {
-        const uint8_t* p = f + ((size_t)y * W + x) * 3;
-        panelPixel(x, y, p[0], p[1], p[2]);
-      }
+    for (int y = 0; y < H; y++) panelBlitRow888(0, y, W, f + (size_t)y * W * 3);
   } else {
-    for (int y = 0; y < H; y++)
-      for (int x = 0; x < W; x++) {
-        const uint8_t* p = f + ((size_t)y * W + x) * 2;
-        uint16_t v = ((uint16_t)p[0] << 8) | p[1];               // big-endian rgb565
-        panelPixel(x, y, (uint8_t)(((v >> 11) & 0x1F) << 3),
-                         (uint8_t)(((v >> 5)  & 0x3F) << 2),
-                         (uint8_t)((v & 0x1F) << 3));
-      }
+    for (int y = 0; y < H; y++) panelBlitRow565(0, y, W, f + (size_t)y * W * 2);
   }
   panelShow();
   if (++animIdx >= animCount) {
@@ -172,17 +163,20 @@ void canvasStagePresent() {
   if (steps < 2) steps = 2;
   if (steps > 30) steps = 30;
   uint8_t r, g, b;
+  static uint8_t rowBuf[PANEL_MAX_W * 3];   // one composed rgb888 row (v3.1: row blits)
   if (type == 1) {                        // crossfade
     for (int s = 1; s <= steps; s++) {
       const int t = 255 * s / steps;
-      for (int y = 0; y < H; y++)
+      for (int y = 0; y < H; y++) {
         for (int x = 0; x < W; x++) {
           const uint8_t* o = oldBuf + ((size_t)y * W + x) * 3;
           stagePx(x, y, r, g, b);
-          panelPixel(x, y, (uint8_t)((o[0] * (255 - t) + r * t) >> 8),
-                           (uint8_t)((o[1] * (255 - t) + g * t) >> 8),
-                           (uint8_t)((o[2] * (255 - t) + b * t) >> 8));
+          rowBuf[x * 3]     = (uint8_t)((o[0] * (255 - t) + r * t) >> 8);
+          rowBuf[x * 3 + 1] = (uint8_t)((o[1] * (255 - t) + g * t) >> 8);
+          rowBuf[x * 3 + 2] = (uint8_t)((o[2] * (255 - t) + b * t) >> 8);
         }
+        panelBlitRow888(0, y, W, rowBuf);
+      }
       panelShow();
       wdgWebMs = millis();
     }
@@ -190,8 +184,13 @@ void canvasStagePresent() {
     panelCloneToBack();                   // keep the old frame under the un-wiped part
     for (int s = 1; s <= steps; s++) {
       const int xTo = W * s / steps;
-      for (int y = 0; y < H; y++)
-        for (int x = 0; x < xTo; x++) { stagePx(x, y, r, g, b); panelPixel(x, y, r, g, b); }
+      for (int y = 0; y < H; y++) {
+        for (int x = 0; x < xTo; x++) {
+          stagePx(x, y, r, g, b);
+          rowBuf[x * 3] = r; rowBuf[x * 3 + 1] = g; rowBuf[x * 3 + 2] = b;
+        }
+        panelBlitRow888(0, y, xTo, rowBuf);
+      }
       panelShow();
       panelCloneToBack();
       wdgWebMs = millis();
@@ -200,22 +199,25 @@ void canvasStagePresent() {
     for (int s = 1; s <= steps; s++) {
       const int dx = W * s / steps;       // how far everything has moved left
       for (int y = 0; y < H; y++) {
-        for (int x = 0; x < W - dx; x++) {           // remaining slice of the old frame
-          const uint8_t* o = oldBuf + ((size_t)y * W + (x + dx)) * 3;
-          panelPixel(x, y, o[0], o[1], o[2]);
-        }
-        for (int x = W - dx; x < W; x++) {           // incoming slice of the new frame
+        memcpy(rowBuf, oldBuf + ((size_t)y * W + dx) * 3, (size_t)(W - dx) * 3);
+        for (int x = W - dx; x < W; x++) {
           stagePx(x - (W - dx), y, r, g, b);
-          panelPixel(x, y, r, g, b);
+          rowBuf[x * 3] = r; rowBuf[x * 3 + 1] = g; rowBuf[x * 3 + 2] = b;
         }
+        panelBlitRow888(0, y, W, rowBuf);
       }
       panelShow();
       wdgWebMs = millis();
     }
   }
   // Land exactly on the new frame regardless of type (also the type==0 direct path).
-  for (int y = 0; y < H; y++)
-    for (int x = 0; x < W; x++) { stagePx(x, y, r, g, b); panelPixel(x, y, r, g, b); }
+  for (int y = 0; y < H; y++) {
+    for (int x = 0; x < W; x++) {
+      stagePx(x, y, r, g, b);
+      rowBuf[x * 3] = r; rowBuf[x * 3 + 1] = g; rowBuf[x * 3 + 2] = b;
+    }
+    panelBlitRow888(0, y, W, rowBuf);
+  }
   panelShow();
 }
 

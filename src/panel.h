@@ -41,6 +41,10 @@ void panelPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b);
 void panelHLine(int x, int y, int w, uint8_t r, uint8_t g, uint8_t b);
 void panelVLine(int x, int y, int h, uint8_t r, uint8_t g, uint8_t b);
 void panelFillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b);
+// Row blitters (v3.1): one horizontal run of n pixels at (x,y) -- ~4-6x the per-pixel
+// path for frame-shaped draws. 565 is big-endian, as every wire format here is.
+void panelBlitRow888(int x, int y, int n, const uint8_t* rgb);
+void panelBlitRow565(int x, int y, int n, const uint8_t* be565);
 void panelLine(int x0, int y0, int x1, int y1, uint8_t r, uint8_t g, uint8_t b);   // Bresenham
 void panelCircle(int cx, int cy, int rad, bool fill, uint8_t r, uint8_t g, uint8_t b);  // outline/disc
 void panelTriangle(int x0, int y0, int x1, int y1, int x2, int y2, bool fill, uint8_t r, uint8_t g, uint8_t b);

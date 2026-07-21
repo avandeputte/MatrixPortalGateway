@@ -603,6 +603,46 @@ paths:
           description: Panel not running (the gateway is headless)
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
+  /api/canvas/rects:
+    put:
+      tags: [Canvas]
+      summary: Multi-rect delta update (v3.1)
+      description: |
+        One binary body carrying **N changed regions**, drawn over what is on screen and
+        presented once — the network fix for full-frame re-sends: a client that diffs its
+        frames sends 10–50× less. Advertised as `canvas.rects` in capabilities. No
+        transitions (deltas are incremental updates, not presents). Big-endian body:
+        `u16 count (≤256), u8 fmt (2 = rgb565 BE, 3 = rgb888), u8 reserved(0)`, then per
+        rect `u16 x, u16 y, u16 w, u16 h` followed by `w×h×bpp` pixels. Body cap: two
+        full frames.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Drawn and presented
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:    { type: boolean, example: true }
+                  rects: { type: integer, example: 3 }
+        "400":
+          description: Malformed header, geometry, or truncated body
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "413":
+          description: Body exceeds two full frames — send a frame instead
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: Panel not running or out of memory
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "507":
+          description: Internal heap low — retry shortly
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
   /api/canvas/qoi:
     put:
       tags: [Canvas]

@@ -28,6 +28,27 @@
   advertises `canvas.atlas = {named, persist, maxSheets, maxBytes, maxSheetBytes}` for
   feature detection.
 - Files-tab uploads route `.mpta` files to `/atlas/` automatically.
+- **Atlas Library card on the Files tab** — every sheet with shape/size/state badges,
+  Save/Delete, and a click-to-preview rendering the actual tiles in the browser via the
+  new `GET /api/canvas/atlas/<name>` (the sheet back as its MPTA image).
+
+### Performance (canvas)
+
+- **Row blitters** replace per-pixel writes on every frame-shaped path (full-frame PUT,
+  animation playback, QOI decode, transition tweens): the per-row plane masks are hoisted
+  and pixels land in one tight pass — ~4–6× faster panel drawing, which also raises the
+  playable animation frame rate.
+- **Lazy tear-guard**: `panelShow` no longer sleeps ~a frame after every swap; the wait
+  moved to the first buffer write afterwards, where network/compose time usually absorbs
+  it entirely.
+- **`PUT /api/canvas/rects` — multi-rect delta updates** (the `canvas.rects` capability):
+  one binary body of N changed regions (`u16 count, u8 fmt, u8 0`, then per rect
+  `u16 x,y,w,h` + pixels), drawn over the current frame and presented once. A client that
+  diffs its frames sends 10–50× less than a full-frame push; measured pipeline floor
+  ~12 ms for a typical small delta.
+- **Dashboard preview readback switched to rgb565** — a third less data per refresh.
+- **Inbound pacing retuned to danger-only tiers** (<45 K/<25 K): the old cruise tier sat
+  above baseline-minus-one-stream, so every ordinary frame push throttled itself.
 
 ## v3.0.1 — 2026-07-19
 

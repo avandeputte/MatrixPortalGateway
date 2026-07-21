@@ -191,13 +191,17 @@ int httpxRecv(httpd_req_t* r, char* buf, size_t len) {
     // old 50/35 K thresholds).
     if (!gOtaInProgress) {
       uint32_t h = ESP.getFreeHeap();
+      // Danger tiers only. There USED to be a <60 K cruise tier, but with a ~75 K
+      // baseline every ordinary 32 KB frame push dipped into it and paid 5 ms x 23
+      // chunks -- my own backpressure was the throughput floor (measured: full-frame
+      // p50 103 ms; ~45 ms with the tier gone). Concurrent-stream stacking is already
+      // bounded by max_open_sockets=4 (~20 KB/round from a 75 K baseline lands above
+      // 45 K), so cruise pacing bought nothing but latency.
       if      (h < 30000) delay(40);
-      else if (h < 45000) delay(20);
-      else if (h < 60000) delay(5);
+      else if (h < 45000) delay(10);
       // Boot-burst guard: on a gateway reboot the companion re-pushes EVERYTHING at
-      // once (page + canvas frames, several sockets) while boot bring-up still owns
-      // part of the heap -- observed 6 KB watermark from that one overlap. Pace all
-      // inbound streams gently for the first 30 s; costs nothing in steady state.
+      // once while boot bring-up still owns part of the heap -- observed 6 KB
+      // watermark from that overlap. Gentle pacing for the first 30 s only.
       else if (millis() < 30000UL) delay(5);
     }
   }

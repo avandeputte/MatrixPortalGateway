@@ -423,8 +423,29 @@ void panelClear() {
 static bool bgrOrder = false;
 void panelSetColourOrder(bool bgr) { bgrOrder = bgr; }
 
+// Lazy tear-guard (v3.1): panelShow used to SLEEP ~one frame after every swap so the CPU
+// could not draw into a buffer GDMA was still scanning. That parked the caller even when
+// nothing would draw for a while (every HTTP frame push ate it inside the request). Now
+// the swap only STAMPS the moment, and the wait happens at the FIRST buffer write after
+// it -- usually already absorbed by network transfer or compose time.
+static volatile bool     swapPending = false;
+static volatile uint32_t swapAtUs    = 0;
+static void panelWaitDrawable() {
+  if (!swapPending) return;
+  const uint32_t el = (uint32_t)(micros() - swapAtUs);
+  if (el < frameUs) {
+    const uint32_t rem = frameUs - el;
+    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+      vTaskDelay(pdMS_TO_TICKS(rem / 1000 + 1));
+    else
+      esp_rom_delay_us(rem);
+  }
+  swapPending = false;
+}
+
 void panelPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b) {
   if (!info.ok || x < 0 || y < 0 || x >= W || y >= H) return;
+  panelWaitDrawable();
   if (bgrOrder) { uint8_t t = r; r = b; b = t; }
   const bool lower = (y >= ROWS);
   const int  row   = lower ? (y - ROWS) : y;
@@ -457,6 +478,7 @@ void panelFillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b) 
   int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
   int x1 = (x + w > W) ? W : x + w, y1 = (y + h > H) ? H : y + h;
   if (x0 >= x1 || y0 >= y1) return;
+  panelWaitDrawable();
   if (bgrOrder) { uint8_t t = r; r = b; b = t; }
   const uint8_t qr = quant(r), qg = quant(g), qb = quant(b);
   for (int yy = y0; yy < y1; yy++) {
@@ -475,6 +497,66 @@ void panelFillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b) 
       for (int i = x1 - x0; i > 0; i--, wp++) *wp = (word_t)((*wp & mask) | set);
     }
   }
+}
+
+// Row blitters (v3.1): the frame-shaped paths (full-frame PUT, animation playback, QOI
+// decode, transition tweens) draw whole horizontal runs -- per-pixel panelPixel calls
+// cost ~20 ms a frame in call overhead, repeated row math and branchy bit assembly.
+// Same recipe as the fill fast path: quantize the run once, then one tight
+// read-modify-write pass per bitplane. ~4-6x faster than the per-pixel path.
+static uint8_t blitQ[3][PANEL_MAX_W];      // per-channel quantized run (panel width max)
+
+static void panelBlitRun(int x, int y, int n) {   // blitQ[]: n quantized pixels
+  const bool lower = (y >= ROWS);
+  const int  row   = lower ? (y - ROWS) : y;
+  const word_t rb = lower ? BIT_R2 : BIT_R1;
+  const word_t gb = lower ? BIT_G2 : BIT_G1;
+  const word_t bb = lower ? BIT_B2 : BIT_B1;
+  const word_t mask = (word_t)~(rb | gb | bb);
+  for (int p = 0; p < DEPTH; p++) {
+    word_t* wp = blockPtr(drawBuf, row, p) + x;
+    for (int i = 0; i < n; i++) {
+      word_t set = 0;
+      if ((blitQ[0][i] >> p) & 1) set |= rb;
+      if ((blitQ[1][i] >> p) & 1) set |= gb;
+      if ((blitQ[2][i] >> p) & 1) set |= bb;
+      wp[i] = (word_t)((wp[i] & mask) | set);
+    }
+  }
+}
+
+void panelBlitRow888(int x, int y, int n, const uint8_t* rgb) {
+  if (!info.ok || y < 0 || y >= H) return;
+  if (x < 0) { rgb -= 3 * x; n += x; x = 0; }
+  if (x + n > W) n = W - x;
+  if (n <= 0) return;
+  panelWaitDrawable();
+  const int ri = bgrOrder ? 2 : 0, bi = bgrOrder ? 0 : 2;
+  for (int i = 0; i < n; i++) {
+    blitQ[0][i] = quant(rgb[i * 3 + ri]);
+    blitQ[1][i] = quant(rgb[i * 3 + 1]);
+    blitQ[2][i] = quant(rgb[i * 3 + bi]);
+  }
+  panelBlitRun(x, y, n);
+}
+
+void panelBlitRow565(int x, int y, int n, const uint8_t* be565) {
+  if (!info.ok || y < 0 || y >= H) return;
+  if (x < 0) { be565 -= 2 * x; n += x; x = 0; }
+  if (x + n > W) n = W - x;
+  if (n <= 0) return;
+  panelWaitDrawable();
+  for (int i = 0; i < n; i++) {
+    const uint16_t v = ((uint16_t)be565[i * 2] << 8) | be565[i * 2 + 1];
+    uint8_t r = (uint8_t)(((v >> 11) & 0x1F) << 3);
+    uint8_t g = (uint8_t)(((v >> 5)  & 0x3F) << 2);
+    uint8_t b = (uint8_t)((v & 0x1F) << 3);
+    if (bgrOrder) { uint8_t t = r; r = b; b = t; }
+    blitQ[0][i] = quant(r);
+    blitQ[1][i] = quant(g);
+    blitQ[2][i] = quant(b);
+  }
+  panelBlitRun(x, y, n);
 }
 
 // Bresenham line from (x0,y0) to (x1,y1). panelPixel clamps, so off-panel endpoints are fine.
@@ -719,13 +801,11 @@ void panelShow() {
   drawBuf = (uint8_t)(next ^ 1);
 
   // GDMA may still be reading the buffer we just handed back to the CPU, for up to one
-  // pass of the chain. Yield rather than spin: this runs on taskDisplay, on the same
-  // core as the network stack, and busy-waiting a ~6 ms frame up to 50 times a second
-  // would eat a third of the core.
-  if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
-    vTaskDelay(pdMS_TO_TICKS(frameUs / 1000 + 1));
-  else
-    esp_rom_delay_us(frameUs);
+  // pass of the chain -- but instead of sleeping HERE (which parked every caller for a
+  // frame whether or not it would draw again soon), just stamp the swap; the first
+  // buffer write afterwards waits out whatever remains (panelWaitDrawable above).
+  swapPending = true;
+  swapAtUs    = micros();
 }
 
 void panelStop() {
