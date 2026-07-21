@@ -401,8 +401,11 @@ void panelSetBrightness(uint8_t b) {
 }
 
 // ---- drawing (back buffer) ----------------------------------------------------------
+static void panelWaitDrawable();    // defined with the tear-guard below
+
 void panelClear() {
   if (!info.ok) return;
+  panelWaitDrawable();              // same draw-guard as every other framebuffer write
   const uint32_t bodyLen = W;
   for (int r = 0; r < ROWS; r++)
     for (int p = 0; p < DEPTH; p++) {
@@ -789,10 +792,31 @@ void panelScroll(int dx, int dy, uint8_t fr, uint8_t fg, uint8_t fb) {
 static void (*sOverlay)(void) = nullptr;
 void panelSetOverlay(void (*fn)(void)) { sOverlay = fn; }
 
+static uint32_t lastSwapUs = 0;   // when the previous swap relinked the chain
+
 void panelShow() {
   if (sOverlay) sOverlay();   // draw the overlay into the outgoing frame (v2.1)
   if (!info.ok) return;
   if (brightPending) { writeControlBits(drawBuf); brightPending = (uint8_t)(brightPending - 1); }
+
+  // HARDWARE INVARIANT (v3.1, learned the hard way): never relink the descriptor
+  // chain twice within one scan pass. GDMA is traversing those descriptors as we
+  // rewrite their next pointers; the old always-sleep-after-swap code enforced at
+  // most one relink per pass as a side effect, and when respond-then-show removed
+  // that pacing, back-to-back swaps could catch the engine mid-traversal and halt
+  // the channel -- output dead, framebuffer fine, no error anywhere (the "black
+  // panel, healthy API" wedge, reproduced twice under soak load). Wait out the
+  // remainder of the previous swap's pass before touching the chain again.
+  {
+    const uint32_t el = (uint32_t)(micros() - lastSwapUs);
+    if (lastSwapUs && el < frameUs) {
+      const uint32_t rem = frameUs - el;
+      if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+        vTaskDelay(pdMS_TO_TICKS(rem / 1000 + 1));
+      else
+        esp_rom_delay_us(rem);
+    }
+  }
 
   const uint8_t next = drawBuf;
   desc[liveBuf][descN - 1].next = &desc[next][0];
@@ -808,6 +832,7 @@ void panelShow() {
   //   * every other caller (the HTTP canvas paths) gets the lazy guard: stamp the
   //     swap, and the first buffer write afterwards waits out whatever remains --
   //     usually absorbed entirely by network transfer time.
+  lastSwapUs = micros();
   if (xTaskGetCurrentTaskHandle() == hTaskDisp) {
     swapPending = false;
     if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
