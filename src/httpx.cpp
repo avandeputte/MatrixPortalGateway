@@ -240,19 +240,13 @@ bool httpxReadJson(httpd_req_t* r, JsonDocument& doc) {
 static esp_err_t dispatch(httpd_req_t* r) {
   gBusySince = millis();
   wdgWebMs   = millis();
-  // TCP_NODELAY: httpd writes headers and body separately, and with Nagle on, the
-  // second write stalls ~40 ms waiting for the client's delayed ACK -- measured as a
-  // hard 38-40 ms floor on every keep-alive request (an ops animation at that floor
-  // is a slideshow). The old server never saw it only because it closed the socket
-  // after every response. Setting it per-request is redundant but costs microseconds.
-  { int fd = httpd_req_to_sockfd(r);
-    int one = 1;
-    if (fd >= 0) {
-      setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-      // (SO_RCVBUF window-capping was tried here and did nothing on this prebuilt
-      // lwIP -- a 3-way concurrent hammer still drove min-heap to 268 bytes. The
-      // graded recv pacing in httpxRecv is what actually bounds buffer stacking.)
-    } }
+  // NO TCP_NODELAY -- deliberately. It was here from v3.0.1 to v3.1.0 (it removes a
+  // ~40 ms delayed-ACK floor on keep-alive responses) and it turned out Nagle's
+  // coalescing was load-bearing: with NODELAY every chunk goes out as its own eager
+  // segment, and under concurrent streams the segment/pbuf churn drove the min-heap
+  // watermark to 700 B where the identical scenario without NODELAY holds 47 K
+  // (A/B-measured, clean boots both sides). The ~40 ms floor is the price of a
+  // stable heap on this prebuilt lwIP. (SO_RCVBUF capping was also tried: no-op.)
   // Every REST answer carried this by hand in the WebServer era; set it once here.
   httpd_resp_set_hdr(r, "Access-Control-Allow-Origin", "*");
 

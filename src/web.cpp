@@ -746,7 +746,9 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
   // hand out, and answers this URL without these keys. Stated here so the companion lights up
   // canvas/effect controls from capabilities, not from a firmware-version sniff: `canvas` is the
   // framebuffer a client would push frames to, `effects` the on-device animation set.
-  { char cv[480];
+  { char cv[768];   // v3.1: the atlas descriptor + rects flag overflowed 480 and snprintf
+                    // TRUNCATED the JSON -- /api/capabilities went invalid, silently. Sized
+                    // with headroom and verified below.
     snprintf(cv, sizeof(cv),
              "\"canvas\":{\"formats\":[\"rgb888\",\"rgb565\",\"qoi\"],\"width\":%u,\"height\":%u,"
              "\"rect\":true,\"rects\":true,\"anim\":true,\"ticker\":true,\"readback\":true,"
@@ -758,6 +760,8 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
              (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
              (unsigned)ATLAS_MAX_SHEETS, (unsigned)ATLAS_TOTAL_BUDGET,
              (unsigned)ATLAS_MAX_SHEET_BYTES, effectListJson());
+    // A truncated canvas block would be INVALID JSON for every client; make it loud.
+    if (strlen(cv) >= sizeof(cv) - 1) printf("[WEB] capabilities canvas block TRUNCATED -- enlarge cv[]\n");
     capPut(cv); }
 
   // What the wall can DO, not just show, so a client reads this instead of sniffing the
