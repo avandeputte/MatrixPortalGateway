@@ -47,8 +47,34 @@
   diffs its frames sends 10–50× less than a full-frame push; measured pipeline floor
   ~12 ms for a typical small delta.
 - **Dashboard preview readback switched to rgb565** — a third less data per refresh.
-- **Inbound pacing retuned to danger-only tiers** (<45 K/<25 K): the old cruise tier sat
-  above baseline-minus-one-stream, so every ordinary frame push throttled itself.
+- ~~Inbound pacing retuned to danger-only tiers~~ — reverted; see Fixed below.
+
+### Fixed (hard-won, late in the cycle)
+
+- **The black-panel wedge, root-caused.** `panelShow` relinks the DMA descriptor chain
+  while GDMA is traversing it; the old always-sleep-after-swap pacing accidentally
+  enforced the hardware's real requirement (one relink per scan pass), and the v3.1
+  latency work removed it — back-to-back swaps could halt the channel: panel dark,
+  framebuffer and API perfectly healthy. `panelShow` now explicitly waits out the
+  remainder of the previous swap's pass. Confirmed by framebuffer readback showing the
+  correct wall while the physical panel showed nothing; endurance-tested 2 h clean.
+- **TCP_NODELAY reverted (from v3.0.1).** A/B on clean boots: an identical concurrent
+  scenario holds a 47 K min-heap with Nagle and collapses to 700 B with NODELAY — its
+  eager per-chunk segments churn pbufs under load. The ~40 ms delayed-ACK floor on
+  keep-alive responses returns as the price of heap stability; ops still land ~2×
+  faster than pre-3.0.1 thanks to the fill/show work.
+- **`GET /api/capabilities` was truncated into invalid JSON** once the atlas descriptor
+  and `rects` flag outgrew its fixed 480-byte canvas block. Now 768 B with a loud
+  truncation check.
+- Effects pulsing/stutter (the lazy tear-guard on the display task's render loops) —
+  the display task keeps the original show pacing; HTTP paths keep the lazy guard.
+
+### Certification
+
+2-hour adversarial soak on the final build (full rotation incl. delta-rects, 2
+persistent SSE clients, dashboard-style polls): **2,324 steps, 0 reboots, 0 alerts,
+0 refusals, min-heap 33.1 KB (plateau), heap drift +1.3 KB, SSE 21,361 events / 0
+drops, 2,820/2,820 polls.** Panel visually verified alive throughout.
 
 ## v3.0.1 — 2026-07-19
 
