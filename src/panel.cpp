@@ -801,11 +801,23 @@ void panelShow() {
   drawBuf = (uint8_t)(next ^ 1);
 
   // GDMA may still be reading the buffer we just handed back to the CPU, for up to one
-  // pass of the chain -- but instead of sleeping HERE (which parked every caller for a
-  // frame whether or not it would draw again soon), just stamp the swap; the first
-  // buffer write afterwards waits out whatever remains (panelWaitDrawable above).
-  swapPending = true;
-  swapAtUs    = micros();
+  // pass of the chain. Two policies (v3.1):
+  //   * taskDisplay (effects, animations, the wall renderer) keeps the ORIGINAL
+  //     sleep-now behaviour -- its draw/show loops were tuned against it, and making
+  //     the wait lazy made the clock effect visibly pulse and stutter.
+  //   * every other caller (the HTTP canvas paths) gets the lazy guard: stamp the
+  //     swap, and the first buffer write afterwards waits out whatever remains --
+  //     usually absorbed entirely by network transfer time.
+  if (xTaskGetCurrentTaskHandle() == hTaskDisp) {
+    swapPending = false;
+    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)
+      vTaskDelay(pdMS_TO_TICKS(frameUs / 1000 + 1));
+    else
+      esp_rom_delay_us(frameUs);
+  } else {
+    swapPending = true;
+    swapAtUs    = micros();
+  }
 }
 
 void panelStop() {
