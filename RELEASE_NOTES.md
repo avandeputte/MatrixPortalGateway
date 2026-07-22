@@ -51,6 +51,25 @@
   client-rendered from `GET /api/config`, which is what made the page byte-stable
   enough to pre-compress.
 
+### Certification
+
+2-hour adversarial soak on BOTH boards, final build (full rotation now including
+stream-channel bursts and full-wall pages on every module — a substantially harder
+profile than any previous certification — plus 2 persistent SSE clients and
+dashboard-style polling):
+
+- **256×64 board:** 2,255 steps, **0 reboots**, 0 errors, 0 refusals; min-heap
+  15.4 KB (stochastic trough; live heap steady ~68 KB, drift −2.7 KB ≈ noise);
+  29,964 SSE events / 0 drops; 281 stream bursts / 7,587 records / 0 errors;
+  2,801/2,801 polls.
+- **128×32 board:** 2,273 steps, **0 reboots**, 0 errors; min-heap 72.3 KB;
+  29,770 SSE events / 0 drops; 284 bursts / 7,668 records / 0 errors.
+
+The 256×64 board's 15 KB floor is a property of the torture profile (worst-case
+alignments of four concurrent sockets on ~68 KB of free internal heap), not of
+real-world load; the structural remedy — recompiling the core with smaller WiFi
+RX buffering — is queued as v3.3.0.
+
 ## v3.1.0 — 2026-07-19
 
 ### Changed (breaking)
