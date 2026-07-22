@@ -6,6 +6,7 @@
 #include "web_ui.h"
 #include <mbedtls/base64.h>   // the canvas "image" op decodes a base64 sprite
 #include <fcntl.h>            // non-blocking mode for the canvas stream socket (v3.2)
+#include <lwip/sockets.h>    // setsockopt on the stream socket at close (v3.3)
 
 
 
@@ -1307,27 +1308,33 @@ static void csSockBlocking(bool block) {
 // trying to purge body bytes that are not coming.
 static void csClose(bool ok, const char* why) {
   if (!cs.req) return;
-  httpd_handle_t hd = cs.req->handle;
-  const int fd = httpd_req_to_sockfd(cs.req);
-  if (ok) {
-    csSockBlocking(true);
-    char out[64];
-    snprintf(out, sizeof(out), "{\"ok\":true,\"records\":%lu}", (unsigned long)cs.records);
-    httpd_resp_set_type(cs.req, "application/json");
-    httpd_resp_set_hdr(cs.req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_send(cs.req, out, HTTPD_RESP_USE_STRLEN);
-    // Let the 200 drain before the session close. An immediate trigger_close raced the
-    // response flush and the client saw an RST instead of its 200 (~1 in 15 bursts on
-    // the PSRAM-buffers core, 0 in 281 on stock -- the flush timing shifted). The work
-    // is on the panel either way, but a stream client must be able to trust the close
-    // handshake. 30 ms on taskWeb (the pump's own task) is one tick.
-    delay(30);
-  }
-  httpd_req_async_handler_complete(cs.req);
+  httpd_req_t*  req = cs.req;
+  httpd_handle_t hd = req->handle;
+  const int     fd  = httpd_req_to_sockfd(req);
+  // The stream is CLOSED as of now: cs.req clears first so the 409 guard releases the
+  // REST surface before the drain delay below -- a client that got its 200 and moved
+  // straight on to a canvas call must not bounce (the first drain fix held cs.req
+  // through the delay and produced exactly those 409s).
   cs.req = nullptr;
-  if (fd >= 0) httpd_sess_trigger_close(hd, fd);
   if (cs.buf) { free(cs.buf); cs.buf = nullptr; cs.cap = 0; }
   cs.lastClose = why;
+  if (ok) {
+    struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };   // blocking send, bounded
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    const int fl = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+    char out[64];
+    snprintf(out, sizeof(out), "{\"ok\":true,\"records\":%lu}", (unsigned long)cs.records);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
+    // Let the 200 drain before the session close: an immediate trigger_close raced the
+    // response flush on the PSRAM-buffers core and the client saw an RST instead of
+    // its 200 (~1 in 15 bursts; 0 in 281 on stock). 30 ms on taskWeb is one pump tick.
+    delay(30);
+  }
+  httpd_req_async_handler_complete(req);
+  if (fd >= 0) httpd_sess_trigger_close(hd, fd);
   printf("[CANVAS] stream closed (%s, %lu records)\n", why, (unsigned long)cs.records);
 }
 
