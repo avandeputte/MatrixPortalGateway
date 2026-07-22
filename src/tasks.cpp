@@ -135,7 +135,12 @@ void taskWeb(void* pv) {
     // without flooding the sockets. The hash reads the reels under vmMutex; a miss
     // (busy lock) just retries next tick.
     if (sseClientCount() && !gOtaInProgress) {
-      if (now - lastPush >= 150) {
+      // Heap-graded (v3.2.0): one display event is ~6 KB of internal-heap TX pbufs per
+      // client, and a long flip cascade (a full 160-module page) sustains that at 7/s
+      // for seconds -- bisected as the deepest watermark driver on the 256x64 board
+      // (wall pages + 2 SSE alone: -37 KB from a clean boot). Under pressure the
+      // preview drops frames rather than the heap; the next healthy tick resyncs.
+      if (now - lastPush >= 150 && ESP.getFreeHeap() >= 40000) {
         uint32_t h = 2166136261u;                     // FNV-1a over the visible state
         if (vmMutex && xSemaphoreTake(vmMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
           for (int i = 0; i < vmCount; i++) {
