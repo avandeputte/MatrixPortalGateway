@@ -1,5 +1,37 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.3.0 — 2026-07-22
+
+### Changed
+
+- **The Arduino core is now recompiled at build time** (pioarduino `custom_sdkconfig`)
+  **with WiFi/lwIP buffers allocated from PSRAM** (`SPIRAM_TRY_ALLOCATE_WIFI_LWIP`).
+  This is the structural end of the deep-heap-trough class: network ingest/egress no
+  longer competes with the application for internal SRAM. Measured on the 256×64 board
+  (worst-alignment trough repro, clean boot each run): floors of **66.5 / 67.2 /
+  68.1 KB** versus 12–27 KB on the stock core; idle internal heap +9 KB; ops latency
+  and stream throughput unchanged (0.27 vs 0.28 MB/s on the identical full-frame
+  workload). Two candidate levers were measured as nulls first and are not shipped:
+  shrinking the WiFi RX buffer counts changed nothing, and the WiFi IRAM options are
+  already disabled in the stock Arduino core.
+- **Stream close handshake hardened**: the end-record 200 now drains before the
+  session closes (the PSRAM core's flush timing exposed a race — clients saw an RST
+  instead of the 200 about once in 15 bursts), and stream state clears before that
+  drain so an immediate follow-on canvas REST call never bounces with a 409.
+
+### Certification
+
+2-hour adversarial soak on the 256×64 board (full rotation with stream bursts and
+full-wall pages, 2 SSE clients, dashboard polls): **2,243 steps, 0 reboots, 0 errors,
+0 refusals, min-heap 65.3 KB** (was 15.4 KB on v3.2.0 under the identical profile),
+heap drift +132 B, 29,874 SSE events / 0 drops, 280 stream bursts / 7,560 records /
+0 errors. Serial captured throughout: no panics, no watchdogs.
+
+Note for builders: the first `pio run` after this change recompiles the entire core
+(~10–20 min) and needs network access for IDF component fetches. To return to the
+stock prebuilt core: remove the `custom_sdkconfig` block from `platformio.ini`, delete
+`.pio/build`, `managed_components/`, `sdkconfig.*`, and rebuild.
+
 ## v3.2.0 — 2026-07-22
 
 ### Added
