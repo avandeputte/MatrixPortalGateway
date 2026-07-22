@@ -3,3 +3,9 @@
 .DS_Store
 .claude/
 __pycache__/
+
+# pioarduino hybrid-recompile artifacts (custom_sdkconfig builds)
+.dummy/
+managed_components/
+sdkconfig.defaults
+sdkconfig.waveshare_matrix*
