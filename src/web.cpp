@@ -1369,7 +1369,15 @@ void canvasStreamPump() {
   if (!cs.req) return;
   if (gOtaInProgress) { csClose(false, "ota"); return; }
   cs.ticks++;
-  size_t budget = 65536;
+  // Heap-graded drain budget, mirroring httpxRecv's certified ladder (httpx.cpp): the
+  // stream is the one ingest path that does not pass through httpxRecv, and an
+  // unthrottled drain let a client blast records into the RX path while internal heap
+  // was already dipping (board 1 soak: watermark 22 KB vs v3.1.0's 33 KB floor). Not
+  // draining IS backpressure -- unread data fills the TCP window and the client
+  // stalls; lastRx is refreshed so a throttled client is never idle-aborted.
+  const uint32_t h = ESP.getFreeHeap();
+  if (h < 30000) { cs.lastRx = millis(); return; }
+  size_t budget = (h < 45000) ? 8192 : (h < 60000) ? 24576 : 65536;
   while (budget) {
     int n;
     if (!cs.inRec) {                              // collect the 4-byte record header
