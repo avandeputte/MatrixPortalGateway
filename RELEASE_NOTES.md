@@ -22,6 +22,17 @@
   while the stream is up (and returns as a fallback when it drops): fewer connections,
   fresher numbers.
 
+### Hardening
+
+- **Heap-graded backpressure extended to the two paths that bypassed it.** The stream
+  pump's per-tick drain budget now follows the same ladder as `httpxRecv` (below 30 KB
+  internal heap it stops draining entirely — the TCP window fills and the client
+  stalls), and SSE `display` broadcasts are skipped while internal heap is under 40 KB
+  (the preview drops frames rather than the heap; the next healthy tick resyncs).
+  Bisected on the 256×64 board: a full 160-module page with two SSE clients sustained
+  ~6 KB events at 7 events/s and alone dipped the watermark 41 KB from a clean boot —
+  the guard halves that to 19 KB.
+
 ### Performance
 
 - **Glyph run-blitter** — flap-font glyphs (ops `text`, ticker, wall cells in pixel
