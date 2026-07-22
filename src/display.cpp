@@ -283,11 +283,25 @@ void dispDrawGlyph1252(int px, int py, const Font1252* f, uint8_t ch,
   if (gi == 0xFF) return;
   if (rowFrom < 0) rowFrom = 0;
   if (rowTo > f->height) rowTo = f->height;
+  // Run-blit (v3.2): draw each row's contiguous set-bit RUNS through the row blitter
+  // instead of one guarded panelPixel per bit. Transparency is preserved exactly --
+  // only set bits are written, which matters for ops text over canvas content -- while
+  // a typical glyph row collapses from ~16 per-pixel calls into 1-3 run blits. The
+  // wall repaints up to 160 glyph cells per frame on the WiFi core, so this is the
+  // difference between cascades costing milliseconds and costing a WiFi stall.
+  static uint8_t ink[16 * 3];               // widest face is 16 px
+  for (int i = 0; i < f->width; i++) { ink[i*3] = r; ink[i*3+1] = g; ink[i*3+2] = b; }
   for (int row = rowFrom; row < rowTo; row++) {
     uint16_t bits = font1252Row(*f, gi, (uint8_t)row);
     if (!bits) continue;
-    for (int col = 0; col < f->width; col++)
-      if (bits & (uint16_t)(0x8000 >> col)) panelPixel(px + col, py + row, r, g, b);
+    int col = 0;
+    while (col < f->width) {
+      if (!(bits & (uint16_t)(0x8000 >> col))) { col++; continue; }
+      int run = col;
+      while (run < f->width && (bits & (uint16_t)(0x8000 >> run))) run++;
+      panelBlitRow888(px + col, py + row, run - col, ink);
+      col = run;
+    }
   }
 }
 

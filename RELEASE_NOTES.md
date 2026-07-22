@@ -1,5 +1,38 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.2.0 — 2026-07-22
+
+### Added
+
+- **`PUT /api/canvas/stream` — a persistent TLV draw channel.** One long-lived PUT
+  carries draw records back-to-back (full frame, rect deltas, ops JSON, atlas bind,
+  show, end), executed as they arrive by a pump on the web task. No per-frame HTTP
+  round trip and no per-record response, so the ~40 ms delayed-ACK floor on
+  request/response traffic does not apply — a rect-delta animation measured **28 fps
+  client-paced** over one connection. One stream at a time; the drawing REST endpoints
+  answer `409` while it is open; a malformed record or a 30 s idle spell aborts the
+  stream (the panel keeps its last frame). `GET /api/canvas/stream` reports channel
+  state and why the previous stream ended. Advertised as `canvas.stream` in
+  capabilities. **Client note:** send the first record in the same write as the
+  request head — a bare body-carrying head parse-blocks stock esp_http_server's
+  worker for the 8 s socket timeout (a generic behaviour of the embedded server, not
+  specific to this route).
+- **SSE `status` events** — `GET /api/events` now pushes the `GET /api/status` JSON
+  every 5 s alongside `display` events. The dashboard's 3 s status poller stands down
+  while the stream is up (and returns as a fallback when it drops): fewer connections,
+  fresher numbers.
+
+### Performance
+
+- **Glyph run-blitter** — flap-font glyphs (ops `text`, ticker, wall cells in pixel
+  paths) draw as contiguous set-bit runs through the row blitter instead of per-pixel
+  writes, keeping transparency for text over canvas content.
+- **Pre-gzipped dashboard** — the page is compressed at build time (54 KB → 17 KB on
+  the wire) and served with `Content-Encoding: gzip` when the browser allows it, in
+  4 KB chunks; plain streaming remains the fallback. The footer version is now
+  client-rendered from `GET /api/config`, which is what made the page byte-stable
+  enough to pre-compress.
+
 ## v3.1.0 — 2026-07-19
 
 ### Changed (breaking)

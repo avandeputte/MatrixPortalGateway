@@ -26,6 +26,7 @@ void sseInit();                  // create the slot mutex (called from webInit)
 esp_err_t sseHandleRequest(httpd_req_t* r);   // GET /api/events handler (httpd task)
 int  sseClientCount();           // open streams right now (0..SSE_MAX_CLIENTS)
 void sseBroadcastDisplay();      // push the current display state to every stream
+void sseBroadcastStatus();       // push the status JSON (the dashboard drops its 3 s poll)
 void sseKeepalive();             // ": ka" comment so proxies/timeouts keep the pipe warm
 void sseCloseAll();              // drop every stream (before an httpd restart)
 

@@ -122,6 +122,12 @@ def build() -> tuple[str, list]:
         json.dumps(langs, ensure_ascii=False, separators=(",", ":")), 1)
 
     parts = [HEADER, page, ')====="', ";\n\n"]
+    # The page itself, pre-gzipped (v3.2): fully static now that the version footer is
+    # client-rendered from /api/config, so it compresses whole (~4x) and handleRoot can
+    # serve it with Content-Encoding: gzip. The plain PAGE_HTML stays for clients that
+    # don't accept gzip.
+    page_gz = gzip.compress(page.encode("utf-8"), 9, mtime=0)
+    parts.append(c_bytes("PAGE_HTML_GZ", page_gz))
     for code, _name, gz in dicts:
         parts.append(c_bytes(f"LANG_{code.replace('-', '_').upper()}", gz))
     parts.append("\nstruct UiLang { const char* code; const char* name;"

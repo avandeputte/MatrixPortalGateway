@@ -5,6 +5,7 @@
 #include "sse.h"     // GET /api/events: the live-preview push stream (v3.0)
 #include "web_ui.h"
 #include <mbedtls/base64.h>   // the canvas "image" op decodes a base64 sprite
+#include <fcntl.h>            // non-blocking mode for the canvas stream socket (v3.2)
 
 
 
@@ -136,33 +137,28 @@ static esp_err_t handleLang(httpd_req_t* r) {
 
 // GET /
 static esp_err_t handleRoot(httpd_req_t* r) {
-  wdgWebMs = millis();                 // streaming response can take a while
-  // Cap per-write blocking so a stalled browser cannot wedge taskWeb. This must be
-  // setConnectionTimeout(): NetworkClient keeps its own `_timeout` (which is what
-  // seeds SO_SNDTIMEO) and does NOT override Stream::setTimeout(), so the old
-  // setTimeout(3000) here set the *read* timeout and capped nothing at all.
+  wdgWebMs = millis();
   // The page is baked into the firmware, so its bytes change only when the firmware
   // is rebuilt -- and every rebuild changes __TIME__. Serve it with that as an ETag
-  // and honour If-None-Match: navigating away and back then costs a tiny 304 instead
-  // of re-downloading the whole ~65 KB page, while a reflash still busts the cache and
-  // delivers the new UI. (The old no-store forced a full re-download on every visit.)
+  // and honour If-None-Match: navigating away and back then costs a tiny 304.
   httpd_resp_set_hdr(r, "ETag", BUILD_ETAG);
   httpd_resp_set_hdr(r, "Cache-Control", "no-cache");   // revalidate, but cheaply (304)
   if (httpxHeader(r, "If-None-Match") == BUILD_ETAG) { return httpxSend(r, 304, "text/html", ""); }
   httpd_resp_set_type(r, "text/html");
-  // Stream the static page (web_ui.h), substituting the single {FWVER} token
-  // with the firmware version so the page stays tied to the FW_VERSION macro.
-  const char*  page  = PAGE_HTML;
-  const size_t total = sizeof(PAGE_HTML) - 1;
-  const char*  mark  = strstr(page, "{FWVER}");
-  if (mark) {
-    streamPage(r, page, (size_t)(mark - page));
-    httpxChunkStr(r, FW_VERSION);
-    streamPage(r, mark + 7, total - (size_t)(mark + 7 - page));  // 7 = strlen("{FWVER}")
-  } else {
-    streamPage(r, page, total);
+  // Pre-gzipped whole (v3.2, ~4x smaller; the version footer is client-rendered from
+  // /api/config, so nothing needs substituting server-side any more). Plain fallback
+  // for clients that don't accept gzip.
+  if (httpxHeader(r, "Accept-Encoding").indexOf("gzip") >= 0) {
+    httpd_resp_set_hdr(r, "Content-Encoding", "gzip");
+    for (size_t off = 0; off < sizeof(PAGE_HTML_GZ); off += 4096) {
+      size_t c = (sizeof(PAGE_HTML_GZ) - off < 4096) ? (sizeof(PAGE_HTML_GZ) - off) : 4096;
+      httpxChunk(r, (const char*)(PAGE_HTML_GZ + off), c);
+      wdgWebMs = millis();
+    }
+    return httpxChunkEnd(r);
   }
-  return httpxChunkEnd(r);             // terminate the chunked response
+  streamPage(r, PAGE_HTML, sizeof(PAGE_HTML) - 1);
+  return httpxChunkEnd(r);
 }
 
 // GET /api/log -- the command log, newest entries since last poll
@@ -751,7 +747,7 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
                     // with headroom and verified below.
     snprintf(cv, sizeof(cv),
              "\"canvas\":{\"formats\":[\"rgb888\",\"rgb565\",\"qoi\"],\"width\":%u,\"height\":%u,"
-             "\"rect\":true,\"rects\":true,\"anim\":true,\"ticker\":true,\"readback\":true,"
+             "\"rect\":true,\"rects\":true,\"stream\":true,\"anim\":true,\"ticker\":true,\"readback\":true,"
              "\"atlas\":{\"named\":true,\"persist\":true,\"maxSheets\":%u,"
              "\"maxBytes\":%u,\"maxSheetBytes\":%u},"
              "\"ops\":[\"clear\",\"pixel\",\"hline\",\"vline\",\"line\",\"rect\",\"circle\",\"ellipse\","
@@ -772,8 +768,8 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
   return httpxChunkEnd(r);
 }
 
-// GET /api/status
-static esp_err_t handleApiStatus(httpd_req_t* r) {
+// The status JSON, shared by GET /api/status and the SSE `status` event (v3.2).
+size_t statusJson(char* outBuf, size_t outCap) {
   // Use snprintf to avoid JsonDocument heap allocation (called every 3s by browser)
   char rtcBuf[24]; rtcFormatTime(rtcBuf, sizeof(rtcBuf));
   IPAddress lip = WiFi.localIP(), aip = WiFi.softAPIP();
@@ -788,8 +784,7 @@ static esp_err_t handleApiStatus(httpd_req_t* r) {
   // v3.0: seconds since the companion last checked in (-1 = never / deregistered)
   long compAge = gCompanionSeenMs ? (long)((millis() - gCompanionSeenMs) / 1000UL) : -1;
   unsigned stkDsp = hTaskDisp ? uxTaskGetStackHighWaterMark(hTaskDisp) : 0;
-  char out[900];
-  snprintf(out, sizeof(out),
+  size_t n = (size_t)snprintf(outBuf, outCap,
     "{\"uptime\":%lu,\"tx\":%lu,"
     "\"wifi\":%s,\"ip\":\"%d.%d.%d.%d\",\"apip\":\"%d.%d.%d.%d\","
     "\"heap\":%u,\"minheap\":%u,\"modules\":%d,"
@@ -812,6 +807,13 @@ static esp_err_t handleApiStatus(httpd_req_t* r) {
     ntpSynced?"true":"false",
     gQuietTime?"true":"false",
     cfg.companionUrl, gCompanionStatus, compAge);
+  return n < outCap ? n : outCap - 1;
+}
+
+// GET /api/status
+static esp_err_t handleApiStatus(httpd_req_t* r) {
+  char out[900];
+  statusJson(out, sizeof(out));
   return httpxSend(r, 200, "application/json", out);
 }
 
@@ -1245,6 +1247,205 @@ static void canvasEnter(bool clear) {
 }
 static void canvasLeave() { dispReturnToWall(); }              // hand the panel back (no-op if idle)
 
+/* ---- PUT /api/canvas/stream: persistent TLV draw channel (v3.2) --------------------
+   One long-lived PUT carrying draw records back-to-back, executed as they arrive. No
+   per-frame HTTP round trip -- and, crucially, no per-frame RESPONSE, so the ~40 ms
+   Nagle/delayed-ACK floor on request-response traffic does not apply: the client just
+   keeps writing. Record framing (big-endian): u8 type, u24 payload length, payload.
+     0x01 frame  u8 fmt (2=rgb565 BE, 3=rgb888) + W*H*bpp pixels    draw, no present
+     0x02 rects  the PUT /api/canvas/rects body verbatim            draw, no present
+     0x03 ops    a JSON array as POST /api/canvas/ops ("show" op presents)
+     0x04 atlas  sheet name to bind (as the "atlas" op)
+     0x05 show   present the back buffer
+     0x00 end    close: the gateway answers 200 {"ok":true,"records":N} and closes
+   The client declares a large placeholder Content-Length (inbound chunked encoding is
+   not supported) and just stops at the end record. The handler parks the request with
+   httpd_req_async_handler_begin and flips the socket non-blocking; taskWeb's pump
+   (canvasStreamPump) drains and executes records so the single httpd worker is never
+   captured. One stream at a time; drawing REST endpoints answer 409 while it is open.
+   A malformed record aborts the stream (the panel keeps its last frame). */
+static bool canvasRectsApply(const uint8_t* body, size_t len, int* outDone);
+static int  canvasOpsRun(JsonArrayConst ops, bool* shownOut);
+
+static struct {
+  httpd_req_t*  req  = nullptr;        // parked async request; non-null = stream open
+  uint8_t*      buf  = nullptr;        // record payload accumulator (PSRAM)
+  size_t        cap  = 0;
+  uint8_t       hdr[4]; uint8_t hdrN = 0;
+  uint8_t       type = 0;
+  uint32_t      need = 0, got = 0;     // current record payload progress
+  bool          inRec = false;
+  uint32_t      records = 0;
+  unsigned long lastRx = 0;            // idle-abort clock
+  // Diagnostics (GET /api/canvas/stream): the pump runs on taskWeb where printf may be
+  // unreadable (no USB), so its recent history is inspectable over HTTP.
+  uint32_t      ticks = 0;             // pump invocations since open
+  int           lastRecv = 99;         // last httpd_req_recv return value
+  const char*   lastClose = "-";       // why the previous stream ended
+} cs;
+
+bool canvasStreamActive() { return cs.req != nullptr; }
+
+// 409 for the drawing REST endpoints while the stream owns the canvas: interleaved
+// one-shot draws would fight the pump for the back buffer mid-record.
+static bool csBusy(httpd_req_t* r) {
+  if (!cs.req) return false;
+  httpxErr(r, 409, "canvas stream active -- close it first");
+  return true;
+}
+
+static void csSockBlocking(bool block) {
+  const int fd = httpd_req_to_sockfd(cs.req);
+  if (fd < 0) return;
+  const int fl = fcntl(fd, F_GETFL, 0);
+  fcntl(fd, F_SETFL, block ? (fl & ~O_NONBLOCK) : (fl | O_NONBLOCK));
+}
+
+// Tear the stream down. ok: the end record arrived -- answer 200 first (blocking
+// socket again for the send). Either way the SESSION is closed, not recycled: the
+// placeholder Content-Length was never fulfilled, and httpd would otherwise stall
+// trying to purge body bytes that are not coming.
+static void csClose(bool ok, const char* why) {
+  if (!cs.req) return;
+  httpd_handle_t hd = cs.req->handle;
+  const int fd = httpd_req_to_sockfd(cs.req);
+  if (ok) {
+    csSockBlocking(true);
+    char out[64];
+    snprintf(out, sizeof(out), "{\"ok\":true,\"records\":%lu}", (unsigned long)cs.records);
+    httpd_resp_set_type(cs.req, "application/json");
+    httpd_resp_set_hdr(cs.req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(cs.req, out, HTTPD_RESP_USE_STRLEN);
+  }
+  httpd_req_async_handler_complete(cs.req);
+  cs.req = nullptr;
+  if (fd >= 0) httpd_sess_trigger_close(hd, fd);
+  if (cs.buf) { free(cs.buf); cs.buf = nullptr; cs.cap = 0; }
+  cs.lastClose = why;
+  printf("[CANVAS] stream closed (%s, %lu records)\n", why, (unsigned long)cs.records);
+}
+
+// Execute one complete record (type cs.type, payload cs.buf/cs.need).
+// False = protocol error; the pump aborts the stream.
+static bool csExec() {
+  switch (cs.type) {
+    case 0x01: {                                  // full frame: u8 fmt + rows
+      if (cs.need < 1) return false;
+      const uint8_t bpp  = cs.buf[0];
+      const size_t  rowB = (size_t)gPanel.panelW * bpp;
+      if ((bpp != 2 && bpp != 3) || cs.need != 1 + rowB * (size_t)gPanel.panelH) return false;
+      canvasEnter(false);
+      const uint8_t* p = cs.buf + 1;
+      for (int y = 0; y < gPanel.panelH; y++, p += rowB) {
+        if (bpp == 3) panelBlitRow888(0, y, gPanel.panelW, p);
+        else          panelBlitRow565(0, y, gPanel.panelW, p);
+      }
+      return true;
+    }
+    case 0x02: return canvasRectsApply(cs.buf, cs.need, nullptr);
+    case 0x03: {                                  // ops JSON array
+      JsonDocument doc;
+      if (deserializeJson(doc, (const char*)cs.buf, cs.need) || !doc.is<JsonArray>()) return false;
+      canvasEnter(false);
+      canvasOpsRun(doc.as<JsonArrayConst>(), nullptr);   // presents only via its "show" op
+      return true;
+    }
+    case 0x04: {                                  // bind a named atlas sheet
+      char name[40];
+      const size_t n = min((size_t)cs.need, sizeof(name) - 1);
+      memcpy(name, cs.buf, n); name[n] = 0;
+      canvasAtlasBind(name);
+      return true;
+    }
+    case 0x05: canvasEnter(false); panelShow(); return true;
+    default:   return false;                      // unknown type: the framing is not trustworthy
+  }
+}
+
+// The stream pump: called from taskWeb every tick while a stream is open. Drains and
+// executes whatever has arrived, up to a per-tick byte budget so taskWeb's other
+// duties (SSE, watchdog cover) keep their cadence.
+void canvasStreamPump() {
+  if (!cs.req) return;
+  if (gOtaInProgress) { csClose(false, "ota"); return; }
+  cs.ticks++;
+  size_t budget = 65536;
+  while (budget) {
+    int n;
+    if (!cs.inRec) {                              // collect the 4-byte record header
+      n = httpd_req_recv(cs.req, (char*)cs.hdr + cs.hdrN, 4 - cs.hdrN);
+      if (n > 0) {
+        cs.hdrN += (uint8_t)n;
+        if (cs.hdrN == 4) {
+          cs.type = cs.hdr[0];
+          cs.need = ((uint32_t)cs.hdr[1] << 16) | ((uint32_t)cs.hdr[2] << 8) | cs.hdr[3];
+          if (cs.type == 0x00) { csClose(true, "end"); return; }
+          if (cs.need > cs.cap) { csClose(false, "oversized record"); return; }
+          cs.got = 0; cs.inRec = true;
+        }
+      }
+    } else {
+      n = httpd_req_recv(cs.req, (char*)cs.buf + cs.got,
+                         min((size_t)(cs.need - cs.got), budget));
+      if (n > 0) cs.got += (uint32_t)n;
+    }
+    cs.lastRecv = n;
+    if (n == HTTPD_SOCK_ERR_TIMEOUT) break;       // nothing more right now
+    if (n <= 0) { csClose(false, "peer closed"); return; }
+    budget -= min((size_t)n, budget);
+    cs.lastRx = millis();
+    wdgWebMs  = millis();
+    if (cs.inRec && cs.got == cs.need) {          // record complete (covers len-0 records)
+      cs.inRec = false; cs.hdrN = 0;
+      if (!csExec()) {
+        printf("[CANVAS] stream: bad record type 0x%02x len %lu\n", cs.type, (unsigned long)cs.need);
+        csClose(false, "bad record");
+        return;
+      }
+      cs.records++;
+    }
+  }
+  // Quiet spell: keep httpd's LRU purge off this socket, and give up on a dead client.
+  httpd_sess_update_lru_counter(cs.req->handle, httpd_req_to_sockfd(cs.req));
+  if (millis() - cs.lastRx > 30000UL) csClose(false, "idle timeout");
+}
+
+// GET /api/canvas/stream -- stream channel state (diagnostics + client discovery).
+static esp_err_t handleApiCanvasStreamGet(httpd_req_t* r) {
+  char buf[192];
+  snprintf(buf, sizeof(buf),
+           "{\"open\":%s,\"records\":%lu,\"ticks\":%lu,\"lastRecv\":%d,"
+           "\"inRec\":%s,\"need\":%lu,\"got\":%lu,\"lastClose\":\"%s\"}",
+           cs.req ? "true" : "false", (unsigned long)cs.records, (unsigned long)cs.ticks,
+           cs.lastRecv, cs.inRec ? "true" : "false", (unsigned long)cs.need,
+           (unsigned long)cs.got, cs.lastClose);
+  return httpxSend(r, 200, "application/json", buf);
+}
+
+// PUT /api/canvas/stream -- open the channel (see the block comment above).
+static esp_err_t handleApiCanvasStream(httpd_req_t* r) {
+  if (!gPanel.ready)     return httpxErr(r, 503, "Panel not running");
+  if (cs.req)            return httpxErr(r, 409, "a stream is already open");
+  if (gOtaInProgress)    return httpxErr(r, 503, "OTA in progress");
+  if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP)
+    return httpxErr(r, 507, "Low on memory -- try again in a moment");
+  const size_t cap = (size_t)gPanel.panelW * gPanel.panelH * 3 * 2 + 4 + 256 * 8;  // = rects cap, covers a frame
+  cs.buf = (uint8_t*)ps_malloc(cap);
+  if (!cs.buf) cs.buf = (uint8_t*)malloc(cap);
+  if (!cs.buf) return httpxErr(r, 503, "Out of memory");
+  cs.cap = cap; cs.hdrN = 0; cs.inRec = false; cs.records = 0; cs.lastRx = millis();
+  httpd_req_t* async = nullptr;
+  if (httpd_req_async_handler_begin(r, &async) != ESP_OK) {
+    free(cs.buf); cs.buf = nullptr; cs.cap = 0;
+    return httpxErr(r, 503, "async unavailable");
+  }
+  cs.req = async;                     // the socket now belongs to the pump (taskWeb)
+  csSockBlocking(false);
+  canvasEnter(false);
+  printf("[CANVAS] stream open\n");
+  return ESP_OK;
+}
+
 // The bundled face closest to a requested pixel height; 6x10 is the readable default.
 static const Font1252* canvasFace(int size) {
   switch (size) {
@@ -1292,6 +1493,7 @@ static void pxDecode(const uint8_t* c, uint8_t bpp, uint8_t& r, uint8_t& g, uint
 // GET  /api/canvas -> {active,width,height,formats}   POST {"active":bool} take over / release.
 static esp_err_t handleApiCanvas(httpd_req_t* r) {
   if (r->method == HTTP_POST) {
+    if (csBusy(r)) return ESP_OK;
     JsonDocument doc;
     if (!httpxReadJson(r, doc)) return ESP_OK;
     if (doc["active"] | false) canvasEnter(true); else canvasLeave();
@@ -1318,6 +1520,7 @@ static esp_err_t handleApiCanvas(httpd_req_t* r) {
 // "none", return to the wall. Supersedes raw-canvas mode -- the display task, not HTTP, owns the
 // panel -- so it clears gCanvasMode too.
 static esp_err_t handleApiCanvasEffect(httpd_req_t* r) {
+  if (csBusy(r)) return ESP_OK;
   if (!gPanel.ready) { httpxErr(r, 503, "Panel not running"); return ESP_OK; }
   JsonDocument doc;
   if (!httpxReadJson(r, doc)) return ESP_OK;
@@ -1460,6 +1663,7 @@ static esp_err_t handleApiAnimSave(httpd_req_t* r) {
 
 // POST /api/canvas/anim/play {"name":"x"} -- load a library animation and play it.
 static esp_err_t handleApiAnimPlay(httpd_req_t* r) {
+  if (csBusy(r)) return ESP_OK;
   if (!gPanel.ready) { httpxErr(r, 503, "Panel not running"); return ESP_OK; }
   if (gQuietTime)    { httpxErr(r, 409, "Quiet Time is active"); return ESP_OK; }
   JsonDocument doc;
@@ -1496,14 +1700,13 @@ static esp_err_t handleApiAnimList(httpd_req_t* r) {
 // | pixel | hline | vline | line | rect(+fill) | circle(+fill) | ellipse(+fill) | triangle(+fill) |
 // roundrect(+fill) | gradient | polyline | text(+align) | image | scroll | show. Colours are [r,g,b],
 // default white (black for clear). Auto-takes-over the panel.
-static esp_err_t handleApiCanvasOps(httpd_req_t* r) {
-  if (!gPanel.ready) { httpxErr(r, 503, "Panel not running"); return ESP_OK; }
-  JsonDocument doc;
-  if (!httpxReadJson(r, doc)) return ESP_OK;
-  if (!doc.is<JsonArray>()) { httpxErr(r, 400, "Body must be a JSON array of ops"); return ESP_OK; }
-  canvasEnter(false);
+// Execute a JSON array of drawing ops against the back buffer. Returns the count
+// applied; *shown reports whether the batch contained an explicit "show". Shared by
+// POST /api/canvas/ops and the stream channel's ops record (v3.2). Caller must have
+// entered canvas mode (canvasEnter) first.
+static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
   int applied = 0; bool shown = false;
-  for (JsonVariantConst op : doc.as<JsonArrayConst>()) {
+  for (JsonVariantConst op : ops) {
     const char* k = op["op"] | "";
     int x = op["x"] | 0, y = op["y"] | 0, w = op["w"] | 0, h = op["h"] | 0;
     if (!strcmp(k, "clear")) {
@@ -1579,6 +1782,20 @@ static esp_err_t handleApiCanvasOps(httpd_req_t* r) {
     } else continue;                      // unknown op: skip, do not count
     applied++;
   }
+  if (shownOut) *shownOut = shown;
+  return applied;
+}
+
+// POST /api/canvas/ops
+static esp_err_t handleApiCanvasOps(httpd_req_t* r) {
+  if (!gPanel.ready) { httpxErr(r, 503, "Panel not running"); return ESP_OK; }
+  if (csBusy(r)) return ESP_OK;
+  JsonDocument doc;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
+  if (!doc.is<JsonArray>()) { httpxErr(r, 400, "Body must be a JSON array of ops"); return ESP_OK; }
+  canvasEnter(false);
+  bool shown = false;
+  const int applied = canvasOpsRun(doc.as<JsonArrayConst>(), &shown);
   // Answer BEFORE the auto-show: panelShow parks ~one frame as its tear-guard, and
   // serializing that inside the request cost every ops frame ~14 ms of round-trip.
   // Sent after the reply, the wait overlaps the client preparing its next frame.
@@ -1596,6 +1813,7 @@ static esp_err_t handleApiCanvasOps(httpd_req_t* r) {
 // after the last byte. Bodies stream through httpxBuf, the shared raw-body buffer (httpx.h).
 static esp_err_t handleApiCanvasFrame(httpd_req_t* r) {
   if (!gPanel.ready) return httpxErr(r, 503, "Panel not running");
+  if (cs.req) return httpxErr(r, 409, "canvas stream active -- close it first");
   const size_t px  = (size_t)gPanel.panelW * gPanel.panelH;
   const size_t len = (size_t)r->content_len;
   uint8_t bpp;
@@ -1682,6 +1900,7 @@ static esp_err_t handleApiCanvasFrameGet(httpd_req_t* r) {
 // Drawn ON TOP of what is on screen: the back buffer is synced to the live frame first.
 static esp_err_t handleApiCanvasRect(httpd_req_t* r) {
   if (!gPanel.ready) return httpxErr(r, 503, "Panel not running");
+  if (cs.req) return httpxErr(r, 409, "canvas stream active -- close it first");
   static const char* BAD = "Body must be an 8-byte x,y,w,h header then w*h*3 or w*h*2 pixels";
   const size_t len = (size_t)r->content_len;
   if (len < 8) return httpxErr(r, 400, BAD);
@@ -1726,39 +1945,18 @@ static esp_err_t handleApiCanvasRect(httpd_req_t* r) {
   return httpxSend(r, 200, "application/json", buf);
 }
 
-// PUT /api/canvas/rects -- multi-rect DELTA update (v3.1): one body carrying N changed
-// regions, drawn over what is on screen, presented once. The network fix for full-frame
-// re-sends: a client that diffs its frames sends 10-50x less. Body (big-endian):
-//   u16 count, u8 fmt (2=rgb565 BE, 3=rgb888), u8 reserved(0),
-//   then per rect: u16 x, u16 y, u16 w, u16 h, then w*h*bpp pixels.
-// Buffered whole (deltas are small by design; cap = 2 full frames), parsed linearly,
-// rows blitted. No transitions -- deltas are incremental updates, not presents.
-static esp_err_t handleApiCanvasRects(httpd_req_t* r) {
-  if (!gPanel.ready) return httpxErr(r, 503, "Panel not running");
-  if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP)
-    return httpxErr(r, 507, "Low on memory -- try again in a moment");
-  static const char* BAD = "Body must be u16 count, u8 fmt, u8 0, then per rect u16 x,y,w,h + w*h*bpp pixels";
-  const size_t len = (size_t)r->content_len;
-  const size_t cap = (size_t)gPanel.panelW * gPanel.panelH * 3 * 2 + 4 + 256 * 8;
-  if (len < 4)   return httpxErr(r, 400, BAD);
-  if (len > cap) return httpxErr(r, 413, "Body exceeds two full frames -- send a frame instead");
-
-  uint8_t* body = (uint8_t*)ps_malloc(len);
-  if (!body) return httpxErr(r, 503, "Out of memory");
-  size_t got = 0;
-  while (got < len) {
-    int n = httpxRecv(r, (char*)body + got, len - got);
-    if (n <= 0) { free(body); return httpxErr(r, 400, "Truncated body"); }
-    got += (size_t)n;
-  }
-
+// Parse and blit a rects body -- u16 count, u8 fmt, u8 0, then per rect u16 x,y,w,h +
+// w*h*bpp pixels -- onto a back buffer synced from the live frame. Shared by
+// PUT /api/canvas/rects and the stream channel's rects record (v3.2). No present.
+// False on a malformed body (*done tells how far it got).
+static bool canvasRectsApply(const uint8_t* body, size_t len, int* outDone) {
+  if (len < 4) return false;
   const uint16_t count = ((uint16_t)body[0] << 8) | body[1];
   const uint8_t  fmt   = body[2];
-  if (!count || count > 256 || (fmt != 2 && fmt != 3)) { free(body); return httpxErr(r, 400, BAD); }
+  if (!count || count > 256 || (fmt != 2 && fmt != 3)) return false;
   const uint8_t bpp = fmt;
-
-  canvasStandDown();                     // take the panel, then start from what is shown
-  panelCloneToBack();
+  canvasEnter(false);                    // take the panel (no-op once in canvas mode)...
+  panelCloneToBack();                    // ...then start from what is shown
   size_t off = 4;
   int done = 0;
   for (uint16_t i = 0; i < count; i++) {
@@ -1779,8 +1977,41 @@ static esp_err_t handleApiCanvasRects(httpd_req_t* r) {
     done++;
     if ((i & 15) == 0) wdgWebMs = millis();
   }
+  if (outDone) *outDone = done;
+  return done == count;
+}
+
+// PUT /api/canvas/rects -- multi-rect DELTA update (v3.1): one body carrying N changed
+// regions, drawn over what is on screen, presented once. The network fix for full-frame
+// re-sends: a client that diffs its frames sends 10-50x less. Body (big-endian):
+//   u16 count, u8 fmt (2=rgb565 BE, 3=rgb888), u8 reserved(0),
+//   then per rect: u16 x, u16 y, u16 w, u16 h, then w*h*bpp pixels.
+// Buffered whole (deltas are small by design; cap = 2 full frames), parsed linearly,
+// rows blitted. No transitions -- deltas are incremental updates, not presents.
+static esp_err_t handleApiCanvasRects(httpd_req_t* r) {
+  if (!gPanel.ready) return httpxErr(r, 503, "Panel not running");
+  if (cs.req) return httpxErr(r, 409, "canvas stream active -- close it first");
+  if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP)
+    return httpxErr(r, 507, "Low on memory -- try again in a moment");
+  static const char* BAD = "Body must be u16 count, u8 fmt, u8 0, then per rect u16 x,y,w,h + w*h*bpp pixels";
+  const size_t len = (size_t)r->content_len;
+  const size_t cap = (size_t)gPanel.panelW * gPanel.panelH * 3 * 2 + 4 + 256 * 8;
+  if (len < 4)   return httpxErr(r, 400, BAD);
+  if (len > cap) return httpxErr(r, 413, "Body exceeds two full frames -- send a frame instead");
+
+  uint8_t* body = (uint8_t*)ps_malloc(len);
+  if (!body) return httpxErr(r, 503, "Out of memory");
+  size_t got = 0;
+  while (got < len) {
+    int n = httpxRecv(r, (char*)body + got, len - got);
+    if (n <= 0) { free(body); return httpxErr(r, 400, "Truncated body"); }
+    got += (size_t)n;
+  }
+
+  int done = 0;
+  const bool okAll = canvasRectsApply(body, len, &done);
   free(body);
-  if (done != count) { dispReturnToWall(); return httpxErr(r, 400, BAD); }
+  if (!okAll) { dispReturnToWall(); return httpxErr(r, 400, BAD); }
   // Answer before the present, like ops: the tear-guard wait overlaps the client's next diff.
   char buf[48];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"rects\":%d}", done);
@@ -1856,6 +2087,7 @@ static size_t recvWhole(httpd_req_t* r, uint8_t** buf, size_t* cap, size_t need,
 }
 
 static esp_err_t handleApiCanvasQoi(httpd_req_t* r) {
+  if (csBusy(r)) return ESP_OK;
   if (!gPanel.ready) return httpxErr(r, 503, "Panel not running or out of memory");
   if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP)
     return httpxErr(r, 507, "Low on memory -- try again in a moment");   // stressed: back off
@@ -1889,6 +2121,7 @@ static esp_err_t animRawReply(httpd_req_t* r, int e) {
   return httpxErr(r, 503, "Panel not running or out of memory");
 }
 static esp_err_t handleApiCanvasAnim(httpd_req_t* r) {
+  if (csBusy(r)) return ESP_OK;
   if (!gPanel.ready) return animRawReply(r, 503);
   if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) return animRawReply(r, 507);   // stressed: back off
   const size_t len = (size_t)r->content_len;
@@ -2038,6 +2271,7 @@ static esp_err_t handleApiAtlasDelete(httpd_req_t* r) {
 // persists it. GIFs smaller than the panel are centred on black; larger ones are rejected.
 #define CANVAS_GIF_MAX_BYTES  (4096u * 1024u)
 static esp_err_t handleApiCanvasGif(httpd_req_t* r) {
+  if (csBusy(r)) return ESP_OK;
   if (!gPanel.ready) return httpxErr(r, 503, "Panel not running");
   if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP)
     return httpxErr(r, 507, "Low on memory -- try again in a moment");   // stressed: back off
@@ -2136,6 +2370,7 @@ static esp_err_t handleApiFontList(httpd_req_t* r) {
 // composites the ticker as a lower-third over whatever else is presenting -- wall,
 // effect, animation -- and survives page changes. Empty text stops any ticker.
 static esp_err_t handleApiCanvasTicker(httpd_req_t* r) {
+  if (csBusy(r)) return ESP_OK;
   if (!gPanel.ready) { httpxErr(r, 503, "Panel not running"); return ESP_OK; }
   JsonDocument doc;
   if (!httpxReadJson(r, doc)) return ESP_OK;
@@ -2412,6 +2647,8 @@ void webInit() {
   httpxOn("/api/canvas/frame",       HTTP_PUT,  handleApiCanvasFrame);
   httpxOn("/api/canvas/rect",        HTTP_PUT,  handleApiCanvasRect);
   httpxOn("/api/canvas/rects",       HTTP_PUT,  handleApiCanvasRects);
+  httpxOn("/api/canvas/stream",      HTTP_PUT,  handleApiCanvasStream);
+  httpxOn("/api/canvas/stream",      HTTP_GET,  handleApiCanvasStreamGet);
   httpxOn("/api/canvas/qoi",         HTTP_PUT,  handleApiCanvasQoi);
   httpxOn("/api/canvas/anim",        HTTP_PUT,  handleApiCanvasAnim);
   httpxOn("/api/canvas/atlas",        HTTP_GET,    handleApiAtlasList);

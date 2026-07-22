@@ -127,6 +127,9 @@ void taskWeb(void* pv) {
       webEnsureListening();
     }
 
+    // Canvas stream channel (v3.2): drain and execute whatever records have arrived.
+    canvasStreamPump();
+
     // SSE live preview: when the wall changes, push the display state to every open
     // /api/events stream -- at most ~7 events/s so a flip cascade streams as motion
     // without flooding the sockets. The hash reads the reels under vmMutex; a miss
@@ -151,6 +154,14 @@ void taskWeb(void* pv) {
           }
         }
       }
+      // Status every 5 s (v3.2): the dashboard drops its 3 s /api/status poll -- less
+      // connection churn, which measurably contributed to heap dips.
+      static unsigned long lastStatus = 0;
+      if (now - lastStatus >= 5000UL) {
+        lastStatus = now;
+        sseBroadcastStatus();
+        lastKa = now;                                 // a status frame is also a keepalive
+      }
       if (now - lastKa >= 15000UL) {
         lastKa = now;
         sseKeepalive();
@@ -164,7 +175,9 @@ void taskWeb(void* pv) {
       vTaskDelay(pdMS_TO_TICKS(500));
       ESP.restart();
     }
-    vTaskDelay(pdMS_TO_TICKS(50));
+    // A tick is 50 ms idle; 15 ms while a canvas stream is open (drain cadence sets
+    // the stream's throughput ceiling: 64 KB budget / tick).
+    vTaskDelay(pdMS_TO_TICKS(canvasStreamActive() ? 15 : 50));
   }
 }
 

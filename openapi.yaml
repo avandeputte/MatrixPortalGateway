@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Matrix Portal Gateway API
-  version: "3.1"
+  version: "3.2"
   description: |
     REST API for the **Matrix Portal Gateway** firmware, running on a
     Waveshare ESP32-S3-RGB-Matrix driver board. It emulates a wall of split-flap modules on a
@@ -239,7 +239,9 @@ paths:
         opens with a `retry:` hint and an immediate `display` snapshot; after that a
         `display` event carries the same JSON as `GET /api/display/state` every time
         the wall changes — rate-limited to ~7 events/s, so a flip cascade streams as
-        motion. A `: ka` comment every 15 s keeps idle connections warm.
+        motion. Since v3.2 a `status` event carries the `GET /api/status` JSON every
+        5 s, so a connected dashboard needs no status poller. A `: ka` comment every
+        15 s keeps idle connections warm (any data event resets that clock).
 
         At most **3** concurrent streams; a fourth connect is refused with `503`.
         The dashboard's Live Display rides this stream and falls back to polling
@@ -253,6 +255,9 @@ paths:
 
                 event: display
                 data: {"rows":5,"cols":32,"cells":["H","E","L","L","O",...]}
+
+                event: status
+                data: {"uptime":476,"heap":139364,"minheap":121516,...}
 
                 : ka
           content:
@@ -642,6 +647,84 @@ paths:
         "507":
           description: Internal heap low — retry shortly
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /api/canvas/stream:
+    put:
+      tags: [Canvas]
+      summary: Persistent TLV draw channel (v3.2)
+      description: |
+        One long-lived PUT carrying draw records back-to-back, executed as they arrive —
+        no per-frame HTTP round trip and **no per-record response**, so the ~40 ms
+        delayed-ACK floor on request/response traffic does not apply. Advertised as
+        `canvas.stream` in capabilities.
+
+        Record framing (big-endian): `u8 type, u24 payloadLength, payload`.
+
+        | type | payload | effect |
+        |------|---------|--------|
+        | 0x01 | `u8 fmt (2 = rgb565 BE, 3 = rgb888)` + W×H×bpp pixels | full frame — draw, no present |
+        | 0x02 | the `PUT /api/canvas/rects` body verbatim | rect deltas — draw, no present |
+        | 0x03 | a JSON array as `POST /api/canvas/ops` | ops (present only via its `show` op) |
+        | 0x04 | sheet name | bind a named atlas sheet |
+        | 0x05 | *(empty)* | present the back buffer |
+        | 0x00 | *(empty)* | end — the gateway answers `200 {"ok":true,"records":N}` and closes the socket |
+
+        Client requirements:
+        - Declare a large placeholder `Content-Length` (inbound chunked encoding is not
+          supported) and simply stop at the end record.
+        - **Send the first record in the same write as the request head.** A bare head
+          with a body-carrying Content-Length parse-blocks the single HTTP worker for
+          the 8 s socket timeout (a stock esp_http_server behaviour, not specific to
+          this route) — any body byte alongside the head avoids it entirely.
+        - One stream at a time; the drawing REST endpoints answer 409 while it is open.
+        - A malformed or oversized record aborts the stream; the panel keeps its last
+          frame. Streams idle for more than 30 s are dropped.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: End record received — stream closed cleanly
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:      { type: boolean, example: true }
+                  records: { type: integer, example: 83 }
+        "409":
+          description: A stream is already open
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: Panel not running, OTA in progress, or out of memory
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "507":
+          description: Internal heap low — retry shortly
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    get:
+      tags: [Canvas]
+      summary: Stream channel state (v3.2)
+      description: |
+        Diagnostics and discovery: whether a stream is open, records executed, pump
+        activity, and why the previous stream ended.
+      responses:
+        "200":
+          description: Channel state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  open:      { type: boolean }
+                  records:   { type: integer }
+                  ticks:     { type: integer }
+                  lastRecv:  { type: integer }
+                  inRec:     { type: boolean }
+                  need:      { type: integer }
+                  got:       { type: integer }
+                  lastClose: { type: string, example: end }
 
   /api/canvas/qoi:
     put:

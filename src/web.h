@@ -15,5 +15,11 @@
 // GET /api/display/state reports it -- into out. Returns bytes written. Takes vmMutex.
 // Used by the SSE pump; the REST handler streams the same shape itself.
 size_t dispStateJson(char* out, size_t cap);
+// Same idea for /api/status -- shared by the REST handler and the SSE `status` event.
+size_t statusJson(char* out, size_t cap);
+// The canvas stream channel (PUT /api/canvas/stream, v3.2): taskWeb calls the pump
+// every tick; while a stream is open it tightens its loop for drain throughput.
+void canvasStreamPump();
+bool canvasStreamActive();
 
 #endif // SFGW_WEB_H

@@ -107,6 +107,17 @@ void sseBroadcastDisplay() {
   xSemaphoreGive(sseMutex);
 }
 
+void sseBroadcastStatus() {
+  if (!sseMutex || !sseBuf || xSemaphoreTake(sseMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
+  if (sseClientCount()) {
+    int n = snprintf(sseBuf, SSE_BUF_CAP, "event: status\ndata: ");
+    n += (int)statusJson(sseBuf + n, SSE_BUF_CAP - n - 3);
+    n += snprintf(sseBuf + n, SSE_BUF_CAP - n, "\n\n");
+    ssePushLocked(n);
+  }
+  xSemaphoreGive(sseMutex);
+}
+
 void sseKeepalive() {
   if (!sseMutex || !sseBuf || xSemaphoreTake(sseMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
   if (sseClientCount()) {
