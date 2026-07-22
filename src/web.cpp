@@ -1316,6 +1316,12 @@ static void csClose(bool ok, const char* why) {
     httpd_resp_set_type(cs.req, "application/json");
     httpd_resp_set_hdr(cs.req, "Access-Control-Allow-Origin", "*");
     httpd_resp_send(cs.req, out, HTTPD_RESP_USE_STRLEN);
+    // Let the 200 drain before the session close. An immediate trigger_close raced the
+    // response flush and the client saw an RST instead of its 200 (~1 in 15 bursts on
+    // the PSRAM-buffers core, 0 in 281 on stock -- the flush timing shifted). The work
+    // is on the panel either way, but a stream client must be able to trust the close
+    // handshake. 30 ms on taskWeb (the pump's own task) is one tick.
+    delay(30);
   }
   httpd_req_async_handler_complete(cs.req);
   cs.req = nullptr;
