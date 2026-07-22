@@ -1,6 +1,8 @@
 #include "gateway.h"
 #include "sse.h"
 
+#include <lwip/sockets.h>   // SO_SNDTIMEO on the event-stream sockets (v3.2)
+
 // sse.cpp -- see sse.h. Slots + one shared frame buffer, both guarded by sseMutex:
 // connections are added on the httpd task while broadcasts run on taskWeb.
 
@@ -52,6 +54,16 @@ esp_err_t sseHandleRequest(httpd_req_t* r) {
   if (slot < 0) {
     xSemaphoreGive(sseMutex);
     return httpxErr(r, 503, "too many event streams");
+  }
+
+  // Bound every push: SSE writes happen on taskWeb, which is ALSO the canvas stream
+  // pump -- one unresponsive event client blocking a send for the global 8 s socket
+  // timeout lets a blasting stream client stack ~60 KB of internal-heap RX pbufs (the
+  // 3.1 KB-watermark trough, v3.2.0 bring-up). 600 ms: a client that cannot take an
+  // event in that window is dropped and EventSource reconnects on its own.
+  {
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 600000 };
+    setsockopt(httpd_req_to_sockfd(r), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
   }
 
   httpd_resp_set_type(r, "text/event-stream");

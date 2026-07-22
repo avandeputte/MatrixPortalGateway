@@ -24,14 +24,21 @@
 
 ### Hardening
 
-- **Heap-graded backpressure extended to the two paths that bypassed it.** The stream
-  pump's per-tick drain budget now follows the same ladder as `httpxRecv` (below 30 KB
-  internal heap it stops draining entirely — the TCP window fills and the client
-  stalls), and SSE `display` broadcasts are skipped while internal heap is under 40 KB
-  (the preview drops frames rather than the heap; the next healthy tick resyncs).
-  Bisected on the 256×64 board: a full 160-module page with two SSE clients sustained
-  ~6 KB events at 7 events/s and alone dipped the watermark 41 KB from a clean boot —
-  the guard halves that to 19 KB.
+- **The deep-trough alignment, root-caused and fixed.** This build's prebuilt lwIP
+  advertises a ~95 KB TCP receive window, so a client blasting the stream channel can
+  have tens of KB of records sitting in internal-heap pbufs before the pump reads a
+  byte — and SSE pushes run on the same task as the pump, so one unresponsive event
+  client blocking a send for the global 8 s socket timeout let those pbufs pile up
+  (worst observed watermark: 3.1 KB). Three changes: the stream pump drains **eagerly,
+  always** (reading moves bytes into the PSRAM record buffer and frees internal heap —
+  a heap-graded drain throttle was measured to make troughs worse and is explicitly
+  rejected); SSE sockets get a **600 ms send timeout** (a client that cannot take an
+  event in that window is dropped; EventSource reconnects); and SSE `display`
+  broadcasts are skipped while internal heap is under 40 KB (the preview drops frames
+  rather than the heap). A/B on the worst constructible alignment — stuck SSE client +
+  continuous 160-module cascades + unpaced stream blasts + readback loop: watermark
+  floor 12.0 KB before, **27.0 KB** after. Stream clients should still pace themselves
+  modestly rather than sending unboundedly ahead.
 
 ### Performance
 
