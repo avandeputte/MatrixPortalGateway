@@ -11,7 +11,7 @@ A split-flap display with no split flaps.
 This is the [Split-Flap Gateway](../../SplitFlapGateway/3.1) v3.1 firmware, ported to a
 **Waveshare ESP32-S3-RGB-Matrix driver board** driving a HUB75 RGB LED matrix. (Versions
 up to v1.25.0 ran on the Adafruit MatrixPortal S3; that final MatrixPortal build lives on
-the `matrixportal` git branch. See **New in 2.0**.) The physical gateway's
+the `matrixportal` git branch.) The physical gateway's
 serial transceiver is gone. In its place is a wall of *virtual* split-flap modules, each one
 receiving the same protocol frames a real module would, acting on the display commands
 (`-`, `+`, `h`), and rendering itself as a flapping character cell on the panel.
@@ -21,7 +21,7 @@ command log. (MQTT and Home Assistant support existed through v2.2 and were remo
 v3.0 — unused here, and every byte of RAM counts on this board.) The
 [companion app](../../SplitFlapGatewayCompanion) drives it without modification and cannot
 tell the difference. (One thing above the seam is *gone* rather than unchanged — the sticky
-module registry. See **New in 1.10**.)
+module registry, which has no meaning on a wall that exists by construction.)
 
 ```
      ┌──────────────────────────────────────────────┐
@@ -37,604 +37,17 @@ module registry. See **New in 1.10**.)
      └──────────────────────────────────────────────┘
 ```
 
----
-
-## New in 3.0
-
-The HTTP stack is replaced: the one-connection-at-a-time Arduino `WebServer` is gone,
-and every route now runs natively on ESP-IDF's **`esp_http_server`** (`src/httpx.*` is
-the thin helper layer over it — dispatch hook, JSON/chunk/query helpers). Multiple
-concurrent sockets, per-socket recv/send timeouts, LRU purge of idle connections, and —
-the reason for the migration — **async requests**, which make a push stream possible:
-
-- **`GET /api/events` — a Server-Sent Events stream** that pushes the display state the
-  instant the wall changes (rate-limited to ~7 events/s, so a flip cascade streams as
-  motion), with an immediate snapshot on connect and 15 s keepalives. Advertised as the
-  `events` capability token; up to 3 concurrent streams. **The dashboard's Live Display
-  now rides this stream** — the preview follows the wall in near-real-time instead of
-  polling every 1.5 s — and falls back to polling automatically if the stream drops.
-- **Breaking: uploads are raw bodies now, not multipart.** `POST /api/ota/upload` takes
-  the bare `firmware.bin` (`curl --data-binary @firmware.bin …`), and
-  `POST /api/fs/upload?name=<filename>` takes the bare file with the name in the query.
-  The `/ota` page and the Files tab already speak this; only external scripts using
-  `curl -F` need the one-line change.
-- **Heap backpressure on every large stream, both directions.** The OTA upload's
-  hard-won pacing (v2.2.1) is now generalized: every inbound raw stream and every
-  outbound chunked stream slows down when internal heap runs low, closing the TCP
-  window before buffer buildup can threaten the reboot floor.
-- Handler logic is otherwise byte-for-byte the same API surface — every endpoint,
-  schema and status code is unchanged apart from the two upload bodies above.
-- **Removed: MQTT and Home Assistant support.** The broker connection, the topic tree
-  (`frames/*`, `flap/*`, `display/*`, `quiet/*`, status), HA discovery, the per-frame
-  wire mirror, the MQTT settings/HA cards and `/api/config/mqtt` + `/api/mqtt/test` are
-  all gone. Nothing here used them — the companion is pure REST and the dashboard now
-  has SSE — and the permanent broker socket + client buffers were weight exactly where
-  this board is tightest. (Anything that DID subscribe: the REST API is the surface now.)
-- **Removed: ArduinoOTA** (the never-used IDE push path, its task, UDP listener and
-  password setting) — web/curl OTA and esptool recovery are the paths, and mDNS stays.
-- **Leaner throughout**: three per-handler upload buffers merged into one; task stacks
-  right-sized; concurrent-socket ceiling tuned (4 + LRU) to bound worst-case heap dips.
-  Net: **~60 KB less flash than v2.2.4** and ~10 KB more static RAM free.
-
-## New in 2.2
-
-The filesystem gets a front door. (`GET /api/config` now reports `fwVersion` `2.2.0`; the
-API level stays `3.1.0`.)
-
-- **A Files tab on the dashboard**, between Display and Settings: a storage-usage bar, the
-  full FATFS file list with per-file **Download** and **Delete** (deleting `/compset.gz`
-  warns that it is the companion's settings), **Play** / **Set as boot** on `/anim/*.mpg`
-  rows — the current boot animation is marked, with a one-click clear — and a drag-free
-  **Upload** card. Uploads are routed by extension (`.mpg` → `/anim/`, `.fnt` → `/fonts/`,
-  else the root), so an uploaded animation is immediately playable by name.
-- **The `/api/fs` surface behind it**, usable without the dashboard: `GET /api/fs` (totals +
-  recursive file list), `GET /api/fs/file?path=…` (download), `POST /api/fs/delete
-  {"path"}`, and `POST /api/fs/upload` (multipart in 2.2; a raw body with
-  `?name=<filename>` since 3.0; streamed to a `.tmp` then renamed; `413` when less
-  than 64 KB would remain free).
-- **Live brightness, capability-advertised.** `GET`/`POST /api/display/brightness`
-  (`{"brightness":1..255}`) applies on the next presented frame and persists — the same
-  value as `panelBright` — and `GET /api/capabilities` now advertises the `brightness`
-  feature token so clients can light up a slider without sniffing versions.
-
-## New in 2.1
-
-The canvas learns to keep things. Six additions, all Matrix-only and all additive — every
-pre-2.1 client keeps working unchanged. The dashboard deliberately grows **no controls** for
-any of this yet: the API and the companion are the surface first. (`GET /api/config` now
-reports `fwVersion` `2.1.0`; the API level stays `3.1.0`.)
-
-- **An animation library — uploads that survive the reboot.** The animation store was always
-  volatile; now `POST /api/canvas/anim/save {"name":"x"}` writes whatever is loaded to FATFS
-  (`/anim/<name>.mpg`, byte-identical to the `MPGA` wire format), `POST /api/canvas/anim/play`
-  loads a name back and plays it (`409` during Quiet Time), `POST /api/canvas/anim/delete`
-  removes it, and `GET /api/canvas/anims` lists the library with each file's real header
-  metadata. Names are 1–24 chars of `a-z 0-9 - _`. The 23.9 MB FATFS the 2.0 board brought is
-  what makes a library of multi-MB loops reasonable.
-
-  ```sh
-  curl -X POST http://<gw>/api/canvas/anim/save -d '{"name":"rainbow"}'
-  curl -X POST http://<gw>/api/canvas/anim/play -d '{"name":"rainbow"}'
-  ```
-
-  **And a boot animation:** set `bootAnim` (in `POST /api/config/settings`, reported by
-  `GET /api/config`) to a library name and it autoplays **at boot, before WiFi** — a splash
-  screen from flash — until the first display command supersedes it.
-
-- **The ticker becomes an overlay.** `POST /api/canvas/ticker` gains `"overlay":true`: instead
-  of taking the panel over, the ticker composites as a **lower-third band over whatever else is
-  presenting** — the flap wall, an effect, an animation, a pushed frame — via a hook on every
-  presented frame, so it survives page and mode changes. Only an explicit `{"text":""}` or
-  Quiet Time stops it. `"band":false` drops the black band and scrolls the glyphs straight
-  over the content.
-
-  ```sh
-  curl -X POST http://<gw>/api/canvas/ticker \
-       -d '{"text":"BREAKING — the flaps keep flapping","overlay":true}'
-  ```
-
-- **Transitions between frames.** `POST /api/canvas/transition
-  {"type":"none|crossfade|wipe|slide","ms":100-2000}` — sticky, runtime-only. Subsequent
-  full-frame `PUT /api/canvas/frame` presents stage the incoming frame in PSRAM and tween it
-  on-device instead of hard-cutting. rect/qoi/anim are untouched.
-
-- **A sprite atlas for the ops path.** `PUT /api/canvas/atlas` uploads one tile sheet (a
-  12-byte `MPTA` header — fmt, tileW, tileH, tiles — then the tile pixels, 2 MB cap) and the
-  ops batch gains `{"op":"sprite","i":N,"x":X,"y":Y}`. **Magenta is transparent** (`0xF81F` /
-  `255,0,255`), so sprites carry holes. `GET /api/canvas` reports the loaded sheet in `atlas`,
-  and `capabilities.canvas.ops` now includes `sprite`.
-
-- **GIF import — animations without a packer.** `PUT /api/canvas/gif` takes an ordinary
-  animated GIF (4 MB cap), decodes it **on-device** (AnimatedGIF: deltas, transparency and
-  disposal composited properly, smaller GIFs centred on black, fps from the GIF's own frame
-  delays clamped 1–30) into the same store `PUT /api/canvas/anim` fills — so it plays
-  immediately and `anim/save` persists it. A GIF larger than the panel is a `400`.
-
-- **Uploadable fonts.** `tools/fontpack.py` packs any ≤16px-wide BDF into an `MPFT` blob;
-  `PUT /api/canvas/font` installs it as the face named `custom`, and
-  `POST /api/canvas/font/save|delete` plus `GET /api/canvas/fonts` give fonts the same
-  FATFS library treatment as animations (`/fonts/<name>.fnt`). The ticker and the ops `text`
-  op take a `"font"` field — `custom` or a library name; an unknown name falls back to the
-  built-in face rather than erroring.
-
-  All the new stores — animation frames, the staged transition frames, the atlas, the GIF
-  decode buffer, the font table — live in the 16 MB of PSRAM the 2.0 board brought; none of
-  it touches the internal RAM the panel and WiFi contend for. The large uploads keep the
-  `507` low-heap guard.
-
-## New in 2.0
-
-- **The gateway moves to the Waveshare ESP32-S3-RGB-Matrix driver board.** Same ESP32-S3, very
-  different module: **32 MB of octal flash at 1.8 V** (esptool's eFuse readout: "octal (8 data
-  lines)") and **16 MB of octal PSRAM** (`memory_type = opi_opi`), versus the MatrixPortal's
-  8 MB quad flash and 2 MB quad PSRAM. This is a **hardware port, not an API change**:
-  `FW_VERSION` is `2.0.0`, `API_VERSION` stays `3.1.0`, and every endpoint, MQTT topic and
-  client keeps working unchanged. The final MatrixPortal version, **v1.25.0, lives on the
-  `matrixportal` git branch** if the old board ever returns.
-
-- **A completely different HUB75 pin map — and the octal PSRAM is why.** Octal PSRAM consumes
-  GPIO 33–37, the range the MatrixPortal map used, so the port adopts Waveshare's own map for
-  this board (`src/common.h`):
-
-  | R1 | G1 | B1 | R2 | G2 | B2 | A | B | C | D | E | CLK | LAT | OE |
-  |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-  | 4 | 5 | 6 | 7 | 15 | 16 | 18 | 8 | 3 | 42 | 9 | 41 | 40 | 2 |
-
-  All thirteen signals route through the GPIO matrix into one LCD_CAM data word, so the map is
-  arbitrary as far as the driver is concerned. I2C is SDA=47 / SCL=48, carrying the PCF85063
-  RTC at `0x51` (plus a QMI8658 IMU and SHTC3 the firmware does not use).
-
-- **A battery-backed clock — the board's PCF85063 RTC is wired in.** The **system clock remains
-  the single source of truth**; the chip plays two supporting roles (`src/rtc.cpp`): at boot it
-  **seeds** the system clock when it holds a time inside a plausibility **window** (build time
-  … build + 5 years — a floor alone is not enough: a factory-fresh chip on this board read
-  **2056** with its oscillator-stop flag clear, and is correctly rejected), and it is **written
-  back on every NTP sync** so the corrected time survives power cycles. With no backup cell
-  fitted, behaviour falls back to the old wait-for-NTP path.
-
-- **What 32 MB of flash bought:** `partitions-32MB.csv` — **4 MB app0 + 4 MB app1 + 23.9 MB of
-  FATFS**, versus 2 + 2 + 3.7 before. **What 16 MB of PSRAM bought:** the on-device animation
-  store (`ANIM_MAX_BYTES`) grew **1.5 MB → 8 MB** — roughly **256 rgb565 frames at 256×64**,
-  verified with a real 6.3 MB / 200-frame upload.
-
-- **What the bigger PSRAM did *not* buy: the framebuffer stays in internal SRAM.** Even octal
-  PSRAM is not used for it — the panel's GDMA stream and WiFi share the PSRAM/cache bus, and
-  bounce-buffering would put the CPU back in the refresh loop the DMA design exists to avoid.
-  `PANEL_RAM_BUDGET` stays 120 KB, and the depth-3 rule for 256px chains stands.
-
-- **The 5 MHz pixel clock was re-tested on this board — and stays.** A 10 MHz A/B (2026-07-18)
-  showed the radio **survives** here, unlike on the MatrixPortal: instant association, 0% ping
-  loss. But 10 MHz's payoff would be depth 4 on 256×64, and *that* is blocked by RAM, not the
-  clock — the 144.6 KB double-buffered internal framebuffer left 26 KB of heap and a 1.7 KB
-  minimum, unshippable. See [Known limitations](#known-limitations).
-
-- **No UF2 bootloader — recovery changes.** The Waveshare board has no tinyuf2, so there is no
-  double-tap-reset drag-and-drop recovery: a bricked board is recovered by **holding BOOT while
-  plugging in USB, then flashing with esptool** (`pio run -t upload` does this under the hood).
-  Web OTA (`/ota`) is unchanged.
-
-## New in 1.24
-
-- **Nothing replies any more — frames flow one way.** The virtual modules act on exactly three
-  commands: `-` (show character), `+` (show index) and `h` (home). The `v`/`A` queries, the
-  by-serial `mX…` addressing and the entire reply pipeline behind them (`src/vlink.*`) are
-  gone: `frameSend()` now hands the sanitized frame straight to the modules, and `taskFrames`'
-  only remaining job is draining the scheduled-batch ring. Nothing ever consumed the replies —
-  every value in them was a compile-time constant — and clients read the wall through
-  `/api/display/state`, `/api/flap/modules` and `/api/capabilities`, not protocol queries.
-
-- **BREAKING if anything listened: the MQTT topic `<prefix>/frames/rx` no longer exists** —
-  with no replies there is nothing to publish on it. `<prefix>/frames/tx` remains as the
-  outbound wire mirror. The `rx` counter is gone from `/api/status` and the MQTT status JSON,
-  the Home Assistant **Frames Received** sensor is gone (its retained discovery config is
-  deleted on connect, so HA is not left holding a ghost sensor), and the `drop` field in the
-  status `panel` object went with the reply queue it counted.
-
-- **BREAKING if anything read them: the fake serial numbers are gone.** `GET /api/flap/modules`
-  rows are now `{id, flapIndex, flapChar}` — the `sn`, `provisioned` and `fwVersion` fields
-  were dropped. No consumer existed: the companion drives the wall through
-  `/api/display/cells` and reads its capabilities from `/api/capabilities`, and neither ever
-  looked at a serial. A `VModule` is now ~16 bytes — an id and its runtime flip state.
-
-- **The grid seam is gone.** The faint decorative border drawn between module cells never
-  looked good, and now it is not drawn at all: no more `gridColor`/`gridBright` in
-  `GET /api/config` or `POST /api/config/settings`, no Grid colour / Grid brightness inputs in
-  the dashboard's LED Panel card, `drawGrid()` deleted. (Not to be confused with
-  `gridRows`/`gridCols`, the module wall's *layout* — those are unchanged.)
-
-## New in 1.23
-
-- **BREAKING: the frame-mirror and raw-send MQTT topics moved under `frames/`**, mirroring
-  the v1.22 REST rename: the wire mirror publishes on `<prefix>/frames/tx` and
-  `<prefix>/frames/rx` (was `<prefix>/tx` / `<prefix>/rx`), and raw frames are accepted on
-  `<prefix>/frames/send` (was `<prefix>/send`). The other topics (`flap/*`, `display/*`,
-  `quiet/*`, `status`, `availability`) are unchanged. Anything subscribed or publishing to
-  the old names — the MQTT serial bridge included — must follow.
-
-## New in 1.22
-
-- **BREAKING: the send endpoints are `POST /api/frames/send` and `POST /api/frames/batch` —
-  nothing else answers.** The physical gateway's `/api/rs485/*` paths, kept as compatibility
-  aliases through v1.21, and the interim `/api/bus/*` paths were both removed in v1.22.0 and
-  now 404. Every client — the companion app included — must POST to `/api/frames/*`.
-
-## New in 1.20
-
-- **The last "RS-485" is out of the code.** There is no RS-485 transceiver on this board, and
-  now there is no `rs485` in the source either: `src/rs485.*` is **`src/bus.*`**, `rs485Send()`
-  is `busSend()`, `taskRS485` is `taskBus`, `/api/status` reports the task's stack as
-  `stk.bus`, and the Home Assistant stack sensor is `stkbus` (the legacy `stk485` discovery
-  topic is deleted on connect, so HA is not left holding a ghost sensor). The REST endpoints
-  are canonically **`/api/bus/send`** and **`/api/bus/batch`**; `/api/rs485/send` and
-  `/api/rs485/batch` stay as compatibility aliases, because the companion app still POSTs to
-  them. "RS-485" survives in prose exactly where it should: when it names the *other* product,
-  the physical gateway.
-
-- **Virtual-module persistence is gone — nothing it stored could vary.** Every field of
-  `/vmods.dat` is deterministic: a module's id *is* its wall slot, its serial derives from the
-  board's MAC, and the reel homes at boot. A physical module needs its EEPROM; a drawn one
-  re-derives everything in `vmInit()`, which now also deletes a leftover `/vmods.dat`. FATFS
-  holds exactly one file: the companion's settings blob, `/compset.gz`.
-
-- **The frame sanitizer's grammar was trimmed to the commands this product speaks:** `-`, `+`,
-  `h`, `v` and `A`, plus the by-serial `mX…` passthrough — what the companion, the web UI and
-  MQTT emit. The physical gateway's calibration/dump family is no longer modelled: those
-  frames pass through untrimmed, and the virtual modules silently ignore them.
-
-- **`POST /api/flap/index` accepts the whole reel — `0`…`236`.** It previously stopped at 63,
-  a leftover of the 64-flap reel: the lowercase and pictograph flaps were reachable through
-  `/api/display/cells` but not by bare index, even though they are the *reason* index
-  addressing exists.
-
-- **`sfSendText` no longer sleeps 10 ms per character.** That delay was physical-bus pacing;
-  on the emulated bus a send is a function call, so the sleep only froze the calling HTTP or
-  MQTT task — up to 2.5 s per text. The visible cascade was never the delay's job: the flip
-  animation provides it.
-
-- **MQTT publishes now happen outside the queue mutex**, and the Home Assistant device
-  reports its manufacturer.
-
-## New in 1.19
-
-- **Read the panel back — `GET /api/canvas/frame`.** A screenshot of whatever is on screen (wall,
-  effect, canvas, animation, ticker), reconstructed from the framebuffer as raw pixels — `rgb888`, or
-  `?fmt=rgb565`. The colours come back **quantised to the panel's real bit depth**, so it's what is
-  physically lit, not the intended image (brightness, an OE duty cycle, isn't in the framebuffer, so
-  it isn't reflected). Read-only — it never parks or disturbs the running mode — so a UI can poll it
-  for a live preview. `X-Canvas-Width/Height/Format` headers describe the body. Verified by round-trip:
-  a solid frame reads back bit-exact at every pixel.
-
-## New in 1.18
-
-- **The canvas does more, over far less WiFi.** Five additions, all Matrix-only (the RS-485 wall has
-  no framebuffer):
-
-  - **`PUT /api/canvas/rect`** — update *one rectangle* instead of resending the whole panel. Body is
-    an 8-byte big-endian header `[x, y, w, h]` (u16 each) then `w × h` pixels, `rgb888` or `rgb565`
-    (by length). It is drawn on top of what is already on screen — the back buffer is synced to the
-    live frame first — so animating a small area costs only that area's bytes.
-  - **`PUT /api/canvas/qoi`** — a full-panel image, [QOI](https://qoiformat.org)-encoded. Lossless,
-    decodes in one pass, and typically 2–4× smaller than raw (a 256×64 gradient: ~16 KB vs 49 KB).
-  - **`PUT /api/canvas/anim`** — upload a short loop *once* and it plays on-device from PSRAM, so the
-    client can disconnect. Body is a 14-byte `MPGA` header (`ver, fmt, fps, flags, w, h, frames`)
-    then the frames back-to-back. The 2 MB PSRAM the framebuffer can't use holds ~48 frames at
-    256×64. `taskDisplay` plays it at the set fps; a split-flap command or Quiet Time stops it.
-  - **`POST /api/canvas/ticker`** — `{"text", "color":[r,g,b], "speed":1-20}` scrolls one line of
-    text across the panel on-device, no streaming. Empty text hands the panel back.
-  - **Effect parameters** — `POST /api/canvas/effect` now takes optional `hue` (0–255) and `density`
-    (1–100): recolour the matrix rain, tint plasma and Life, set the Life seed % or flip-o-rama
-    churn. Omit them and every effect looks exactly as before.
-
-  `GET /api/canvas` and `/api/capabilities` advertise all of it (`rect`, `anim`, `ticker`, the `qoi`
-  format, and `effectParams`), so a client reads the feature set instead of sniffing the version.
-
-- **A too-deep panel dims itself instead of going blank (1.17.1).** A 256×64 at bit depth 4 needs
-  more internal DMA RAM than the driver will spend before WiFi; rather than refuse and run headless,
-  it now steps the depth down to the deepest that fits (256×64 lands on depth 3) and lights up.
-  `GET /api/status` reports the actual running `panel.depth`.
-
-## New in 1.15
-
-- **Three more on-device effects — flip-o-rama, clock, and Game of Life.** They join plasma, fire
-  and matrix, all started with `POST /api/canvas/effect` and rendered on the display task at the
-  panel's native rate:
-  - **`fliporama`** — the whole board flips through random glyphs, like a live departure board.
-  - **`clock`** — a digital clock with big **HH:MM** in a bundled **Orbitron** face, each digit
-    centred in its own slot so the proportional numbers never jitter, a tight dot colon, drifting
-    through a rainbow, with the spelled-out date and a seconds bar that shrinks over the minute. It
-    adapts to the panel: HH:MM + date + bar on a tall wall, HH:MM + bar on a 128×32. The face is
-    generated by `tools/genaafont.py` from Orbitron (SIL Open Font License, vendored in `tools/`)
-    as 1-bit masks — grayscale anti-aliasing reads as muddy on the panel's few bitplanes, so every
-    edge is hard.
-  - **`life`** — Conway's Game of Life on a wrapped grid, cells coloured by age, reseeded when it
-    settles.
-
-- **The clock shows the right time — a timezone bug is fixed.** Every NTP sync called
-  `configTime(0, 0, …)`, which resets the `TZ` environment to UTC and so silently clobbered the
-  zone set on the Settings page — the command-log timestamps, Home Assistant discovery and the new
-  clock all reverted to UTC after the first sync. `rtcNTPSync()` now re-applies the configured
-  zone right after each sync, so local time sticks across syncs and reboots.
-
----
-
-## New in 1.14
-
-- **On-device effects — smooth animation the panel renders itself.** Pushing frames over HTTP
-  (raw canvas, above) tops out around **8 fps**: the web server closes the socket after every
-  request, so each frame pays a fresh TCP connection and slow-start, and that fixed cost — not
-  bandwidth — is the wall (rgb565 frames are no faster than rgb888). So animation moved *onto*
-  the gateway. **`POST /api/canvas/effect {"type":"plasma|fire|matrix","speed":1-10}`** runs the
-  animation on the display task at the panel's native **~70 fps**, with nothing on the network:
-
-  - **`plasma`** — a flowing rainbow sine-interference field.
-  - **`fire`** — bottom-up flames (a Doom-style spread: random sideways drift plus decay makes
-    tongues, not a smooth wash) through a black→red→orange→yellow→white palette.
-  - **`matrix`** — falling green streaks, bright heads and fading trails, per-column speeds.
-
-  An effect is a third display mode beside the wall and the raw canvas: it owns the panel until
-  `{"type":"none"}` (or `POST /api/canvas {"active":false"}`) hands it back. All integer/LUT work
-  — a sine table, two palettes, a PSRAM heat buffer — so a full frame fits inside one refresh.
-
-  Both are **advertised in `GET /api/capabilities`** — a `canvas` object (formats + panel size),
-  an `effects` array, and `canvas`/`effects` tokens in `features` — so the companion lights up
-  the right controls from capabilities, never from a firmware-version sniff. The Split-Flap
-  Gateway, which has no framebuffer, answers the same URL without those keys.
-
-- **rgb565 raw frames actually work now.** `PUT /api/canvas/frame` inferred its pixel format from
-  the `?fmt=` query arg, but a raw-body handler cannot read URL args — the WebServer discards them
-  once it starts streaming the body — so `fmt=rgb565` silently fell back to rgb888 and every
-  16 KB frame was rejected as the wrong length. The format is now taken from the **body length**
-  (`W×H×3` = rgb888, `W×H×2` = rgb565), which is unambiguous and needs no query arg.
-
----
-
-## New in 1.13
-
-- **Raw canvas — the panel with the flaps taken off.** Every cell of this wall is *drawn*, so
-  under the split-flap costume it was always just a HUB75 framebuffer. Three new endpoints hand
-  you that framebuffer directly, bypassing the wall entirely — something the physical gateway
-  cannot offer, because it has no framebuffer to expose, only motors:
-
-  - **`PUT /api/canvas/frame?fmt=rgb888|rgb565`** — a full frame as raw pixel bytes,
-    `width × height`, row-major, top-left origin. Render whatever you like on the client and push
-    it. The body is **streamed straight to the back buffer**, so a 256×64 frame is never buffered
-    whole; its length must equal `width × height × bytesPerPixel` *exactly*, or it is a `400`.
-    `rgb565` is 2 bytes, big-endian.
-  - **`POST /api/canvas/ops`** — a JSON array of draw commands for shapes and labels without
-    composing a frame client-side: `clear`, `pixel`, `hline`, `vline`, `rect` (outline or filled),
-    `text` (the bundled CP1252 faces, sizes 8–20) and `show`. Colours are `[r, g, b]`; off-panel
-    pixels are dropped, not clamped or crashed.
-  - **`GET /api/canvas`** reports the panel size and whether a canvas is active; **`POST`** with
-    `{"active": true|false}` takes over and blanks, or releases. Pushing a frame or ops takes over
-    on its own, so this call is only for blank-and-hold, or hand-back.
-
-- **The reel renderer stands down while a canvas is up.** `gCanvasMode` makes `taskDisplay` yield
-  the panel exactly as it does during an OTA — so the HTTP handlers own every pixel and nothing
-  repaints the wall from under them, and nothing writes the back buffer they are drawing into.
-  Releasing marks the display dirty and the wall comes back from the modules' current state.
-  Nothing is persisted: a reboot returns to the wall.
-
----
-
-## New in 1.9
-
-- **The wall comes up blank after a reboot.** `autoHome` defaults to true, `'A'` reports it,
-  and a *real* module with the flag set homes on power-up — but the emulation stored the flag,
-  reported it, and then quietly ignored it, so `/vmods.dat` faithfully restored whatever
-  half-finished sentence was on the wall when the power went. Stale content presented as
-  current. The flag is honoured now.
-
-- **The Companion URL is no longer editable.** The companion registers it itself. It is shown,
-  read-only, on the **Status** tab.
-
-- **A dead-code audit, after everything that has been removed.** Gone: the RS-485 serial
-  parameters (baud, data bits, parity, stop bits — there is *no UART*, and the only reader was
-  a debug line that literally called them "cosmetic"), `POST /api/config/rs485`,
-  `/api/flap/version`, `/api/flap/all`, `/api/flap/identify`, the `gDump` capture mailbox and
-  the two query-and-wait helpers behind it. Every one of them existed to ask the emulated bus
-  for a **compile-time constant**.
-
-- **`-Wall` is on now, and the build is warning-clean.** Turning it on found a **real latent
-  null dereference**: `sfUpsert(id, NULL)` forwards that `NULL` into `strcmp()` whenever
-  `id == 255`. Nothing on this firmware produces id 255 — so the only thing standing between
-  that call and a crash was an invariant nobody had written down.
-
----
-
-## New in 1.8
-
-- **256 × 64 panels.** Verified on hardware: a 32 × 5 wall = **160 modules** at ~85 Hz.
-  `VM_MAX_MODULES` went 128 → 192, because a 256px chain at 8px cells is 32 columns and the
-  old ceiling would have *silently* shrunk it to 25 × 5. Must run at **colour depth 3** —
-  depth 4 is over the RAM budget and refused (and would flicker at 40 Hz anyway). The presets
-  carry the depth so you cannot pick a layout that gets refused.
-
-- **Three much bigger fonts: `10x20`, `9x18`, `8x13`.** A 15 × 3 wall on 256 × 64 gives
-  **17 × 21 px cells** — three times the area of a 128-wide chain's — and `6x13` floated in
-  them. The blocker was not the fonts: glyph rows were packed **one byte per row**, which
-  capped every face at **8 pixels wide**. Rows are 16-bit now. +32 KB flash, no RAM cost.
-
-- **`128 × 64 · 10×3` got better for free.** Its 12 × 21 cells were always big enough for a
-  10×20 face — there simply wasn't one. Now there is.
-
----
-
-## New in 1.7
-
-- **The Modules tab is gone.** It made sense on the RS-485 gateway, where modules are real
-  things that show up, go missing, carry a serial and hold an EEPROM. Here every cell of the
-  wall *is* a module, all of them are always present, none has a serial worth reading and none
-  has an EEPROM at all — so the page could only ever say the same thing seventy-five times.
-  **Display** is the landing tab now.
-
-  The **`/api/flap/modules` endpoint stays** — the companion reads it to learn the wall, and
-  the Status tab still counts them. It is the *page* that had nothing to say, not the data.
-
----
-
-## New in 1.10
-
-- **The module registry is gone.** It was the last piece of the RS-485 gateway that had no
-  meaning here, and it was actively wrong. A registry answers "what is out there on the bus?" —
-  a real question when the bus is real and modules can be added, removed, renumbered or simply
-  fail to answer. On this board the wall is *drawn*: `vmInit()` creates every module from
-  rows × cols, none can appear or vanish, and `vmods[i].curIndex` **is** the flap on show. The
-  registry was a second copy of that, and a worse one.
-
-  Worse in a way you could see. It stored one **byte** per cell, so entering and leaving Quiet
-  Time — which snapshots the wall and replays it — sent every cell back through the legacy
-  uppercase fold:
-
-  ```
-  before quiet :  Hello world!é♥
-  after quiet  :  HELLo worLD!É?      <- lowercase folded; the heart could not come back at all
-  ```
-
-  A byte *cannot* name a flap on a 237-flap reel: seven of the letters are colour codes, and a
-  pictograph has no byte at all (that is the whole reason `/api/display/cells` addresses flaps
-  by index). The pending flap now lives in the module itself, as an `int16_t` index, and a Quiet
-  Time cycle round-trips the wall exactly.
-
-  Everything that used to read the registry now reads the modules directly: `/api/display/state`,
-  `/api/flap/modules`, `/api/status`, the MQTT display sensor and the Quiet Time snapshot. Gone
-  with it: `/modules.dat` and its FATFS persistence, the stale-entry pruner, the boot `m*v`
-  discovery broadcast and the reconciliation added in 1.4 to paper over the bug it caused,
-  `sfMutex` (the lock order is now `txMutex → vmMutex`), and `sfQueryVersion()`, which nothing
-  had called in some time.
-
-- **`/api/display/state` reports code points, not bytes.** A pictograph flap has no CP1252 byte,
-  so a byte-shaped read rendered a heart as `"?"` — the same blindness as the registry, one layer
-  up. The wall now reads back what it is actually showing. `/api/flap/modules` reports its
-  `flapChar` the same way.
-
-- **`GET /api/capabilities`** — one call that answers *what characters can this display show?*
-  The RS-485 gateway answers the same URL with the same shape, so a client never has to know
-  which kind of wall it is talking to. Here the answer is always `uniform`: every cell renders
-  from one drawn reel, so `union` and `common` are the same 230 characters, and the seven colour
-  flaps are reported by name under `colors` rather than as the letters `roygbpw`. ~1.6 KB for a
-  75-module wall.
-
----
-
-## New in 1.6
-
-- **Lowercase, and emoji.** The reel grows to **237 flaps**: the 156 Windows-1252 glyphs and
-  7 colours as before, plus the **60 lowercase letters** and **14 pictographs**
-  (♥ ♦ ♣ ♠ ☺ ♪ ● ■ ⌂ ← ↑ → ↓ ☀).
-- **A new endpoint to reach them: `POST /api/display/cells`.** The legacy protocol carries one
-  byte per character and *cannot* express either — the byte for `r` already means red, and a
-  heart has no byte at all. The new endpoint addresses flaps **by index** and names colours
-  explicitly. See [Two ways in](#two-ways-in-and-they-are-not-the-same).
-- **The legacy protocol is untouched.** `m5-r` is still red, `hello` still renders `HELLO`, and
-  the legacy flap indices never moved.
-- **A colour-order setting for BGR panels.** Some HUB75 panels are wired BGR, and on those
-  *every colour the firmware has ever drawn has been wrong* — red draws blue, blue draws
-  orange, yellow draws cyan — while green and white look fine, which is why it hides. See
-  [If every colour is wrong](#if-every-colour-is-wrong).
-- **Fixed: the pictographs drew nothing at all.** `font1252Row()` bounds-checked the glyph
-  index against `FONT1252_GLYPHS` (216), and the pictographs live at 216–229. The reel
-  resolved, the frame went out, the module flipped to the right flap, and the renderer
-  silently returned a blank row for every one of them. A bounds check that is one constant
-  out of date does not crash — it erases.
-
----
-
-## New in 1.5
-
-- **The reel carries every Windows-1252 character.** 64 flaps became **163** — 156 glyphs +
-  7 colours — so the 99 characters that used to come out blank (`$ % ( ) + < > [ ] { } © ° «
-  » ¿ À Á Â Ã Å Æ Ç È É Ê Ë …`) now display. A physical reel has 64 leaves because it is a
-  physical object; these are drawn, so there is nothing to ration.
-- **The flap set is no longer editable, and no longer stored per module.** A reel that can
-  already render everything has nothing to reconfigure, so the `N` command, `POST
-  /api/flap/flapconfig`, the `<prefix>/flap/flapconfig` MQTT topic and the flap-set editor
-  are all gone. That also handed back **5.1 KB of internal RAM** on a 75-module wall
-  (`sizeof(VModule)` 108 → 40 bytes) — the same RAM the panel framebuffer and WiFi contend
-  for.
-- The reel is now **built at boot** from the font's own repertoire and the folding rule,
-  rather than typed out, and lives in `src/reel.h` — free of Arduino, so
-  `tools/reel_test.cpp` compiles the *same* code instead of a copy of it.
-
----
-
-## New in 1.4
-
-- **The registry now reconciles against the wall at boot.** Discovery only ran when the
-  registry was *completely empty*, so growing the wall (15×3 → 15×5) left it holding the 45
-  modules it had loaded from FATFS and never asked the 30 new ones to announce themselves.
-  The Modules tab read "45 known modules" forever, the new rows rendered as empty cells, and
-  any client driving the wall from `/api/flap/modules` kept addressing only the first 45 — so
-  the panel really did keep showing a 15×3 picture on a 15×5 wall. Pressing **Identify All**
-  was the only way out, and you had to know to do it. It now rebuilds whenever the registry
-  disagrees with the wall, in either direction.
-
-  *(Superseded in 1.10: the registry is gone, and with it this bug's entire habitat. The wall
-  is the modules; there is nothing left to reconcile.)*
-
-- **Companion tab advertisement — the whole feature was missing.** `/api/companion` accepted
-  the companion's `tabs` and *silently discarded them*, and never advertised the gateway's own
-  `gwTabs`. So neither app could link to the other's screens. Both directions now work. The
-  gateway advertises **Display, Settings, Status** — deliberately *not*
-  Provision or Calibration, which the split-flap gateway has and this product cannot.
-
----
-
-## New in 1.3
-
-- **A 15 × 5 geometry preset for 128 × 64 panels — 75 modules, filling the wall.** The firmware
-  already supported it (`VM_MAX_MODULES` is 128, and the emulated bus's reply queue is sized for
-  a full 128-module wall); it simply was not offered. Every 128 × 64 preset was three rows tall,
-  which leaves two thirds of the panel as bezel. Pick it in Settings → *Geometry preset*.
-
-  A 64-row chain halves the refresh rate (~157 Hz → ~78 Hz) and doubles the framebuffer
-  (38 KB → 77 KB of internal DMA RAM). Both are within budget. See [The panel](#the-panel).
-
----
-
-## New in 1.2.1
-
-- **Every board now has its own identity.** The auto hostname, the MQTT client id and the
-  Home Assistant device id were all derived from `ESP.getEfuseMac()`'s *low* bytes — which are
-  the Espressif OUI, identical on every ESP32 ever made. Two gateways on one LAN both called
-  themselves `splitflap-gw-e22748` and both connected to MQTT as `splitflap-20E22748`, and a
-  broker evicts the client already holding a duplicate id, so the pair knocked each other
-  offline in a loop. They now derive from the MAC bytes that actually differ.
-
-  > **If you use the Home Assistant integration, the device id changes** (`sfgw_20E22748` →
-  > `sfgw_E2205AC8`). Home Assistant will discover a new device. Delete the old one.
-
----
-
-## New in 1.2
-
-- **Quiet Time now blanks the wall.** Turning it on homes every reel to its blank flap — the
-  same operation as **Home All** — so the panel goes empty for the night instead of freezing
-  mid-message. Turning it off restores what was there. The reels are virtual, but the frame is
-  real: the blank goes out as a broadcast `m*h` through the emulated bus, so the flaps visibly
-  flip down on the panel exactly as physical modules would.
-
----
-
-## New in 1.1
-
-- **The dashboard speaks 13 languages**, following your browser the same way light/dark already
-  does. One firmware image ships all of them. See [Language](#language).
-- **Fixed two invisible controls in the light theme**, both shipped in 1.0.1. The Home Assistant
-  re-skin re-pointed `--acc` to 12% black but left `button{color:#fff}` inherited, so every
-  secondary button (Identify All, Refresh, Clear, Download Log, Test Connection) drew white on
-  near-white — a contrast ratio of **1.3:1**. Separately, the bus monitor's text was themed to
-  follow `--txt` while its panel stayed hardcoded dark, giving near-black on near-black at
-  **1.2:1**. Both now clear WCAG AA.
-- **The re-skin is finished.** The monitor, the status tiles and the module cards read from the
-  theme instead of the old dark palette, in both light and dark.
+Per-release history — features, breaking changes, certification results — lives in
+[RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ---
 
 ## Table of Contents
 
 - [What it does](#what-it-does)
+- [Beyond the flaps: the pixel surface](#beyond-the-flaps-the-pixel-surface)
 - [The reel](#the-reel)
-  - [Why `m38-r` shows red and not the letter r](#why-m38-r-shows-red-and-not-the-letter-r)
+  - [Why `m5-r` shows red and not the letter r](#why-m5-r-shows-red-and-not-the-letter-r)
 - [What is and is not emulated](#what-is-and-is-not-emulated)
 - [The panel](#the-panel)
 - [The flip](#the-flip)
@@ -662,6 +75,35 @@ gateway receives is recorded in the command log (`GET /api/log`).
 
 The difference is that nothing is moving. The modules are software, and the panel is where
 they live.
+
+---
+
+## Beyond the flaps: the pixel surface
+
+Because the "wall" is really a framebuffer, the gateway exposes it directly alongside the
+split-flap emulation — everything feature-detected through `GET /api/capabilities`, fully
+specified in [openapi.yaml](openapi.yaml) and the
+[wiki's Canvas page](https://github.com/avandeputte/SplitFlapGateway/wiki/Canvas):
+
+- **Canvas mode** — push raw frames (`rgb888`/`rgb565`/QOI), partial rects, multi-rect
+  deltas, or a JSON batch of draw ops (shapes, text in six sizes plus uploadable fonts,
+  sprites); configure crossfade/wipe/slide **transitions** for full-frame presents.
+- **The stream channel** (`PUT /api/canvas/stream`) — one long-lived connection carrying
+  draw records back-to-back for animation-rate updates with no per-frame HTTP round trip.
+- **The atlas library** — up to 16 named sprite sheets resident in PSRAM, optionally
+  persisted to flash, blitted by index from draw ops or the stream.
+- **On-device content** — a stored animation library (with GIF import) and boot
+  animation, a scrolling ticker (exclusive or overlaid), and effects: plasma, fire,
+  matrix rain, flip-o-rama, a clock, Game of Life.
+- **Live events** (`GET /api/events`) — a Server-Sent Events stream carrying the display
+  state the instant it changes plus a status heartbeat; the dashboard's live preview and
+  its status pane ride it instead of polling.
+- **Text is UTF-8 in, CP1252 flaps out** — ops/ticker text accepts the full Latin-1
+  repertoire (`21° — Grüße`), transcoded on device.
+
+The wall and the canvas hand the panel back and forth cleanly: canvas/effect/animation
+modes park the flap renderer, and releasing them (`POST /api/canvas {"active":false}`)
+returns whatever the reels last showed.
 
 ---
 
@@ -810,8 +252,8 @@ and backup commands are ignored rather than faked — no reply, no state. `h` si
 **The wire is not emulated either.** The physical gateway's half-duplex serial wire at
 9600 baud is slow — a broadcast query across 45 modules once took seconds of staggered reply
 slots. Here a frame is a function call: delivery is instant, one-way, and **nothing ever
-replies**, so there is no reply timing to emulate and no collisions to worry about. The MQTT
-wire mirror (`<prefix>/frames/tx`) carries the outbound frames, which are the whole of the
+replies**, so there is no reply timing to emulate and no collisions to worry about. The
+command log (`GET /api/log`) records the outbound frames, which are the whole of the
 traffic.
 
 ---
@@ -1019,14 +461,16 @@ walk plus a `MutationObserver` translates the static page *and* whatever the JS 
 
 ## Compatibility
 
-The companion app talks to the gateway over exactly seven HTTP endpoints and models *nothing*
+The companion app's *core* contract is seven HTTP endpoints, and it models *nothing*
 about a module — not the flap count, not the character set, not serial numbers. The
 reel is invisible to it. Those seven are
 `GET /api/config`, `GET /api/status`, `POST /api/frames/send`, `POST /api/frames/batch`,
 `POST /api/companion`, and `GET`/`PUT /api/companion/settings`. (Since v1.22.0 the
-`/api/frames/*` pair is the only send surface — the physical gateway's paths it once aliased
-are gone, so the companion must be on a build that POSTs to `/api/frames/*`. See
-**New in 1.22**.)
+`/api/frames/*` pair is the only send surface — the physical gateway's paths it once
+aliased are gone.) Beyond that core the companion *feature-detects* through
+`GET /api/capabilities`: on this gateway it finds and uses the index-addressed cell
+surface (`POST /api/display/cells`) and the whole canvas family — QOI frames, delta
+rects, the stream channel, the atlas library, transitions.
 
 Two things do matter, and both are handled:
 
@@ -1037,8 +481,9 @@ Two things do matter, and both are handled:
    companion sends `m00-A\n` style frames as `windows-1252`, one byte per glyph. They are not
    transcoded.
 
-The gateway's own MQTT surface, Home Assistant discovery and the `/api/companion/settings` gzip
-blob store are carried over untouched.
+The `/api/companion/settings` gzip blob store is carried over untouched. (The physical
+gateway's MQTT surface and Home Assistant discovery are **not** — they were removed from
+this firmware in v3.0.)
 
 ---
 
@@ -1065,6 +510,9 @@ src/canvas.*        raw canvas: frames, rects, QOI decode, draw ops, on-device a
 src/effects.*       on-device effects: plasma, fire, matrix, flip-o-rama, clock, Life
 src/panel.*         the low-level HUB75 driver: ESP32-S3 LCD_CAM + GDMA, no library
 src/modules.*       high-level protocol send helpers (text/char/home) + FATFS mount
+src/httpx.*         the native esp_http_server layer: route table, dispatch hook (CORS,
+                    watchdog stamps), JSON/chunk/query/body helpers, heap-graded recv pacing
+src/sse.*           GET /api/events: Server-Sent Events slots + the shared push buffer
 src/web.*           HTTP server: dashboard (web_ui.h) + REST API + GET /lang/<code>
 src/web_ui.h        GENERATED by tools/build_ui.py — do not edit
 src/ota.*           firmware update: raw-body browser/curl upload + mDNS
@@ -1111,6 +559,20 @@ pio run                 # build
 pio run -t upload       # flash over USB (esptool)
 pio device monitor      # 115200 baud, native USB CDC
 ```
+
+**The first build recompiles the Arduino core** (v3.3.0): `platformio.ini` carries a
+`custom_sdkconfig` block that rebuilds the core libraries with WiFi/lwIP buffers in PSRAM
+(see RELEASE_NOTES.md and ARCHITECTURE.md for why). Expect ~10–20 minutes and network
+access (IDF component fetches) the first time; later builds reuse the compiled core. If a
+core rebuild fails half-way, wipe its artifacts and retry:
+
+```sh
+rm -rf .pio/build managed_components sdkconfig.defaults sdkconfig.waveshare_matrix
+pio run
+```
+
+To return to the stock prebuilt core, delete the `custom_sdkconfig` block and do the same
+wipe — no source changes are needed.
 
 There is **no UF2 bootloader** on this board, so no drag-and-drop recovery: if a flash goes
 wrong, hold **BOOT** while plugging in USB and run `pio run -t upload` (esptool) again. Once a
@@ -1159,11 +621,12 @@ c++ -std=c++17 -Isrc tools/reel_test.cpp src/charset.cpp src/font1252.cpp \
   framebuffer stops starving WiFi of that pool — refusing only a geometry that will not fit even
   at depth 1. The virtual-module array is pinned to internal RAM too — `taskDisplay` walks it
   100×/s on the core the refresh runs on, and a PSRAM cache miss there causes a shimmer. (The
-  command log, the MQTT queue, the scheduled-TX ring and the 8 MB animation store *are* in
-  PSRAM; nothing in the refresh path touches them.)
+  command log, the scheduled-TX ring, the animation store and the atlas library *are* in
+  PSRAM — and since v3.3.0 the WiFi/lwIP buffers are too; nothing in the refresh path
+  touches any of them.)
 - **Wall-clock time needs a backup cell or a network.** The PCF85063 seeds the system clock at
-  boot only when it holds a plausible time; with no cell fitted (or a rejected reading — see
-  **New in 2.0**), time is invalid from power-on until the first NTP sync. Every caller already
+  boot only when it holds a plausible time; with no cell fitted (or a rejected/implausible
+  reading), time is invalid from power-on until the first NTP sync. Every caller already
   handles that state; frame timestamps show `HH:MM:SS` uptime until then.
 
 ---

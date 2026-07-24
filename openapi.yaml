@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Matrix Portal Gateway API
-  version: "3.2"
+  version: "3.3"
   description: |
     REST API for the **Matrix Portal Gateway** firmware, running on a
     Waveshare ESP32-S3-RGB-Matrix driver board. It emulates a wall of split-flap modules on a
@@ -1669,7 +1669,7 @@ paths:
                 type: object
                 properties:
                   product:  { type: string, example: "Matrix Portal Gateway" }
-                  fw:       { type: string, example: "2.1.0" }
+                  fw:       { type: string, example: "3.3.0" }
                   api:      { type: string, example: "3.1.0" }
                   grid:
                     type: object
@@ -1724,20 +1724,37 @@ paths:
                       Raw-framebuffer support — Matrix only; absent on the Split-Flap gateway,
                       which has no framebuffer. The panel a client can push frames to via
                       `PUT /api/canvas/frame` / `POST /api/canvas/ops`, with flags for the
-                      partial-update, animation, ticker and readback endpoints.
+                      partial-update, delta, stream, animation, ticker and readback endpoints
+                      and the named atlas library's limits.
                     properties:
                       formats:  { type: array, items: { type: string }, example: [rgb888, rgb565, qoi] }
                       width:    { type: integer, example: 128 }
                       height:   { type: integer, example: 64 }
                       rect:     { type: boolean, example: true, description: "`PUT /api/canvas/rect` partial updates" }
+                      rects:    { type: boolean, example: true, description: "`PUT /api/canvas/rects` multi-rect deltas (v3.1)" }
+                      stream:   { type: boolean, example: true, description: "`PUT /api/canvas/stream` persistent TLV draw channel (v3.2)" }
                       anim:     { type: boolean, example: true, description: "`PUT /api/canvas/anim` on-device animation" }
                       ticker:   { type: boolean, example: true, description: "`POST /api/canvas/ticker` scrolling text" }
                       readback: { type: boolean, example: true, description: "`GET /api/canvas/frame` screenshot readback" }
+                      atlas:
+                        type: object
+                        description: "Named sprite-atlas library limits (v3.1)"
+                        properties:
+                          named:         { type: boolean, example: true }
+                          persist:       { type: boolean, example: true }
+                          maxSheets:     { type: integer, example: 16 }
+                          maxBytes:      { type: integer, example: 4194304 }
+                          maxSheetBytes: { type: integer, example: 2097152 }
                       ops:
                         type: array
                         description: "The draw ops `POST /api/canvas/ops` honours. `sprite` (atlas tile blit) joined in v2.1."
                         items: { type: string }
                         example: [clear, pixel, hline, vline, line, rect, circle, ellipse, triangle, roundrect, gradient, polyline, text, image, sprite, scroll, show]
+                  effectParams:
+                    type: array
+                    description: "Optional tuning keys `POST /api/canvas/effect` accepts alongside type/speed"
+                    items: { type: string }
+                    example: [hue, density]
                   effects:
                     type: array
                     description: >

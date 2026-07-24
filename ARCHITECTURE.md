@@ -36,26 +36,50 @@ Two inherited invariants survive the swap and matter:
   plus `capBuf` and the readback buffer in `web.cpp`) remain safe without locks. If httpd
   is ever given more workers, that assumption breaks loudly — audit every `static` in
   `web.cpp`/`httpx.cpp` first.
-- **The web watchdog still catches wedged handlers.** taskWeb (now just the SSE pump +
-  supervisor) covers `wdgWebMs` while the server is idle, but stops covering once a
+- **The web watchdog still catches wedged handlers.** taskWeb (the SSE push pump, the
+  canvas stream pump, and supervisor) covers `wdgWebMs` while the server is idle, but stops covering once a
   request has been in-flight for ~110 s (`httpxBusySince`); a truly stuck handler
   therefore still trips loop()'s 120 s stall reboot, exactly as on the old task model.
 
 The push pump: taskWeb hashes the reels (FNV over `curIndex` under `vmMutex`) every
 150 ms while streams are open, and broadcasts the display-state JSON (built by
-`dispStateJson`, the same shape `/api/display/state` serves) to every parked SSE socket.
-One sender task means no two writers ever interleave on a socket — keep it that way.
+`dispStateJson`, the same shape `/api/display/state` serves) to every parked SSE socket;
+a `status` event (shared `statusJson` builder) goes out every 5 s so a connected
+dashboard needs no pollers. One sender task means no two writers ever interleave on a
+socket — keep it that way. Two guards protect the pump's cadence (v3.2/3.3): display
+broadcasts are skipped while internal heap is under 40 KB (the preview drops frames
+rather than the heap), and every SSE socket carries a **600 ms send timeout** — a stuck
+event client is dropped (EventSource reconnects) instead of blocking taskWeb, which is
+also the stream pump's task, for the global 8 s socket timeout.
 
-**Known bound — concurrent large streams.** This lwIP build's per-socket TCP buffers are
-large and not capped by anything we control (`SO_RCVBUF` is a no-op; the window scale is
-baked into the precompiled stack). The graded recv pacing in `httpxRecv` (60/45/30 K →
-5/20/40 ms per chunk, firmer for the first 30 s after boot) is what holds the certified
-soak profile — one sequential heavy client + SSE + dashboard polls + a live companion —
-at a ~44 K min-heap. A *synthetic* pattern of three independent clients hammering 32 KB
-streams in tight loops with connection churn can still transiently run the heap to near
-zero; the board recovers (lwIP sheds a connection, loop()'s floor is the backstop) and
-no real deployment here looks like that, but if one ever does, the fix is Option B from
-the old heap notes: a custom-sdkconfig framework rebuild with small TCP_WND/SND_BUF.
+**The canvas stream channel** (`PUT /api/canvas/stream`, v3.2) reuses the same async
+mechanism in the other direction: the handler parks the request, flips the socket
+non-blocking, and taskWeb's `canvasStreamPump` drains TLV records into a PSRAM buffer
+and executes them — draining **eagerly, always**, because unread ingest lives in
+internal-heap pbufs and reading is what frees them (a heap-graded drain throttle was
+measured to make troughs worse; do not reintroduce one). One stream at a time; the
+drawing REST endpoints answer 409 while it is open; on the end record the 200 is sent,
+allowed 30 ms to drain (an immediate close raced the flush and clients saw RST), and
+the session is closed rather than recycled — but stream state clears *before* that
+drain so a follow-on REST call never bounces. Two client rules are documented in the
+API reference: send the first record in the same write as the request head (a bare
+body-carrying head parse-blocks httpd's single worker for the 8 s socket timeout —
+stock esp_http_server behaviour), and don't send unboundedly ahead.
+
+**The heap-vs-network bound, and its v3.3.0 resolution.** Through v3.2 the deep story
+of this platform was network buffering competing with the application for internal SRAM:
+worst-case alignments of four concurrent sockets could transiently run a ~68 KB free
+heap into single digits, held at bay by app-level guards (the graded recv pacing in
+`httpxRecv` — 60/45/30 K → 5/20/40 ms per chunk, firmer for the first 30 s after boot —
+plus 507 admission checks, and Nagle left ON: a TCP_NODELAY A/B collapsed the min-heap
+from 47 K to 700 B under concurrency, so it is banned). v3.3.0 ended the class
+structurally: `platformio.ini` rebuilds the Arduino core (`custom_sdkconfig`) with
+**`SPIRAM_TRY_ALLOCATE_WIFI_LWIP`** — WiFi/lwIP buffers allocate from PSRAM. Measured:
+worst-alignment trough floors went from 12–27 K to **66–68 K**, with ops latency and
+stream throughput unchanged. The app-level guards all remain as defence in depth. Two
+levers measured as nulls on the way (documented so nobody retries them): shrinking the
+WiFi RX buffer counts changed nothing, and the WiFi IRAM options are already off in the
+stock Arduino core.
 
 ---
 
@@ -176,9 +200,11 @@ of the traffic.
 
 ## Locking
 
-Six mutexes exist. Four are inherited (`msgMutex`, `timeMutex`, `mqttQMutex`, `txMutex`); two
-are this product's: **`vmMutex`**, guarding the virtual-module array, and
-**`txQMutex`**, guarding the scheduled-TX ring that paces `/api/frames/batch` off the web task.
+Six mutexes exist. Three are inherited (`msgMutex`, `timeMutex`, `txMutex` —
+`mqttQMutex` left with MQTT in v3.0); three are this product's: **`vmMutex`**, guarding
+the virtual-module array, **`txQMutex`**, guarding the scheduled-TX ring that paces
+`/api/frames/batch` off the web task, and **`sseMutex`** (file-private in `sse.cpp`),
+guarding the event-stream slots and shared push buffer.
 (`sfMutex` went with the module registry in 1.10; the reply queue `vmMutex` also guarded went
 with the reply pipeline in 1.24.)
 
