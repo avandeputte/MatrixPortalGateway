@@ -95,6 +95,10 @@ specified in [openapi.yaml](openapi.yaml) and the
 - **On-device content** — a stored animation library (with GIF import) and boot
   animation, a scrolling ticker (exclusive or overlaid), and effects: plasma, fire,
   matrix rain, flip-o-rama, a clock, Game of Life.
+- **Audio-reactive visuals** *(v3.4)* — the board's dual microphones (ES7210 ADC)
+  drive a `spectrum` analyzer, a `soundwall` mode where the flap wall itself flips on
+  beats, and an `"audio":true` option that makes fire/matrix/plasma react to the
+  room. Sound is reduced to a handful of numbers on-device; nothing is recorded.
 - **Live events** (`GET /api/events`) — a Server-Sent Events stream carrying the display
   state the instant it changes plus a status heartbeat; the dashboard's live preview and
   its status pane ride it instead of polling.
@@ -507,7 +511,9 @@ src/vmodule.*       the virtual split-flap modules: protocol dispatch and the sh
 src/display.*       flap-wall geometry and the flap renderer (calls panel.*)
 src/canvas.*        raw canvas: frames, rects, QOI decode, draw ops, on-device animation + ticker,
                     the animation/font libraries, transitions, sprite atlas, GIF import
-src/effects.*       on-device effects: plasma, fire, matrix, flip-o-rama, clock, Life
+src/audio.*         microphone frontend: ES7210 bring-up, I2S capture, FFT/beat features
+src/effects.*       on-device effects: plasma, fire, matrix, flip-o-rama, clock, Life,
+                    spectrum + soundwall (audio-reactive, v3.4)
 src/panel.*         the low-level HUB75 driver: ESP32-S3 LCD_CAM + GDMA, no library
 src/modules.*       high-level protocol send helpers (text/char/home) + FATFS mount
 src/httpx.*         the native esp_http_server layer: route table, dispatch hook (CORS,

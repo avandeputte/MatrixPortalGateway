@@ -1,5 +1,36 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.4.0 — 2026-07-24
+
+### Added — the board can hear now
+
+- **Microphone frontend** (`src/audio.*`): the board's ES7210 dual-microphone ADC is
+  brought up at boot (I2C, deliberately before any task exists — the RTC's bus access
+  holds no lock) and captured over I2S on demand — 16 kHz stereo, started when an
+  audio consumer appears and self-stopping 3 s after the last one leaves. Per 8 ms
+  hop: DC-removed mono mix, RMS level with slow auto-gain (quiet rooms still
+  visualise), a 128-point FFT folded into 16 log-spaced bands with per-band
+  normalisers, and a bass beat detector. **Only derived numbers exist** — no audio
+  samples are stored, exposed, or transmitted.
+- **`spectrum` effect** — 16 log-band analyzer bars with falling peak caps and a
+  bass→treble hue gradient (`hue` rotates the palette).
+- **`soundwall` effect** — the split-flap wall itself is the visual: each beat flips
+  a loudness-scaled splash of random cells to a colour flap chosen by the dominant
+  frequency band (bass red → treble white), with the flips animating through the
+  normal reel mechanics; ~3 s of quiet settles the wall home a few cells at a time.
+  Runs in genuine wall mode, so the dashboard's flap preview follows it.
+- **`"audio": true`** on `POST /api/canvas/effect` — fire breathes with loudness and
+  throws sparks on beats, matrix rain falls harder and bursts on beats, plasma
+  speeds up and lurches. Explicit per start, like `hue`/`density`.
+- **`GET /api/canvas/audio`** — live features (level, peak, beat, bands) for
+  diagnostics and clients.
+- Capabilities: an `audio` feature token appears **only when the ES7210 actually
+  answers**, and `effectParams` gains `"audio"`.
+
+One hard-won note is written into the driver: after configuring the ES7210, the
+REG01 clock re-enable is **load-bearing** — without it the ADC stays silent behind a
+perfectly healthy-looking I2S interface.
+
 ## v3.3.0 — 2026-07-22
 
 ### Changed

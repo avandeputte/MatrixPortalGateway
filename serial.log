@@ -1,0 +1,39 @@
+[OTA] response delivered -- rebooting into the new image
+E (38009) httpd: httpd_accept_conn: error in accept (128)
+E (38010) httpd: httpd_accept_conn: error in accept (128)
+[WiFi] Disconnected
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0xc (RTC_SW_CPU_RST),boot:0xa (SPI_FAST_FLASH_BOOT)
+Saved PC:0x4037e279
+SPIWP:0xee
+Octal Flash Mode Enabled
+For OPI Flash, Use Default Flash Boot Mode
+mode:SLOW_RD, clock div:1
+load:0x3fce2820,len:0xfb0
+load:0x403c8700,len:0xaf4
+load:0x403cb700,len:0x2e34
+entry 0x403c8898
+E (1137) esp_core_dump_flash: No core dump partition found!
+E (1137) esp_core_dump_flash: No core dump partition found!
+[MEM] command log in PSRAM (10496 bytes)
+[MEM] scheduled TX in PSRAM (28672 bytes)
+
+[Boot] Matrix Portal Gateway v3.3.0 (gateway API 3.1.0)
+[Boot] running slot=app0, built Jul 24 2026 23:39:43
+[Boot] reset=SW heap=275852 psram=16777216 flash=32768KB sdk=5.5.4
+[RTC] PCF85063 seeded the clock: 2026-08-11 21:46:12 UTC
+[AUDIO] ES7210 at 0x40: configured (dual mic, 16 kHz)
+[MEM] virtual modules in internal RAM (2560 bytes)
+[VM] 160 virtual modules, 237 flaps each (156 glyphs + 7 colours + 60 lowercase + 14 pictographs)
+[PANEL] 256x64 depth 4 wants 144640 B of internal DMA RAM (budget 122880, free 263324) -- clamped to depth 3 so the panel still lights
+[PANEL] 256x64, 32x5 wall, 8x12 cells, 6x10 font, 3 bitplanes
+[PANEL] 102 KB internal, refresh ~85 Hz, heap now 165540
+[PANEL] boot test pattern up for 4s (PANEL_BOOT_TEST=1 in common.h)
+[WiFi] hostname splitflap-gw-d796d0 (http://splitflap-gw-d796d0.local)
+[WiFi] STA connecting to S4...
+[OTA] Ready (hostname: splitflap-gw-d796d0, web UI at http://splitflap-gw-d796d0.local)
+[Web] HTTP server started (port 80), 78 routes
+[Boot] Ready
+[NTP] clock set: 2026-08-12 01:46:17 UTC
+[WiFi] Connected IP=192.168.1.204

@@ -648,6 +648,37 @@ paths:
           description: Internal heap low — retry shortly
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
 
+  /api/canvas/audio:
+    get:
+      tags: [Canvas]
+      summary: Microphone features (v3.4)
+      description: |
+        The live audio features behind the audio-reactive effects: whether the ES7210
+        dual-microphone ADC is present, whether capture is currently running (it starts
+        with the first audio consumer and self-stops ~3 s after the last one leaves), and
+        the current level / peak / beat / 16 log-band spectrum. `seq` increments per 8 ms
+        DSP hop — a static value means capture is idle. These are derived numbers only;
+        audio samples are never stored or exposed by any endpoint.
+      responses:
+        "200":
+          description: Audio frontend state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  available: { type: boolean, description: "ES7210 found and configured at boot" }
+                  capturing: { type: boolean }
+                  seq:       { type: integer }
+                  level:     { type: number, description: "0–1 auto-gained loudness" }
+                  peak:      { type: number }
+                  beat:      { type: boolean }
+                  bassRaw:   { type: number }
+                  bands:
+                    type: array
+                    items: { type: number }
+                    description: "16 log-spaced bands, 125 Hz–7.9 kHz, each 0–1"
+
   /api/canvas/stream:
     put:
       tags: [Canvas]
@@ -1453,10 +1484,19 @@ paths:
         * `clock` — a digital clock: big anti-aliased HH:MM (JetBrains Mono) in a drifting rainbow,
           with the date and seconds; uses the gateway's configured timezone.
         * `life` — Conway's Game of Life, cells coloured by age, reseeded when it settles.
+        * `spectrum` *(fw 3.4, `audio` feature token)* — 16 log-band microphone spectrum
+          analyzer: bars with falling peak caps, bass→treble hue gradient (`hue` rotates it).
+        * `soundwall` *(fw 3.4, `audio` feature token)* — the flap wall itself reacts: each
+          beat flips a loudness-scaled splash of cells to a colour flap picked by the dominant
+          frequency band; ~3 s of quiet settles the wall home. Runs in genuine wall mode
+          (`display/state` stays `mode:"wall"`, the flap preview follows it).
 
         `speed` is `1`–`10` (default keeps the current value). `hue` and `density` (v1.19) are
         optional per-start overrides of the effect's look; leaving either out keeps the effect's
-        own default. Nothing is persisted — a reboot returns to the wall.
+        own default. `audio` *(fw 3.4)*: `true` makes `fire`/`matrix`/`plasma` react to the
+        microphones — loudness drives intensity/tempo, beats add sparks/bursts/lurches; explicit
+        per start, and a no-op without the `audio` feature token. Nothing is persisted — a
+        reboot returns to the wall.
       requestBody:
         required: true
         content:
@@ -1464,10 +1504,11 @@ paths:
             schema:
               type: object
               properties:
-                type:    { type: string, enum: [plasma, fire, matrix, fliporama, clock, life, none] }
+                type:    { type: string, enum: [plasma, fire, matrix, fliporama, clock, life, spectrum, soundwall, none] }
                 speed:   { type: integer, minimum: 1, maximum: 10 }
                 hue:     { type: integer, minimum: 0, maximum: 255, description: "Base hue override (0–255 colour wheel). Omit to keep the effect's own palette." }
                 density: { type: integer, minimum: 1, maximum: 100, description: "Density override (1–100), e.g. streak count or seeding. Omit for the effect default." }
+                audio:   { type: boolean, description: "fw 3.4: microphone-modulate this effect (fire/matrix/plasma). Requires the audio feature token." }
             example: { type: plasma, speed: 4, hue: 96 }
       responses:
         "200":
@@ -1482,6 +1523,7 @@ paths:
                   speed:   { type: integer, example: 4 }
                   hue:     { type: integer, example: 96, description: "-1 when no override is set" }
                   density: { type: integer, example: -1, description: "-1 when no override is set" }
+                  audio:   { type: boolean, example: false }
         "400":
           description: Invalid JSON
           content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
