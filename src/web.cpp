@@ -754,21 +754,29 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
              "\"maxBytes\":%u,\"maxSheetBytes\":%u},"
              "\"ops\":[\"clear\",\"pixel\",\"hline\",\"vline\",\"line\",\"rect\",\"circle\",\"ellipse\","
              "\"triangle\",\"roundrect\",\"gradient\",\"polyline\",\"text\",\"image\",\"sprite\",\"scroll\",\"show\"]},"
-             "\"effects\":%s,\"effectParams\":[\"hue\",\"density\",\"audio\"],",
+             "\"effects\":%s,\"effectParams\":%s,",
              (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
              (unsigned)ATLAS_MAX_SHEETS, (unsigned)ATLAS_TOTAL_BUDGET,
-             (unsigned)ATLAS_MAX_SHEET_BYTES, effectListJson());
+             (unsigned)ATLAS_MAX_SHEET_BYTES, effectListJson(), effectParamsUnionJson());
     // A truncated canvas block would be INVALID JSON for every client; make it loud.
     if (strlen(cv) >= sizeof(cv) - 1) printf("[WEB] capabilities canvas block TRUNCATED -- enlarge cv[]\n");
     capPut(cv); }
+
+  // Self-describing effect defs (v3.4): every effect with exactly the params it
+  // consumes -- clients gate on the "effectDefs" feature token and build their
+  // effect UIs from this instead of hard-coding options. Additive: the flat
+  // "effects" + "effectParams" above are unchanged for older clients.
+  capPut("\"effectDefs\":");
+  capPut(effectDefsJson());
+  capPut(",");
 
   // What the wall can DO, not just show, so a client reads this instead of sniffing the
   // firmware version and guessing.
   capPut(audioAvailable()
          ? "\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
-           "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\",\"audio\"]}"
+           "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\",\"audio\",\"effectDefs\"]}"
          : "\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
-           "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\"]}");
+           "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\",\"effectDefs\"]}");
   capFlush();
   return httpxChunkEnd(r);
 }

@@ -99,6 +99,9 @@ specified in [openapi.yaml](openapi.yaml) and the
   drive a `spectrum` analyzer, a `soundwall` mode where the flap wall itself flips on
   beats, and an `"audio":true` option that makes fire/matrix/plasma react to the
   room. Sound is reduced to a handful of numbers on-device; nothing is recorded.
+- **Self-describing effects** *(v3.4)* — capabilities carry `effectDefs`: every
+  effect with exactly the typed, ranged, labelled params it consumes, so clients
+  render effect UIs dynamically instead of hard-coding options.
 - **Live events** (`GET /api/events`) — a Server-Sent Events stream carrying the display
   state the instant it changes plus a status heartbeat; the dashboard's live preview and
   its status pane ride it instead of polling.

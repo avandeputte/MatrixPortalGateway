@@ -26,6 +26,18 @@
   diagnostics and clients.
 - Capabilities: an `audio` feature token appears **only when the ES7210 actually
   answers**, and `effectParams` gains `"audio"`.
+- **Self-describing effects** (`effectDefs` feature token): `GET /api/capabilities`
+  now carries `"effectDefs"` — one object per effect declaring exactly the params it
+  consumes (`key`, `type` `int`/`bool`, `min`/`max`, optional `default`, display
+  `label`), so a client can build its effect UI dynamically and future effects and
+  options appear with no client release. **Additive only**: the flat `"effects"`
+  list and `"effectParams"` union are unchanged, byte for byte — `effectDefs` is
+  the forward path, the legacy keys remain for existing clients. Single source of
+  truth in the firmware: a param vocabulary + per-effect index lists next to the
+  effect table, with a `static_assert` forcing every registered effect to carry a
+  def; the legacy union derives from the same tables. `POST /api/canvas/effect`
+  accepts each declared param by key, clamps ints into their declared range, and
+  ignores unknown keys in both directions of version skew.
 
 One hard-won note is written into the driver: after configuring the ES7210, the
 REG01 clock re-enable is **load-bearing** — without it the ADC stays silent behind a

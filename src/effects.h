@@ -49,6 +49,17 @@ uint8_t     effectByName(const char* name);   // wire name -> id (EFFECT_NONE if
 const char* effectName(uint8_t e);            // id -> canonical name ("none" for EFFECT_NONE)
 const char* effectListJson();                 // all names as a JSON array, e.g. ["plasma",...]
 
+// Self-describing effects (v3.4, the "effectDefs" capability token): one def per
+// effect declaring exactly the params it consumes -- key, type, range, optional
+// default, display label -- so a client can build its effect UI dynamically instead
+// of hard-coding each option. Single source of truth: the param VOCABULARY (one
+// entry per knob) and the per-effect index lists live next to the effect table in
+// effects.cpp; a static_assert keeps them in lockstep with EFFECT_TABLE, and both
+// the legacy flat "effectParams" union and the new "effectDefs" JSON derive from
+// them at first use.
+const char* effectDefsJson();          // [{id,name,params:[{key,type,...}]}...]
+const char* effectParamsUnionJson();   // legacy flat union, e.g. ["hue","density","audio"]
+
 void effectReset(uint8_t type);   // prepare per-effect state; called only on taskDisplay
 void effectRender(uint8_t type);  // render + present one frame; runs on taskDisplay
 // EFFECT_SOUNDWALL is the one effect that does NOT own the panel as pixels: it drives

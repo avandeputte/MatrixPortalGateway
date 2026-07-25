@@ -120,6 +120,100 @@ const char* effectName(uint8_t e) {
   return (e >= 1 && e <= EFFECT_COUNT) ? EFFECT_NAMES[e - 1] : "none";
 }
 // The advertised set as a JSON array -- one source of truth for GET /api/canvas + /api/capabilities.
+/* ---- self-describing effect defs (v3.4) --------------------------------------
+   The param vocabulary: ONE definition per knob (key, type, range, default, label).
+   Its order is load-bearing for the legacy "effectParams" union, which derives from
+   it (skipping "speed", which predates the union and was never listed). */
+struct EffectParamDef {
+  const char* key; const char* type;
+  int16_t minv, maxv, defv; bool hasDef;
+  const char* label;
+};
+static const EffectParamDef EPV[] = {
+  { "speed",   "int",  1, 10,  5, true,  "Speed"          },
+  { "hue",     "int",  0, 255, 0, false, "Hue"            },
+  { "density", "int",  1, 100, 0, false, "Density"        },
+  { "audio",   "bool", 0, 1,   0, true,  "Audio reactive" },
+};
+enum { EPI_SPEED, EPI_HUE, EPI_DENSITY, EPI_AUDIO, EPI_COUNT };
+
+// Per-effect: WHICH vocabulary knobs it actually consumes (verified against the
+// render/reset code -- e.g. fire ignores speed and hue; soundwall takes nothing).
+static const uint8_t P_PLASMA[]  = { EPI_SPEED, EPI_HUE, EPI_AUDIO };
+static const uint8_t P_FIRE[]    = { EPI_AUDIO };
+static const uint8_t P_MATRIX[]  = { EPI_SPEED, EPI_HUE, EPI_AUDIO };
+static const uint8_t P_FLIP[]    = { EPI_SPEED, EPI_DENSITY };
+static const uint8_t P_CLOCK[]   = { EPI_HUE };
+static const uint8_t P_LIFE[]    = { EPI_SPEED, EPI_HUE, EPI_DENSITY };
+static const uint8_t P_SPECT[]   = { EPI_HUE };
+static const uint8_t P_NONE_[1]  = { 0 };                  // zero-length arrays are not C++
+
+struct EffectDefRow { uint8_t id; const char* title; const uint8_t* p; uint8_t np; };
+static const EffectDefRow DEFS[] = {
+  { EFFECT_PLASMA,    "Plasma",      P_PLASMA, 3 },
+  { EFFECT_FIRE,      "Fire",        P_FIRE,   1 },
+  { EFFECT_MATRIX,    "Matrix Rain", P_MATRIX, 3 },
+  { EFFECT_FLIPORAMA, "Flip-o-rama", P_FLIP,   2 },
+  { EFFECT_CLOCK,     "Clock",       P_CLOCK,  1 },
+  { EFFECT_LIFE,      "Game of Life",P_LIFE,   3 },
+  { EFFECT_SPECTRUM,  "Spectrum",    P_SPECT,  1 },
+  { EFFECT_SOUNDWALL, "Soundwall",   P_NONE_,  0 },
+};
+// Registering an effect in EFFECT_TABLE without a def row (or vice versa) must not
+// compile: the def list is how clients discover the effect's options. EFFECT_COUNT
+// is generated from EFFECT_TABLE above.
+static_assert(sizeof(DEFS) / sizeof(DEFS[0]) == (size_t)EFFECT_COUNT,
+              "every EFFECT_TABLE entry needs an EffectDefRow in DEFS");
+
+const char* effectDefsJson() {
+  static char buf[1536];
+  if (!buf[0]) {
+    int n = 0;
+    n += snprintf(buf + n, sizeof(buf) - n, "[");
+    for (size_t e = 0; e < sizeof(DEFS) / sizeof(DEFS[0]); e++) {
+      const EffectDefRow& d = DEFS[e];
+      n += snprintf(buf + n, sizeof(buf) - n, "%s{\"id\":\"%s\",\"name\":\"%s\",\"params\":[",
+                    e ? "," : "", effectName(d.id), d.title);
+      for (uint8_t k = 0; k < d.np; k++) {
+        const EffectParamDef& p = EPV[d.p[k]];
+        n += snprintf(buf + n, sizeof(buf) - n, "%s{\"key\":\"%s\",\"type\":\"%s\"",
+                      k ? "," : "", p.key, p.type);
+        if (p.type[0] == 'i')
+          n += snprintf(buf + n, sizeof(buf) - n, ",\"min\":%d,\"max\":%d", p.minv, p.maxv);
+        if (p.hasDef) {
+          if (p.type[0] == 'b')
+            n += snprintf(buf + n, sizeof(buf) - n, ",\"default\":%s", p.defv ? "true" : "false");
+          else
+            n += snprintf(buf + n, sizeof(buf) - n, ",\"default\":%d", p.defv);
+        }
+        n += snprintf(buf + n, sizeof(buf) - n, ",\"label\":\"%s\"}", p.label);
+      }
+      n += snprintf(buf + n, sizeof(buf) - n, "]}");
+    }
+    snprintf(buf + n, sizeof(buf) - n, "]");
+    if (strlen(buf) >= sizeof(buf) - 2) printf("[FX] effectDefs JSON TRUNCATED -- enlarge buf\n");
+  }
+  return buf;
+}
+
+const char* effectParamsUnionJson() {
+  static char buf[96];
+  if (!buf[0]) {
+    int n = snprintf(buf, sizeof(buf), "[");
+    for (int v = 0; v < EPI_COUNT; v++) {
+      if (v == EPI_SPEED) continue;                        // legacy list never carried speed
+      bool used = false;
+      for (size_t e = 0; e < sizeof(DEFS) / sizeof(DEFS[0]) && !used; e++)
+        for (uint8_t k = 0; k < DEFS[e].np; k++)
+          if (DEFS[e].p[k] == v) { used = true; break; }
+      if (used) n += snprintf(buf + n, sizeof(buf) - n, "%s\"%s\"",
+                              buf[n - 1] == '[' ? "" : ",", EPV[v].key);
+    }
+    snprintf(buf + n, sizeof(buf) - n, "]");
+  }
+  return buf;
+}
+
 const char* effectListJson() {
   static char buf[96];
   if (!buf[0]) {

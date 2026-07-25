@@ -1491,7 +1491,10 @@ paths:
           frequency band; ~3 s of quiet settles the wall home. Runs in genuine wall mode
           (`display/state` stays `mode:"wall"`, the flap preview follows it).
 
-        `speed` is `1`–`10` (default keeps the current value). `hue` and `density` (v1.19) are
+        **Which params each effect takes — with types, ranges, defaults and labels — is
+        machine-readable in capabilities `effectDefs` (fw 3.4); unknown keys in this body are
+        ignored, and declared int params are clamped into their range, so any client/firmware
+        version skew stays safe.** `speed` is `1`–`10` (default keeps the current value). `hue` and `density` (v1.19) are
         optional per-start overrides of the effect's look; leaving either out keeps the effect's
         own default. `audio` *(fw 3.4)*: `true` makes `fire`/`matrix`/`plasma` react to the
         microphones — loudness drives intensity/tempo, beats add sparks/bursts/lurches; explicit
@@ -1792,6 +1795,29 @@ paths:
                         description: "The draw ops `POST /api/canvas/ops` honours. `sprite` (atlas tile blit) joined in v2.1."
                         items: { type: string }
                         example: [clear, pixel, hline, vline, line, rect, circle, ellipse, triangle, roundrect, gradient, polyline, text, image, sprite, scroll, show]
+                  effectDefs:
+                    type: array
+                    description: >
+                      fw 3.4 (`effectDefs` feature token): one entry per effect declaring
+                      exactly the params it consumes — clients build effect UIs from this
+                      instead of hard-coding options. Additive: `effects`/`effectParams`
+                      are unchanged for older clients.
+                    items:
+                      type: object
+                      properties:
+                        id:   { type: string, example: fire, description: "Wire name for POST /api/canvas/effect" }
+                        name: { type: string, example: Fire, description: "Display name, shown verbatim" }
+                        params:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              key:     { type: string, example: audio }
+                              type:    { type: string, enum: [int, bool] }
+                              min:     { type: integer, description: "int params only" }
+                              max:     { type: integer, description: "int params only" }
+                              default: { description: "Absent = omitting the param keeps the effect's own built-in look" }
+                              label:   { type: string, example: Audio reactive }
                   effectParams:
                     type: array
                     description: "Optional tuning keys `POST /api/canvas/effect` accepts alongside type/speed"
@@ -1804,6 +1830,29 @@ paths:
                       on the Split-Flap gateway. Start one with `POST /api/canvas/effect`.
                     items: { type: string }
                     example: [plasma, fire, matrix, fliporama, clock, life]
+                  effectDefs:
+                    type: array
+                    description: >
+                      fw 3.4 (`effectDefs` feature token): one entry per effect declaring
+                      exactly the params it consumes — clients build effect UIs from this
+                      instead of hard-coding options. Additive: `effects`/`effectParams`
+                      are unchanged for older clients.
+                    items:
+                      type: object
+                      properties:
+                        id:   { type: string, example: fire, description: "Wire name for POST /api/canvas/effect" }
+                        name: { type: string, example: Fire, description: "Display name, shown verbatim" }
+                        params:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              key:     { type: string, example: audio }
+                              type:    { type: string, enum: [int, bool] }
+                              min:     { type: integer, description: "int params only" }
+                              max:     { type: integer, description: "int params only" }
+                              default: { description: "Absent = omitting the param keeps the effect's own built-in look" }
+                              label:   { type: string, example: Audio reactive }
                   effectParams:
                     type: array
                     description: "Optional per-start effect parameters `POST /api/canvas/effect` accepts beyond `speed`."
