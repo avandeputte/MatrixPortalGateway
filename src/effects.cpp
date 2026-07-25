@@ -509,45 +509,86 @@ static void renderLife(int W, int H) {
 // ---- lifecycle ----------------------------------------------------------------------------------
 
 /* ---- maze (v3.4): Hunt-and-Kill generation, watched live -------------------------
-   Cells sit on odd pixel coordinates ((W-1)/2 x (H-1)/2 cells); fxBuf is the pixel
-   map: 0 = wall, 1 = retracted corridor (solved away), 2..255 = passage brightness
-   (255 fresh, decaying to a floor -- so the carving leaves a glowing, fading trail).
-   Phases: WALK randomly carves into unvisited neighbours until cornered; HUNT sweeps
-   a visible scan line from the top for an unvisited cell touching a visited one and
-   resumes there; when every cell is visited, SOLVE runs animated dead-end filling --
-   corridors retract one cell per pass until only the corner-to-corner solution
-   remains lit (Hunt-and-Kill mazes are perfect, so the survivor is THE path); DONE
-   holds the glowing solution a moment, then a fresh maze begins. */
+   Corridors are 2 px wide on a 3 px pitch (2 px passage + 1 px wall), so the grid is
+   (W-1)/3 x (H-1)/3 cells -- 85x21 on a 256x64 panel, which reads as a maze rather
+   than a texture. fxBuf is the pixel map: 0 = wall, 1 = retracted corridor (solved
+   away), 2..255 = passage brightness (255 fresh, decaying to a floor -- the carving
+   leaves a glowing, fading trail). Phases: WALK randomly carves into unvisited
+   neighbours until cornered; HUNT scans for an unvisited cell touching a visited one
+   and resumes there (no on-screen sweep -- an earlier dotted scan-line overlay
+   flashed like a display artifact because hunts are frequent and brief); when every
+   cell is visited, SOLVE runs animated dead-end filling -- corridors retract until
+   only the corner-to-corner solution remains lit (Hunt-and-Kill mazes are perfect,
+   so the survivor is THE path); DONE holds the golden solution, then a fresh maze
+   begins. */
 enum { MZ_WALK, MZ_HUNT, MZ_SOLVE, MZ_DONE };
 static uint8_t  mzMode;
 static int16_t  mzCols, mzRows, mzCx, mzCy, mzHuntRow;
 static uint32_t mzVisited, mzTotal;
 static uint16_t mzHold;
+// Rainbow-by-carve-order: the second half of fxBuf (2*W*H allocated) holds a hue per
+// pixel, stamped from a rolling hue that advances a little per carved cell -- the
+// finished maze is a gradient tracing the algorithm's own history. 8.8 fixed point,
+// scaled in mzInit so a full generation spans ~1.5 turns of the wheel.
+static uint16_t mzHueAcc, mzHueStep;
+
+static inline uint8_t* mzHuePx(int x, int y) {
+  return &fxBuf[(size_t)gPanel.panelW * gPanel.panelH + y * gPanel.panelW + x];
+}
 
 static inline uint8_t* mzPx(int x, int y) { return &fxBuf[y * gPanel.panelW + x]; }
-static inline bool mzSeen(int cx, int cy) { return *mzPx(2 * cx + 1, 2 * cy + 1) >= 2; }
+static inline bool mzSeen(int cx, int cy) { return *mzPx(3 * cx + 1, 3 * cy + 1) >= 2; }
+
+static void mzFillCell(int cx, int cy, uint8_t v) {      // the 2x2 passage block
+  const int px = 3 * cx + 1, py = 3 * cy + 1;
+  const uint8_t h = (uint8_t)(mzHueAcc >> 8);
+  *mzPx(px, py) = v; *mzPx(px + 1, py) = v;
+  *mzPx(px, py + 1) = v; *mzPx(px + 1, py + 1) = v;
+  *mzHuePx(px, py) = h; *mzHuePx(px + 1, py) = h;
+  *mzHuePx(px, py + 1) = h; *mzHuePx(px + 1, py + 1) = h;
+}
+static const int8_t MZDX[4] = { 1, -1, 0, 0 };
+static const int8_t MZDY[4] = { 0, 0, 1, -1 };
+// The 1-thick, 2-long wall gap between (cx,cy) and its neighbour in direction d.
+static void mzFillWall(int cx, int cy, int d, uint8_t v) {
+  const int px = 3 * cx + 1, py = 3 * cy + 1;
+  const uint8_t h = (uint8_t)(mzHueAcc >> 8);
+  switch (d) {
+    case 0: *mzPx(px + 2, py) = v; *mzPx(px + 2, py + 1) = v;
+            *mzHuePx(px + 2, py) = h; *mzHuePx(px + 2, py + 1) = h; break;   // right
+    case 1: *mzPx(px - 1, py) = v; *mzPx(px - 1, py + 1) = v;
+            *mzHuePx(px - 1, py) = h; *mzHuePx(px - 1, py + 1) = h; break;   // left
+    case 2: *mzPx(px, py + 2) = v; *mzPx(px + 1, py + 2) = v;
+            *mzHuePx(px, py + 2) = h; *mzHuePx(px + 1, py + 2) = h; break;   // down
+    default:*mzPx(px, py - 1) = v; *mzPx(px + 1, py - 1) = v;
+            *mzHuePx(px, py - 1) = h; *mzHuePx(px + 1, py - 1) = h; break;   // up
+  }
+}
+static bool mzWallOpen(int cx, int cy, int d) {          // sample one gap pixel
+  const int px = 3 * cx + 1, py = 3 * cy + 1;
+  switch (d) {
+    case 0:  return *mzPx(px + 2, py) >= 2;
+    case 1:  return *mzPx(px - 1, py) >= 2;
+    case 2:  return *mzPx(px, py + 2) >= 2;
+    default: return *mzPx(px, py - 1) >= 2;
+  }
+}
 
 static void mzInit() {
   const int W = gPanel.panelW, H = gPanel.panelH;
   memset(fxBuf, 0, (size_t)W * H);
-  mzCols = (int16_t)((W - 1) / 2);
-  mzRows = (int16_t)((H - 1) / 2);
+  mzCols = (int16_t)((W - 1) / 3);
+  mzRows = (int16_t)((H - 1) / 3);
   mzCx = (int16_t)(rnd() % (uint32_t)mzCols);
   mzCy = (int16_t)(rnd() % (uint32_t)mzRows);
-  *mzPx(2 * mzCx + 1, 2 * mzCy + 1) = 255;
+  mzFillCell(mzCx, mzCy, 255);
   mzVisited = 1;
   mzTotal   = (uint32_t)mzCols * mzRows;
   mzMode    = MZ_WALK;
   mzHuntRow = 0;
   mzHold    = 0;
-}
-
-static const int8_t MZDX[4] = { 1, -1, 0, 0 };
-static const int8_t MZDY[4] = { 0, 0, 1, -1 };
-
-static void mzCarveTo(int cx, int cy, int d) {   // open the wall from (cx,cy) toward d, land there
-  *mzPx(2 * cx + 1 + MZDX[d], 2 * cy + 1 + MZDY[d]) = 255;
-  *mzPx(2 * (cx + MZDX[d]) + 1, 2 * (cy + MZDY[d]) + 1) = 255;
+  mzHueAcc  = (uint16_t)(rnd() << 8);                        // fresh palette each maze
+  mzHueStep = (uint16_t)((256u * 384u) / (mzTotal ? mzTotal : 1));   // ~1.5 wheel turns per maze
 }
 
 static void mzWalkStep() {
@@ -558,9 +599,11 @@ static void mzWalkStep() {
   }
   if (nd) {
     const int d = dirs[rnd() % (uint32_t)nd];
-    mzCarveTo(mzCx, mzCy, d);
+    mzFillWall(mzCx, mzCy, d, 255);
     mzCx = (int16_t)(mzCx + MZDX[d]); mzCy = (int16_t)(mzCy + MZDY[d]);
+    mzFillCell(mzCx, mzCy, 255);
     mzVisited++;
+    mzHueAcc = (uint16_t)(mzHueAcc + mzHueStep);
   } else if (mzVisited >= mzTotal) {
     mzMode = MZ_SOLVE;
   } else {
@@ -568,19 +611,22 @@ static void mzWalkStep() {
   }
 }
 
-static bool mzSolvePass() {                      // one dead-end-filling pass; true if anything retracted
+static bool mzSolvePass() {                      // one dead-end-filling pass
   bool changed = false;
   for (int cy = 0; cy < mzRows; cy++)
     for (int cx = 0; cx < mzCols; cx++) {
       if ((cx == 0 && cy == 0) || (cx == mzCols - 1 && cy == mzRows - 1)) continue;
-      const int px = 2 * cx + 1, py = 2 * cy + 1;
-      if (*mzPx(px, py) < 2) continue;
+      if (!mzSeen(cx, cy)) continue;
       int open = 0, lastD = -1;
-      for (int d = 0; d < 4; d++)
-        if (*mzPx(px + MZDX[d], py + MZDY[d]) >= 2) { open++; lastD = d; }
+      for (int d = 0; d < 4; d++) {
+        const int nx = cx + MZDX[d], ny = cy + MZDY[d];
+        if (nx >= 0 && ny >= 0 && nx < mzCols && ny < mzRows && mzWallOpen(cx, cy, d)) {
+          open++; lastD = d;
+        }
+      }
       if (open <= 1) {                            // dead end: retract this cell
-        *mzPx(px, py) = 1;
-        if (lastD >= 0) *mzPx(px + MZDX[lastD], py + MZDY[lastD]) = 1;
+        mzFillCell(cx, cy, 1);
+        if (lastD >= 0) mzFillWall(cx, cy, lastD, 1);
         changed = true;
       }
     }
@@ -591,12 +637,18 @@ static void renderMaze() {
   const int W = gPanel.panelW, H = gPanel.panelH;
   if (!fxBuf) { panelShow(); return; }
 
-  // step the algorithm, paced by speed
   if (mzMode == MZ_WALK) {
-    const int steps = 1 + gEffectSpeed * 2;
+    // A genuinely wide speed range: 1..3 step FRACTIONALLY (one carve every 4th/3rd/
+    // 2nd frame -- meditative), 4..10 step quadratically (1..49 carves per frame --
+    // 10 finishes a 256x64 maze in a few seconds).
+    int steps;
+    if (gEffectSpeed <= 3) steps = (fxTick % (5 - gEffectSpeed) == 0) ? 1 : 0;
+    else                   steps = (gEffectSpeed - 3) * (gEffectSpeed - 3);
     for (int i = 0; i < steps && mzMode == MZ_WALK; i++) mzWalkStep();
   } else if (mzMode == MZ_HUNT) {
-    int rows = 1 + gEffectSpeed / 3;
+    // Hunt without ceremony: scan from the remembered row until a resume point is
+    // found (bounded per frame so a long fruitless stretch cannot stall the render).
+    int rows = 2 + gEffectSpeed / 2;
     while (rows-- > 0 && mzMode == MZ_HUNT) {
       bool found = false;
       for (int cx = 0; cx < mzCols && !found; cx++) {
@@ -604,50 +656,51 @@ static void renderMaze() {
         for (int d = 0; d < 4 && !found; d++) {
           const int nx = cx + MZDX[d], ny = mzHuntRow + MZDY[d];
           if (nx >= 0 && ny >= 0 && nx < mzCols && ny < mzRows && mzSeen(nx, ny)) {
-            // connect the fresh cell to the maze and resume walking from it
-            *mzPx(2 * cx + 1, 2 * mzHuntRow + 1) = 255;
-            *mzPx(2 * cx + 1 + MZDX[d], 2 * mzHuntRow + 1 + MZDY[d]) = 255;
+            mzFillCell(cx, mzHuntRow, 255);
+            mzFillWall(cx, mzHuntRow, d, 255);
             mzCx = (int16_t)cx; mzCy = mzHuntRow;
             mzVisited++;
+            mzHueAcc = (uint16_t)(mzHueAcc + mzHueStep);
             mzMode = MZ_WALK;
             found = true;
           }
         }
       }
       if (!found && ++mzHuntRow >= mzRows) {
-        mzMode = (mzVisited >= mzTotal) ? MZ_SOLVE : MZ_WALK;   // WALK re-stucks -> rehunt
+        mzMode = (mzVisited >= mzTotal) ? MZ_SOLVE : MZ_WALK;
         mzHuntRow = 0;
       }
     }
   } else if (mzMode == MZ_SOLVE) {
-    if (!mzSolvePass()) { mzMode = MZ_DONE; mzHold = 0; }
-  } else {                                        // MZ_DONE: hold the solution, then restart
+    int passes = (gEffectSpeed <= 3) ? ((fxTick & 1) ? 0 : 1) : 1 + gEffectSpeed / 4;
+    while (passes-- > 0 && mzMode == MZ_SOLVE)
+      if (!mzSolvePass()) { mzMode = MZ_DONE; mzHold = 0; }
+  } else {
     if (++mzHold > 220) mzInit();                 // ~3 s at the panel rate
   }
 
-  // draw + decay
-  const int hue = (gEffectHue >= 0) ? gEffectHue : 160;
-  uint8_t wr, wg, wb;
-  hsv((uint8_t)hue, wr, wg, wb);
+  // Corridors wear the rainbow of their carve order (hue map, offset by gEffectHue);
+  // walls stay dark neutral so the colours carry the image; the solution stays gold.
+  const int hueOfs = (gEffectHue >= 0) ? gEffectHue : 0;
   const bool solved = (mzMode == MZ_DONE);
   for (int y = 0; y < H; y++)
     for (int x = 0; x < W; x++) {
       uint8_t v = fxBuf[y * W + x];
-      if (v == 0)      panelPixel(x, y, (uint8_t)(wr / 4), (uint8_t)(wg / 4), (uint8_t)(wb / 4));
-      else if (v == 1) panelPixel(x, y, 4, 4, 8);
+      if (v == 0)      panelPixel(x, y, 10, 10, 18);
+      else if (v == 1) panelPixel(x, y, 3, 3, 6);
       else {
         if (solved) { panelPixel(x, y, 255, 240, 120); continue; }   // the path, golden
-        panelPixel(x, y, (uint8_t)(v * 200 / 255 + 30), (uint8_t)(v * 200 / 255 + 30),
-                   (uint8_t)(v * 220 / 255 + 35));
-        if (v > 90) fxBuf[y * W + x] = (uint8_t)(v - 3);             // trail fades
+        uint8_t r, g, b;
+        hsv((uint8_t)(*mzHuePx(x, y) + hueOfs), r, g, b);
+        panelPixel(x, y, (uint8_t)((r * v) >> 8), (uint8_t)((g * v) >> 8), (uint8_t)((b * v) >> 8));
+        if (v > 140) fxBuf[y * W + x] = (uint8_t)(v - 3);            // fresh-carve flash fades
       }
     }
-  if (mzMode == MZ_HUNT) {                        // the sweep line, faint green
-    const int py = 2 * mzHuntRow + 1;
-    for (int x = 0; x < W; x += 2) panelPixel(x, py, 0, 90, 30);
+  if (mzMode == MZ_WALK || mzMode == MZ_HUNT) {   // the carving head burns white
+    const int px = 3 * mzCx + 1, py = 3 * mzCy + 1;
+    panelPixel(px, py, 255, 255, 255);     panelPixel(px + 1, py, 255, 255, 255);
+    panelPixel(px, py + 1, 255, 255, 255); panelPixel(px + 1, py + 1, 255, 255, 255);
   }
-  if (mzMode == MZ_WALK || mzMode == MZ_HUNT)     // the carving head burns white
-    panelPixel(2 * mzCx + 1, 2 * mzCy + 1, 255, 255, 255);
   panelShow();
 }
 

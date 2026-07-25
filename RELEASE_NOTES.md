@@ -22,12 +22,14 @@
 - **`"audio": true`** on `POST /api/canvas/effect` — fire breathes with loudness and
   throws sparks on beats, matrix rain falls harder and bursts on beats, plasma
   speeds up and lurches. Explicit per start, like `hue`/`density`.
-- **`maze` effect** — watch a Hunt-and-Kill maze carve itself: a random walk with a
-  glowing, fading trail; a visible scan-line hunt when it corners itself; then an
-  animated dead-end-filling solve that retracts every corridor until only the
-  corner-to-corner solution remains, held golden for a moment before a fresh maze
-  begins. (`speed`, `hue`; the maze grid is (W−1)/2 × (H−1)/2 cells — 127×31 on a
-  256×64 panel.)
+- **`maze` effect** — watch a Hunt-and-Kill maze carve itself: 2 px-wide corridors
+  painted as a **rainbow tracing carve order** (a rolling hue advances per cell —
+  `hue` rotates the palette, each maze starts at a random point on the wheel), a
+  bright 2×2 carving head with a fading fresh-carve flash, then an animated
+  dead-end-filling solve that retracts every corridor until only the
+  corner-to-corner solution remains, held golden before a fresh maze begins.
+  `speed` spans meditative (1: one carve every 4th frame) to blazing (10: ~49
+  carves/frame); the grid is (W−1)/3 × (H−1)/3 cells — 85×21 on a 256×64 panel.
 - **`GET /api/canvas/audio`** — live features (level, peak, beat, bands) for
   diagnostics and clients.
 - Capabilities: an `audio` feature token appears **only when the ES7210 actually
