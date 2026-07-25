@@ -5,6 +5,7 @@
 #include "sse.h"     // GET /api/events: the live-preview push stream (v3.0)
 #include "web_ui.h"
 #include <mbedtls/base64.h>   // the canvas "image" op decodes a base64 sprite
+#include "audio.h"           // capabilities audio token + effect "audio" param (v3.4)
 #include <fcntl.h>            // non-blocking mode for the canvas stream socket (v3.2)
 #include <lwip/sockets.h>    // setsockopt on the stream socket at close (v3.3)
 
@@ -753,7 +754,7 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
              "\"maxBytes\":%u,\"maxSheetBytes\":%u},"
              "\"ops\":[\"clear\",\"pixel\",\"hline\",\"vline\",\"line\",\"rect\",\"circle\",\"ellipse\","
              "\"triangle\",\"roundrect\",\"gradient\",\"polyline\",\"text\",\"image\",\"sprite\",\"scroll\",\"show\"]},"
-             "\"effects\":%s,\"effectParams\":[\"hue\",\"density\"],",
+             "\"effects\":%s,\"effectParams\":[\"hue\",\"density\",\"audio\"],",
              (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
              (unsigned)ATLAS_MAX_SHEETS, (unsigned)ATLAS_TOTAL_BUDGET,
              (unsigned)ATLAS_MAX_SHEET_BYTES, effectListJson());
@@ -763,8 +764,11 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
 
   // What the wall can DO, not just show, so a client reads this instead of sniffing the
   // firmware version and guessing.
-  capPut("\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
-         "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\"]}");
+  capPut(audioAvailable()
+         ? "\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
+           "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\",\"audio\"]}"
+         : "\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
+           "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\"]}");
   capFlush();
   return httpxChunkEnd(r);
 }
@@ -1429,6 +1433,24 @@ void canvasStreamPump() {
   if (millis() - cs.lastRx > 30000UL) csClose(false, "idle timeout");
 }
 
+// GET /api/canvas/audio -- microphone frontend state (v3.4 diagnostics + discovery):
+// whether the ES7210 is present, whether capture is running, and the live features.
+// The features are numbers derived from sound, never samples -- nothing recordable.
+static esp_err_t handleApiCanvasAudio(httpd_req_t* r) {
+  AudioFrame a;
+  audioRead(a);
+  char buf[320];
+  int n = snprintf(buf, sizeof(buf),
+           "{\"available\":%s,\"capturing\":%s,\"seq\":%lu,\"level\":%.3f,\"peak\":%.3f,"
+           "\"beat\":%s,\"bassRaw\":%.4f,\"bands\":[",
+           audioAvailable() ? "true" : "false", audioCapturing() ? "true" : "false",
+           (unsigned long)a.seq, a.level, a.peak, a.beat ? "true" : "false", a.bassRaw);
+  for (int b = 0; b < AUDIO_BANDS; b++)
+    n += snprintf(buf + n, sizeof(buf) - n, "%s%.2f", b ? "," : "", a.bands[b]);
+  snprintf(buf + n, sizeof(buf) - n, "]}");
+  return httpxSend(r, 200, "application/json", buf);
+}
+
 // GET /api/canvas/stream -- stream channel state (diagnostics + client discovery).
 static esp_err_t handleApiCanvasStreamGet(httpd_req_t* r) {
   char buf[192];
@@ -1556,15 +1578,20 @@ static esp_err_t handleApiCanvasEffect(httpd_req_t* r) {
   int dv = doc["density"].is<int>() ? (int)doc["density"] : -1;
   gEffectHue     = (hv < 0) ? -1 : (hv > 255 ? 255 : hv);
   gEffectDensity = (dv < 0) ? -1 : (dv < 1 ? 1 : (dv > 100 ? 100 : dv));
+  // "audio":true (v3.4): the mic modulates this effect (fire/matrix/plasma react to
+  // level and beats). Explicit per start, like hue/density; a plain start turns it off.
+  gEffectAudioMod = doc["audio"] | false;
+  if (gEffectAudioMod && e != EFFECT_NONE) audioMaybeStart();
   if (e == EFFECT_NONE) {
     dispReturnToWall();             // stop -> reel wall
   } else {
     gCanvasMode = false;            // an effect owns the panel via taskDisplay, which runs
     gEffectReq  = e;                // effectReset() + starts it -- no effect state touched off-core
   }
-  char buf[112];
-  snprintf(buf, sizeof(buf), "{\"ok\":true,\"effect\":\"%s\",\"speed\":%u,\"hue\":%d,\"density\":%d}",
-           effectName(e), (unsigned)gEffectSpeed, gEffectHue, gEffectDensity);
+  char buf[128];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"effect\":\"%s\",\"speed\":%u,\"hue\":%d,\"density\":%d,\"audio\":%s}",
+           effectName(e), (unsigned)gEffectSpeed, gEffectHue, gEffectDensity,
+           gEffectAudioMod ? "true" : "false");
   return httpxSend(r, 200, "application/json", buf);
 }
 
@@ -2668,6 +2695,7 @@ void webInit() {
   httpxOn("/api/canvas/rects",       HTTP_PUT,  handleApiCanvasRects);
   httpxOn("/api/canvas/stream",      HTTP_PUT,  handleApiCanvasStream);
   httpxOn("/api/canvas/stream",      HTTP_GET,  handleApiCanvasStreamGet);
+  httpxOn("/api/canvas/audio",       HTTP_GET,  handleApiCanvasAudio);
   httpxOn("/api/canvas/qoi",         HTTP_PUT,  handleApiCanvasQoi);
   httpxOn("/api/canvas/anim",        HTTP_PUT,  handleApiCanvasAnim);
   httpxOn("/api/canvas/atlas",        HTTP_GET,    handleApiAtlasList);

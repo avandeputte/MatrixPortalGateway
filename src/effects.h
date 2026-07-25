@@ -16,7 +16,9 @@
   X(MATRIX,    "matrix")    \
   X(FLIPORAMA, "fliporama") \
   X(CLOCK,     "clock")     \
-  X(LIFE,      "life")
+  X(LIFE,      "life")      \
+  X(SPECTRUM,  "spectrum")  \
+  X(SOUNDWALL, "soundwall")
 
 enum EffectType : uint8_t {
   EFFECT_NONE = 0,
@@ -39,6 +41,9 @@ static const uint8_t EFFECT_REQ_IDLE = 0xFF;
 // rain, plasma tint, Life cells); density is 1..100 (Life seed %, flip-o-rama churn rate).
 extern volatile int gEffectHue;
 extern volatile int gEffectDensity;
+// "audio":true on /api/canvas/effect: fire/matrix/plasma read the microphone features
+// (audio.h) and modulate speed/intensity. No-op when the ES7210 is absent.
+extern volatile bool gEffectAudioMod;
 
 uint8_t     effectByName(const char* name);   // wire name -> id (EFFECT_NONE if unknown / "none")
 const char* effectName(uint8_t e);            // id -> canonical name ("none" for EFFECT_NONE)
@@ -46,3 +51,7 @@ const char* effectListJson();                 // all names as a JSON array, e.g.
 
 void effectReset(uint8_t type);   // prepare per-effect state; called only on taskDisplay
 void effectRender(uint8_t type);  // render + present one frame; runs on taskDisplay
+// EFFECT_SOUNDWALL is the one effect that does NOT own the panel as pixels: it drives
+// the FLAP WALL (vmodule targets) and leaves the normal wall renderer running.
+// taskDisplay calls this instead of effectRender for it, every display tick.
+void effectSoundwallTick();

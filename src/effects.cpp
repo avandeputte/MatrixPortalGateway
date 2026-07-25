@@ -15,8 +15,19 @@
 #include <string.h>
 #include <time.h>
 #include "rtc.h"           // rtcLocalNow: broken-down local time for the clock effect
+#include "audio.h"         // microphone features for the audio-reactive effects (v3.4)
+#include "vmodule.h"       // soundwall pokes flap targets directly
+#include "reel.h"          // VM_COLOUR_BASE: the colour flap indices
 
 volatile uint8_t gEffect      = EFFECT_NONE;
+volatile bool    gEffectAudioMod = false;   // "audio":true -- mic modulates the effect
+
+/* ---- audio-reactive state (v3.4), shared across renders ---- */
+static AudioFrame fxAud = {};
+static bool       fxAudOn = false;
+static float      specCap[AUDIO_BANDS];
+static unsigned long swLastLoudMs = 0;
+
 volatile uint8_t gEffectSpeed = 4;
 volatile uint8_t gEffectReq   = EFFECT_REQ_IDLE;   // pending start, picked up by taskDisplay
 volatile int     gEffectHue     = -1;              // -1 = effect default; else 0..255 (see effects.h)
@@ -431,6 +442,11 @@ void effectReset(uint8_t type) {
     case EFFECT_FLIPORAMA: initFlipGrid(W, H); break;
     case EFFECT_CLOCK:     clkCacheSec = -1; clkLastSec = 255; break;   // force a fresh read
     case EFFECT_LIFE:      lifeCur = fxBuf; lifePop = 0; lifeStale = 0; seedLife(W, H); break;
+    case EFFECT_SPECTRUM:
+      for (int b = 0; b < AUDIO_BANDS; b++) specCap[b] = 0;
+      audioMaybeStart();
+      break;
+    case EFFECT_SOUNDWALL: swLastLoudMs = 0; audioMaybeStart(); break;
     default: break;
   }
 }
@@ -457,8 +473,13 @@ static void renderFire() {
   if (!fxBuf) { panelShow(); return; }
   // Bottom row is the source: a flickering orange-yellow base (160..223), with the occasional
   // white-hot spark. Keeping the base below the white tip is what stops it becoming a white slab.
+  // With "audio":true the fire breathes: the source row's energy follows loudness
+  // (quiet room = embers, loud = roaring) and a beat throws extra white-hot sparks.
+  const bool afire = fxAudOn && gEffectAudioMod;
+  const uint8_t fbase = afire ? (uint8_t)(100 + fxAud.level * 123) : 160;
+  const uint32_t sparkMask = (afire && fxAud.beat) ? 3 : 15;
   for (int x = 0; x < W; x++)
-    fxBuf[(H - 1) * W + x] = (rnd() & 15) ? (uint8_t)(160 + (rnd() & 63)) : 255;
+    fxBuf[(H - 1) * W + x] = (rnd() & sparkMask) ? (uint8_t)(fbase + (rnd() & 63)) : 255;
   // Doom-style spread: carry each cell up one row with a random sideways DRIFT and a random decay.
   // That asymmetry -- not a symmetric blur -- is what breaks the sheet into flame tongues. Rows are
   // the outer loop (row-major) so each source row is fully read before the next iteration writes
@@ -486,8 +507,17 @@ static void renderMatrix() {
   const int W = gPanel.panelW, H = gPanel.panelH;
   const int cols = W < FX_MAXW ? W : FX_MAXW;
   panelClear();                           // black field
+  // With "audio":true the rain falls harder with loudness, and a beat spawns a
+  // burst of fresh columns at the top.
+  const bool arain = fxAudOn && gEffectAudioMod;
+  const int  aspd  = arain ? (int)(16 + 32 * fxAud.level) : 16;   // /16 fixed-point
+  if (arain && fxAud.beat)
+    for (int k = 0; k < cols / 6; k++) {
+      const int x = (int)(rnd() % (uint32_t)cols);
+      mHead[x] = 0; mSpeed[x] = (uint8_t)(10 + (rnd() % 8));
+    }
   for (int x = 0; x < cols; x++) {
-    mHead[x] += (int32_t)mSpeed[x] * gEffectSpeed / 4;   // advance in 1/16-row units
+    mHead[x] += (int32_t)mSpeed[x] * gEffectSpeed * aspd / 64;   // advance in 1/16-row units
     int hy = mHead[x] >> 4;
     if (hy - MTRAIL > H) {                // fully off the bottom: respawn above the top
       mHead[x]  = -(int32_t)(rnd() % (uint32_t)(H * 8));
@@ -513,9 +543,85 @@ static void renderMatrix() {
   panelShow();
 }
 
+/* ---- spectrum (v3.4): log-band bars, falling peak caps, hue gradient ---- */
+static void renderSpectrum() {
+  const int W = gPanel.panelW, H = gPanel.panelH;
+  panelClear();
+  const int bw   = W / AUDIO_BANDS;                    // 8 px per band at 128, 16 at 256
+  const int base = (gEffectHue >= 0) ? gEffectHue : 160;   // default: red bass -> blue treble
+  for (int b = 0; b < AUDIO_BANDS; b++) {
+    const float v = fxAud.bands[b];
+    const int   h = (int)(v * (H - 1) + 0.5f);
+    uint8_t r, g, bl;
+    hsv((uint8_t)(base + 200 - b * 200 / AUDIO_BANDS), r, g, bl);
+    const int x0 = b * bw;
+    for (int y = 0; y < h; y++) {
+      // dimmer at the base, full colour at the tip -- reads as depth, costs nothing
+      const uint8_t lvl = (uint8_t)(120 + 135 * y / (h > 1 ? h - 1 : 1));
+      for (int x = x0; x < x0 + bw - 1; x++)
+        panelPixel(x, H - 1 - y, (uint8_t)(r * lvl / 255), (uint8_t)(g * lvl / 255), (uint8_t)(bl * lvl / 255));
+    }
+    // falling cap: rises instantly, sinks ~0.4 px/frame
+    if (h > specCap[b]) specCap[b] = (float)h;
+    else { specCap[b] -= 0.4f; if (specCap[b] < 0) specCap[b] = 0; }
+    const int cy = H - 1 - (int)specCap[b];
+    if (cy >= 0 && cy < H)
+      for (int x = x0; x < x0 + bw - 1; x++) panelPixel(x, cy, 230, 230, 230);
+  }
+  panelShow();
+}
+
+/* ---- soundwall (v3.4): the flap wall itself is the visual ---- */
+// Runs on taskDisplay every display tick while gEffect == EFFECT_SOUNDWALL, with the
+// NORMAL wall renderer still active: this only pokes vmodule targets and lets the
+// reels flip there on their own. A beat flips a loudness-scaled handful of random
+// cells to a colour flap chosen by the dominant frequency band (bass=red ...
+// treble=white); after ~2.5 s of quiet the wall settles home a few cells at a time.
+void effectSoundwallTick() {
+  if (!audioAvailable()) return;
+  audioMaybeStart();                                  // (re)arm capture if it self-stopped
+  AudioFrame a;
+  audioRead(a);
+  if (a.seq == 0) return;                             // capture still spinning up
+
+  const unsigned long now = millis();
+  if (a.level > 0.18f) swLastLoudMs = now;
+
+  if (a.beat && vmMutex && xSemaphoreTake(vmMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+    // dominant band -> colour flap (reel order r o y g b p w at VM_COLOUR_BASE)
+    int dom = 0;
+    for (int b = 1; b < AUDIO_BANDS; b++) if (a.bands[b] > a.bands[dom]) dom = b;
+    const int16_t flap = (int16_t)(VM_COLOUR_BASE + (dom * 7) / AUDIO_BANDS);
+    const int n = 1 + (int)(a.level * vmCount / 5);   // louder beat, bigger splash
+    for (int k = 0; k < n; k++) {
+      VModule& m = vmods[rnd() % (uint32_t)vmCount];
+      m.target = flap;
+    }
+    xSemaphoreGive(vmMutex);
+  } else if (swLastLoudMs && now - swLastLoudMs > 2500) {
+    // quiet: settle home gently, a few cells per tick, instead of one mass wipe
+    if (vmMutex && xSemaphoreTake(vmMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+      for (int k = 0; k < 3; k++) {
+        VModule& m = vmods[rnd() % (uint32_t)vmCount];
+        if (m.curIndex != 0 && m.target < 0) m.target = 0;
+      }
+      xSemaphoreGive(vmMutex);
+    }
+  }
+}
+
 void effectRender(uint8_t type) {
   if (!gPanel.ready) return;
+  fxAudOn = (type == EFFECT_SPECTRUM) || (gEffectAudioMod && audioAvailable());
+  if (fxAudOn) audioRead(fxAud); else fxAud = AudioFrame{};
   fxFrame += gEffectSpeed;
+  // Audio modulation, the shared part: loudness adds tempo, a beat adds a lurch --
+  // visible on plasma (phase), and harmless elsewhere since renders that don't use
+  // fxFrame ignore it.
+  if (fxAudOn && gEffectAudioMod) {
+    fxFrame += (uint32_t)(fxAud.level * gEffectSpeed * 3);
+    if (fxAud.beat) fxFrame += 40;
+  }
   fxTick++;
   const int W = gPanel.panelW, H = gPanel.panelH;
   switch (type) {
@@ -525,6 +631,9 @@ void effectRender(uint8_t type) {
     case EFFECT_FLIPORAMA: renderFliporama(); break;
     case EFFECT_CLOCK:     renderClock();     break;
     case EFFECT_LIFE:      renderLife(W, H);  break;
+    case EFFECT_SPECTRUM:  renderSpectrum();  break;
+    // EFFECT_SOUNDWALL never reaches effectRender: taskDisplay routes it to
+    // effectSoundwallTick() and keeps the wall renderer running.
     default: break;
   }
 }

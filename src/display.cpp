@@ -154,7 +154,10 @@ void dispInit() {
 // command arrives (so content the user sends is actually shown), on canvas release, and by Quiet
 // Time. A no-op when the wall already owns the panel.
 bool dispPixelsMode() {
-  return gCanvasMode || gAnimActive || gTickerActive || gEffect != EFFECT_NONE;
+  // Soundwall is the one effect that is NOT pixels: it drives the flap wall itself,
+  // so the dashboard preview (and SSE) keep rendering flap cells for it.
+  return gCanvasMode || gAnimActive || gTickerActive ||
+         (gEffect != EFFECT_NONE && gEffect != EFFECT_SOUNDWALL);
 }
 
 void dispReturnToWall() {
@@ -422,9 +425,14 @@ void taskDisplay(void* pv) {
       effectReset(req);
       gEffect = req;
     }
+    // Soundwall (v3.4) drives the WALL, not pixels: poke flap targets from the mic
+    // features, then fall through to the normal reel tick + repaint below.
+    if (gEffect == EFFECT_SOUNDWALL) {
+      effectSoundwallTick();
+    }
     // On-device effect owns the panel: render a frame at the panel's native rate (panelShow
     // inside effectRender paces us to one refresh), instead of the reel wall.
-    if (gEffect != EFFECT_NONE) {
+    else if (gEffect != EFFECT_NONE) {
       effectRender(gEffect);
       wdgDispMs = millis();
       vTaskDelay(pdMS_TO_TICKS(2));
