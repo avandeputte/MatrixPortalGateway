@@ -146,6 +146,7 @@ static const uint8_t P_FLIP[]    = { EPI_SPEED, EPI_DENSITY };
 static const uint8_t P_CLOCK[]   = { EPI_HUE };
 static const uint8_t P_LIFE[]    = { EPI_SPEED, EPI_HUE, EPI_DENSITY };
 static const uint8_t P_SPECT[]   = { EPI_HUE };
+static const uint8_t P_MAZE[]    = { EPI_SPEED, EPI_HUE };
 static const uint8_t P_NONE_[1]  = { 0 };                  // zero-length arrays are not C++
 
 struct EffectDefRow { uint8_t id; const char* title; const uint8_t* p; uint8_t np; };
@@ -158,6 +159,7 @@ static const EffectDefRow DEFS[] = {
   { EFFECT_LIFE,      "Game of Life",P_LIFE,   3 },
   { EFFECT_SPECTRUM,  "Spectrum",    P_SPECT,  1 },
   { EFFECT_SOUNDWALL, "Soundwall",   P_NONE_,  0 },
+  { EFFECT_MAZE,      "Maze",        P_MAZE,   2 },
 };
 // Registering an effect in EFFECT_TABLE without a def row (or vice versa) must not
 // compile: the def list is how clients discover the effect's options. EFFECT_COUNT
@@ -506,13 +508,156 @@ static void renderLife(int W, int H) {
 
 // ---- lifecycle ----------------------------------------------------------------------------------
 
+/* ---- maze (v3.4): Hunt-and-Kill generation, watched live -------------------------
+   Cells sit on odd pixel coordinates ((W-1)/2 x (H-1)/2 cells); fxBuf is the pixel
+   map: 0 = wall, 1 = retracted corridor (solved away), 2..255 = passage brightness
+   (255 fresh, decaying to a floor -- so the carving leaves a glowing, fading trail).
+   Phases: WALK randomly carves into unvisited neighbours until cornered; HUNT sweeps
+   a visible scan line from the top for an unvisited cell touching a visited one and
+   resumes there; when every cell is visited, SOLVE runs animated dead-end filling --
+   corridors retract one cell per pass until only the corner-to-corner solution
+   remains lit (Hunt-and-Kill mazes are perfect, so the survivor is THE path); DONE
+   holds the glowing solution a moment, then a fresh maze begins. */
+enum { MZ_WALK, MZ_HUNT, MZ_SOLVE, MZ_DONE };
+static uint8_t  mzMode;
+static int16_t  mzCols, mzRows, mzCx, mzCy, mzHuntRow;
+static uint32_t mzVisited, mzTotal;
+static uint16_t mzHold;
+
+static inline uint8_t* mzPx(int x, int y) { return &fxBuf[y * gPanel.panelW + x]; }
+static inline bool mzSeen(int cx, int cy) { return *mzPx(2 * cx + 1, 2 * cy + 1) >= 2; }
+
+static void mzInit() {
+  const int W = gPanel.panelW, H = gPanel.panelH;
+  memset(fxBuf, 0, (size_t)W * H);
+  mzCols = (int16_t)((W - 1) / 2);
+  mzRows = (int16_t)((H - 1) / 2);
+  mzCx = (int16_t)(rnd() % (uint32_t)mzCols);
+  mzCy = (int16_t)(rnd() % (uint32_t)mzRows);
+  *mzPx(2 * mzCx + 1, 2 * mzCy + 1) = 255;
+  mzVisited = 1;
+  mzTotal   = (uint32_t)mzCols * mzRows;
+  mzMode    = MZ_WALK;
+  mzHuntRow = 0;
+  mzHold    = 0;
+}
+
+static const int8_t MZDX[4] = { 1, -1, 0, 0 };
+static const int8_t MZDY[4] = { 0, 0, 1, -1 };
+
+static void mzCarveTo(int cx, int cy, int d) {   // open the wall from (cx,cy) toward d, land there
+  *mzPx(2 * cx + 1 + MZDX[d], 2 * cy + 1 + MZDY[d]) = 255;
+  *mzPx(2 * (cx + MZDX[d]) + 1, 2 * (cy + MZDY[d]) + 1) = 255;
+}
+
+static void mzWalkStep() {
+  int dirs[4], nd = 0;
+  for (int d = 0; d < 4; d++) {
+    const int nx = mzCx + MZDX[d], ny = mzCy + MZDY[d];
+    if (nx >= 0 && ny >= 0 && nx < mzCols && ny < mzRows && !mzSeen(nx, ny)) dirs[nd++] = d;
+  }
+  if (nd) {
+    const int d = dirs[rnd() % (uint32_t)nd];
+    mzCarveTo(mzCx, mzCy, d);
+    mzCx = (int16_t)(mzCx + MZDX[d]); mzCy = (int16_t)(mzCy + MZDY[d]);
+    mzVisited++;
+  } else if (mzVisited >= mzTotal) {
+    mzMode = MZ_SOLVE;
+  } else {
+    mzMode = MZ_HUNT; mzHuntRow = 0;
+  }
+}
+
+static bool mzSolvePass() {                      // one dead-end-filling pass; true if anything retracted
+  bool changed = false;
+  for (int cy = 0; cy < mzRows; cy++)
+    for (int cx = 0; cx < mzCols; cx++) {
+      if ((cx == 0 && cy == 0) || (cx == mzCols - 1 && cy == mzRows - 1)) continue;
+      const int px = 2 * cx + 1, py = 2 * cy + 1;
+      if (*mzPx(px, py) < 2) continue;
+      int open = 0, lastD = -1;
+      for (int d = 0; d < 4; d++)
+        if (*mzPx(px + MZDX[d], py + MZDY[d]) >= 2) { open++; lastD = d; }
+      if (open <= 1) {                            // dead end: retract this cell
+        *mzPx(px, py) = 1;
+        if (lastD >= 0) *mzPx(px + MZDX[lastD], py + MZDY[lastD]) = 1;
+        changed = true;
+      }
+    }
+  return changed;
+}
+
+static void renderMaze() {
+  const int W = gPanel.panelW, H = gPanel.panelH;
+  if (!fxBuf) { panelShow(); return; }
+
+  // step the algorithm, paced by speed
+  if (mzMode == MZ_WALK) {
+    const int steps = 1 + gEffectSpeed * 2;
+    for (int i = 0; i < steps && mzMode == MZ_WALK; i++) mzWalkStep();
+  } else if (mzMode == MZ_HUNT) {
+    int rows = 1 + gEffectSpeed / 3;
+    while (rows-- > 0 && mzMode == MZ_HUNT) {
+      bool found = false;
+      for (int cx = 0; cx < mzCols && !found; cx++) {
+        if (mzSeen(cx, mzHuntRow)) continue;
+        for (int d = 0; d < 4 && !found; d++) {
+          const int nx = cx + MZDX[d], ny = mzHuntRow + MZDY[d];
+          if (nx >= 0 && ny >= 0 && nx < mzCols && ny < mzRows && mzSeen(nx, ny)) {
+            // connect the fresh cell to the maze and resume walking from it
+            *mzPx(2 * cx + 1, 2 * mzHuntRow + 1) = 255;
+            *mzPx(2 * cx + 1 + MZDX[d], 2 * mzHuntRow + 1 + MZDY[d]) = 255;
+            mzCx = (int16_t)cx; mzCy = mzHuntRow;
+            mzVisited++;
+            mzMode = MZ_WALK;
+            found = true;
+          }
+        }
+      }
+      if (!found && ++mzHuntRow >= mzRows) {
+        mzMode = (mzVisited >= mzTotal) ? MZ_SOLVE : MZ_WALK;   // WALK re-stucks -> rehunt
+        mzHuntRow = 0;
+      }
+    }
+  } else if (mzMode == MZ_SOLVE) {
+    if (!mzSolvePass()) { mzMode = MZ_DONE; mzHold = 0; }
+  } else {                                        // MZ_DONE: hold the solution, then restart
+    if (++mzHold > 220) mzInit();                 // ~3 s at the panel rate
+  }
+
+  // draw + decay
+  const int hue = (gEffectHue >= 0) ? gEffectHue : 160;
+  uint8_t wr, wg, wb;
+  hsv((uint8_t)hue, wr, wg, wb);
+  const bool solved = (mzMode == MZ_DONE);
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++) {
+      uint8_t v = fxBuf[y * W + x];
+      if (v == 0)      panelPixel(x, y, (uint8_t)(wr / 4), (uint8_t)(wg / 4), (uint8_t)(wb / 4));
+      else if (v == 1) panelPixel(x, y, 4, 4, 8);
+      else {
+        if (solved) { panelPixel(x, y, 255, 240, 120); continue; }   // the path, golden
+        panelPixel(x, y, (uint8_t)(v * 200 / 255 + 30), (uint8_t)(v * 200 / 255 + 30),
+                   (uint8_t)(v * 220 / 255 + 35));
+        if (v > 90) fxBuf[y * W + x] = (uint8_t)(v - 3);             // trail fades
+      }
+    }
+  if (mzMode == MZ_HUNT) {                        // the sweep line, faint green
+    const int py = 2 * mzHuntRow + 1;
+    for (int x = 0; x < W; x += 2) panelPixel(x, py, 0, 90, 30);
+  }
+  if (mzMode == MZ_WALK || mzMode == MZ_HUNT)     // the carving head burns white
+    panelPixel(2 * mzCx + 1, 2 * mzCy + 1, 255, 255, 255);
+  panelShow();
+}
+
 void effectReset(uint8_t type) {
   fxBuildLUTs();
   fxFrame = 0; fxTick = 0;
   const int W = gPanel.panelW, H = gPanel.panelH;
   // Only fire and Life use the shared grid -- don't allocate 2*W*H (32 KB on a
   // 256x64 panel) for plasma/matrix/clock/fliporama, which never touch it.
-  if (type == EFFECT_FIRE || type == EFFECT_LIFE) {
+  if (type == EFFECT_FIRE || type == EFFECT_LIFE || type == EFFECT_MAZE) {
     const int need = 2 * W * H;
     if (fxCap < need) {                   // (re)allocate the shared grid in PSRAM
       if (fxBuf) free(fxBuf);
@@ -541,6 +686,7 @@ void effectReset(uint8_t type) {
       audioMaybeStart();
       break;
     case EFFECT_SOUNDWALL: swLastLoudMs = 0; audioMaybeStart(); break;
+    case EFFECT_MAZE:      if (fxBuf) mzInit(); break;
     default: break;
   }
 }
@@ -726,6 +872,7 @@ void effectRender(uint8_t type) {
     case EFFECT_CLOCK:     renderClock();     break;
     case EFFECT_LIFE:      renderLife(W, H);  break;
     case EFFECT_SPECTRUM:  renderSpectrum();  break;
+    case EFFECT_MAZE:      renderMaze();      break;
     // EFFECT_SOUNDWALL never reaches effectRender: taskDisplay routes it to
     // effectSoundwallTick() and keeps the wall renderer running.
     default: break;

@@ -1486,6 +1486,9 @@ paths:
         * `life` — Conway's Game of Life, cells coloured by age, reseeded when it settles.
         * `spectrum` *(fw 3.4, `audio` feature token)* — 16 log-band microphone spectrum
           analyzer: bars with falling peak caps, bass→treble hue gradient (`hue` rotates it).
+        * `maze` *(fw 3.4)* — a Hunt-and-Kill maze generator, watched live: random-walk
+          carving with a fading trail, a visible hunt sweep, then an animated dead-end-filling
+          solve leaving the corner-to-corner path golden; repeats with a fresh maze.
         * `soundwall` *(fw 3.4, `audio` feature token)* — the flap wall itself reacts: each
           beat flips a loudness-scaled splash of cells to a colour flap picked by the dominant
           frequency band; ~3 s of quiet settles the wall home. Runs in genuine wall mode
@@ -1507,7 +1510,7 @@ paths:
             schema:
               type: object
               properties:
-                type:    { type: string, enum: [plasma, fire, matrix, fliporama, clock, life, spectrum, soundwall, none] }
+                type:    { type: string, enum: [plasma, fire, matrix, fliporama, clock, life, spectrum, soundwall, maze, none] }
                 speed:   { type: integer, minimum: 1, maximum: 10 }
                 hue:     { type: integer, minimum: 0, maximum: 255, description: "Base hue override (0–255 colour wheel). Omit to keep the effect's own palette." }
                 density: { type: integer, minimum: 1, maximum: 100, description: "Density override (1–100), e.g. streak count or seeding. Omit for the effect default." }

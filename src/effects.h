@@ -18,7 +18,8 @@
   X(CLOCK,     "clock")     \
   X(LIFE,      "life")      \
   X(SPECTRUM,  "spectrum")  \
-  X(SOUNDWALL, "soundwall")
+  X(SOUNDWALL, "soundwall") \
+  X(MAZE,      "maze")
 
 enum EffectType : uint8_t {
   EFFECT_NONE = 0,
