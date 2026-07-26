@@ -19,7 +19,8 @@
   X(LIFE,      "life")      \
   X(SPECTRUM,  "spectrum")  \
   X(SOUNDWALL, "soundwall") \
-  X(MAZE,      "maze")
+  X(MAZE,      "maze")      \
+  X(RIPPLE,    "ripple")
 
 enum EffectType : uint8_t {
   EFFECT_NONE = 0,

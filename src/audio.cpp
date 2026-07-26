@@ -183,7 +183,8 @@ static void bandTables() {
 /* ---- capture task ---- */
 // Any audio consumer? The dedicated effects, or "audio":true modulating another one.
 static bool audioHasConsumer() {
-  if (gEffect == EFFECT_SPECTRUM || gEffect == EFFECT_SOUNDWALL) return true;
+  if (gEffect == EFFECT_SPECTRUM || gEffect == EFFECT_SOUNDWALL ||
+      gEffect == EFFECT_RIPPLE) return true;
   return gEffectAudioMod && gEffect != EFFECT_NONE;
 }
 

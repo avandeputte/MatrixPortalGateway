@@ -30,6 +30,10 @@
   corner-to-corner solution remains, held golden before a fresh maze begins.
   `speed` spans meditative (1: one carve every 4th frame) to blazing (10: ~49
   carves/frame); the grid is (W−1)/3 × (H−1)/3 cells — 85×21 on a 256×64 panel.
+- **`ripple` effect** — every beat launches an expanding ring from a random spot,
+  coloured by the dominant frequency band (bass red → treble violet, `hue` rotates
+  the palette) and scaled by the beat's loudness, fading as it grows; a faint centre
+  glow breathes with the room level between beats. (`speed` = expansion rate.)
 - **`GET /api/canvas/audio`** — live features (level, peak, beat, bands) for
   diagnostics and clients.
 - Capabilities: an `audio` feature token appears **only when the ES7210 actually

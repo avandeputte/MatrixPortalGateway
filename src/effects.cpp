@@ -147,6 +147,7 @@ static const uint8_t P_CLOCK[]   = { EPI_HUE };
 static const uint8_t P_LIFE[]    = { EPI_SPEED, EPI_HUE, EPI_DENSITY };
 static const uint8_t P_SPECT[]   = { EPI_HUE };
 static const uint8_t P_MAZE[]    = { EPI_SPEED, EPI_HUE };
+static const uint8_t P_RIPPLE[]  = { EPI_SPEED, EPI_HUE };
 static const uint8_t P_NONE_[1]  = { 0 };                  // zero-length arrays are not C++
 
 struct EffectDefRow { uint8_t id; const char* title; const uint8_t* p; uint8_t np; };
@@ -160,6 +161,7 @@ static const EffectDefRow DEFS[] = {
   { EFFECT_SPECTRUM,  "Spectrum",    P_SPECT,  1 },
   { EFFECT_SOUNDWALL, "Soundwall",   P_NONE_,  0 },
   { EFFECT_MAZE,      "Maze",        P_MAZE,   2 },
+  { EFFECT_RIPPLE,    "Beat Ripples",P_RIPPLE, 2 },
 };
 // Registering an effect in EFFECT_TABLE without a def row (or vice versa) must not
 // compile: the def list is how clients discover the effect's options. EFFECT_COUNT
@@ -168,7 +170,9 @@ static_assert(sizeof(DEFS) / sizeof(DEFS[0]) == (size_t)EFFECT_COUNT,
               "every EFFECT_TABLE entry needs an EffectDefRow in DEFS");
 
 const char* effectDefsJson() {
-  static char buf[1536];
+  // Sized with headroom: nine effects currently emit ~1.7 KB. The build-time guard
+  // below is loud but the JSON still goes out truncated -- keep the margin real.
+  static char buf[3072];
   if (!buf[0]) {
     int n = 0;
     n += snprintf(buf + n, sizeof(buf) - n, "[");
@@ -704,6 +708,60 @@ static void renderMaze() {
   panelShow();
 }
 
+/* ---- beat ripples (v3.4): every beat launches an expanding ring ------------------
+   Ring colour comes from the dominant frequency band (bass red -> treble violet,
+   gEffectHue rotates the palette), brightness from the beat's loudness, both fading
+   as the ring grows. A faint centre glow breathes with the room level so the panel
+   reads as listening even between beats. Inherently audio-driven, like spectrum. */
+struct Ripple { int16_t x, y; uint16_t r8; uint8_t hue, amp; bool alive; };
+static Ripple ripPool[14];
+
+static void renderRipple() {
+  const int W = gPanel.panelW, H = gPanel.panelH;
+  const int maxR = W / 2 + 8;
+
+  if (fxAud.beat) {
+    for (auto& rp : ripPool) {
+      if (rp.alive) continue;
+      int dom = 0;
+      for (int b = 1; b < AUDIO_BANDS; b++) if (fxAud.bands[b] > fxAud.bands[dom]) dom = b;
+      rp.x = (int16_t)(20 + rnd() % (uint32_t)(W > 40 ? W - 40 : W));
+      rp.y = (int16_t)(H / 4 + rnd() % (uint32_t)(H / 2));
+      rp.r8 = 8;
+      rp.hue = (uint8_t)(dom * 190 / (AUDIO_BANDS - 1) +
+                         (gEffectHue >= 0 ? gEffectHue : 0));
+      rp.amp = (uint8_t)(120 + fxAud.level * 135);
+      rp.alive = true;
+      break;
+    }
+  }
+
+  panelClear();
+  // centre glow: the room's level, breathing
+  {
+    const int g = (int)(fxAud.level * 40);
+    if (g > 2) panelCircle(W / 2, H / 2, 2 + g / 14, true,
+                           (uint8_t)(g * 2), (uint8_t)(g * 2), (uint8_t)(g * 3));
+  }
+  const int step = 2 + gEffectSpeed;                 // expansion, 1/8 px per frame
+  for (auto& rp : ripPool) {
+    if (!rp.alive) continue;
+    const int radius = rp.r8 >> 3;
+    const int fade = 255 - (255 * radius) / maxR;
+    if (radius >= maxR || fade <= 10) { rp.alive = false; continue; }
+    uint8_t r, g, b;
+    hsv(rp.hue, r, g, b);
+    const int lvl = rp.amp * fade / 255;
+    panelCircle(rp.x, rp.y, radius, false,
+                (uint8_t)(r * lvl / 255), (uint8_t)(g * lvl / 255), (uint8_t)(b * lvl / 255));
+    if (radius > 1)                                   // a dimmer inner ring for thickness
+      panelCircle(rp.x, rp.y, radius - 1, false,
+                  (uint8_t)(r * lvl / 510), (uint8_t)(g * lvl / 510), (uint8_t)(b * lvl / 510));
+    rp.r8 = (uint16_t)(rp.r8 + step);
+  }
+  panelShow();
+}
+
 void effectReset(uint8_t type) {
   fxBuildLUTs();
   fxFrame = 0; fxTick = 0;
@@ -740,6 +798,7 @@ void effectReset(uint8_t type) {
       break;
     case EFFECT_SOUNDWALL: swLastLoudMs = 0; audioMaybeStart(); break;
     case EFFECT_MAZE:      if (fxBuf) mzInit(); break;
+    case EFFECT_RIPPLE:    memset(ripPool, 0, sizeof(ripPool)); audioMaybeStart(); break;
     default: break;
   }
 }
@@ -905,7 +964,8 @@ void effectSoundwallTick() {
 
 void effectRender(uint8_t type) {
   if (!gPanel.ready) return;
-  fxAudOn = (type == EFFECT_SPECTRUM) || (gEffectAudioMod && audioAvailable());
+  fxAudOn = (type == EFFECT_SPECTRUM) || (type == EFFECT_RIPPLE) ||
+            (gEffectAudioMod && audioAvailable());
   if (fxAudOn) audioRead(fxAud); else fxAud = AudioFrame{};
   fxFrame += gEffectSpeed;
   // Audio modulation, the shared part: loudness adds tempo, a beat adds a lurch --
@@ -926,6 +986,7 @@ void effectRender(uint8_t type) {
     case EFFECT_LIFE:      renderLife(W, H);  break;
     case EFFECT_SPECTRUM:  renderSpectrum();  break;
     case EFFECT_MAZE:      renderMaze();      break;
+    case EFFECT_RIPPLE:    renderRipple();    break;
     // EFFECT_SOUNDWALL never reaches effectRender: taskDisplay routes it to
     // effectSoundwallTick() and keeps the wall renderer running.
     default: break;
