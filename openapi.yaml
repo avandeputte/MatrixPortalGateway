@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Matrix Portal Gateway API
-  version: "3.3"
+  version: "3.4"
   description: |
     REST API for the **Matrix Portal Gateway** firmware, running on a
     Waveshare ESP32-S3-RGB-Matrix driver board. It emulates a wall of split-flap modules on a
@@ -413,6 +413,34 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+
+  /openapi.yaml:
+    get:
+      tags: [Status]
+      summary: This document, served by the device (v3.4)
+      description: |
+        The gateway serves its own API contract — the exact spec for the firmware it is
+        running, which beats any repo copy. Compressed at build time and sent with
+        `Content-Encoding: gzip` unconditionally (~28 KB on the wire); build-stamp `ETag`
+        with `304` revalidation like the other immutable assets. Discoverable via the
+        `openapi` field of `GET /api/capabilities` and via `/.well-known/api-catalog`.
+      responses:
+        "200":
+          description: This OpenAPI document (YAML, gzip-encoded)
+          content: { application/yaml: { schema: { type: string } } }
+
+  /.well-known/api-catalog:
+    get:
+      tags: [Status]
+      summary: RFC 9727 API catalog (v3.4)
+      description: |
+        The IETF-standard discovery pointer — a linkset naming this host's APIs and
+        linking their descriptions. Here it carries one entry pointing at
+        `/openapi.yaml`.
+      responses:
+        "200":
+          description: Linkset
+          content: { application/linkset+json: { schema: { type: object } } }
 
   /api/canvas:
     get:

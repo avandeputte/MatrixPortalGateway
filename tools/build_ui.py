@@ -128,6 +128,14 @@ def build() -> tuple[str, list]:
     # don't accept gzip.
     page_gz = gzip.compress(page.encode("utf-8"), 9, mtime=0)
     parts.append(c_bytes("PAGE_HTML_GZ", page_gz))
+
+    # The API contract, served by the device itself (GET /openapi.yaml, v3.4): the
+    # device tells the truth about ITS firmware's surface, unlike the repo copy.
+    spec_path = str(ROOT / "openapi.yaml")
+    spec = open(spec_path, "rb").read()
+    spec_gz = gzip.compress(spec, 9, mtime=0)
+    parts.append(c_bytes("OPENAPI_YAML_GZ", spec_gz))
+    print(f"openapi     {len(spec):,} B -> {len(spec_gz):,} B gz")
     for code, _name, gz in dicts:
         parts.append(c_bytes(f"LANG_{code.replace('-', '_').upper()}", gz))
     parts.append("\nstruct UiLang { const char* code; const char* name;"

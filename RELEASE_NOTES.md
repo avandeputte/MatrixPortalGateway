@@ -36,6 +36,10 @@
   glow breathes with the room level between beats. (`speed` = expansion rate.)
 - **`GET /api/canvas/audio`** — live features (level, peak, beat, bands) for
   diagnostics and clients.
+- **The device serves its own API contract**: `GET /openapi.yaml` (gzipped at build
+  time, ~28 KB wire, ETag/304), discoverable through the standard RFC 9727
+  `/.well-known/api-catalog` linkset and an `openapi` field in capabilities — a
+  client always gets the exact spec for the firmware it is talking to.
 - Capabilities: an `audio` feature token appears **only when the ES7210 actually
   answers**, and `effectParams` gains `"audio"`.
 - **Self-describing effects** (`effectDefs` feature token): `GET /api/capabilities`

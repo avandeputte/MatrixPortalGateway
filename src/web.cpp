@@ -91,6 +91,32 @@ static esp_err_t handleLogo(httpd_req_t* r) {
   return httpxSend(r, 200, "image/svg+xml", LOGO_SVG);
 }
 
+// GET /openapi.yaml (v3.4) -- the device serves its own API contract, gzipped at
+// build time (~15 KB on the wire). Sent with Content-Encoding: gzip unconditionally:
+// the plain text is not stored, and every HTTP client of the last two decades
+// decompresses it. Same build-stamp ETag discipline as the other immutable assets.
+// Advertised in capabilities ("openapi") and via /.well-known/api-catalog (RFC 9727).
+static esp_err_t handleOpenapiSpec(httpd_req_t* r) {
+  httpd_resp_set_hdr(r, "ETag", BUILD_ETAG);
+  httpd_resp_set_hdr(r, "Cache-Control", "no-cache");
+  if (httpxHeader(r, "If-None-Match") == BUILD_ETAG) return httpxSend(r, 304, "application/yaml", "");
+  httpd_resp_set_type(r, "application/yaml");
+  httpd_resp_set_hdr(r, "Content-Encoding", "gzip");
+  for (size_t off = 0; off < sizeof(OPENAPI_YAML_GZ); off += 4096) {
+    const size_t c = (sizeof(OPENAPI_YAML_GZ) - off < 4096) ? sizeof(OPENAPI_YAML_GZ) - off : 4096;
+    httpxChunk(r, (const char*)OPENAPI_YAML_GZ + off, c);
+    wdgWebMs = millis();
+  }
+  return httpxChunkEnd(r);
+}
+
+// GET /.well-known/api-catalog (RFC 9727): the standard discovery pointer to the above.
+static esp_err_t handleApiCatalog(httpd_req_t* r) {
+  return httpxSend(r, 200, "application/linkset+json",
+      "{\"linkset\":[{\"anchor\":\"/\","
+      "\"service-desc\":[{\"href\":\"/openapi.yaml\",\"type\":\"application/yaml\"}]}]}");
+}
+
 // Stream a byte range of the static page in watchdog-friendly chunks so a slow
 // client can't trip the stall detector mid-send.
 static void streamPage(httpd_req_t* r, const char* p, size_t n) {
@@ -694,6 +720,7 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
   char head[320];
   snprintf(head, sizeof(head),
            "{\"product\":\"%s\",\"fw\":\"%s\",\"api\":\"%s\","
+           "\"openapi\":\"/openapi.yaml\","
            "\"grid\":{\"rows\":%d,\"cols\":%d},\"modules\":%d,\"maxFlaps\":%d,",
            PRODUCT_NAME, FW_VERSION, API_VERSION, rows, cols, vmCount, SF_MAX_FLAPS);
   capPut(head);
@@ -2704,6 +2731,8 @@ void webInit() {
   httpxOn("/api/canvas/stream",      HTTP_PUT,  handleApiCanvasStream);
   httpxOn("/api/canvas/stream",      HTTP_GET,  handleApiCanvasStreamGet);
   httpxOn("/api/canvas/audio",       HTTP_GET,  handleApiCanvasAudio);
+  httpxOn("/openapi.yaml",           HTTP_GET,  handleOpenapiSpec);
+  httpxOn("/.well-known/api-catalog", HTTP_GET, handleApiCatalog);
   httpxOn("/api/canvas/qoi",         HTTP_PUT,  handleApiCanvasQoi);
   httpxOn("/api/canvas/anim",        HTTP_PUT,  handleApiCanvasAnim);
   httpxOn("/api/canvas/atlas",        HTTP_GET,    handleApiAtlasList);
