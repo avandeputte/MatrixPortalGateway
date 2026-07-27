@@ -24,6 +24,17 @@
   breaks into a fine blend (`"dither":false` restores hard bands). Binary ops:
   gradient `dir` byte accepts 2 = radial.
 
+### Certification
+
+2-hour adversarial soak on the 256×64 board, release binary (full rotation with
+stream bursts incl. binary ops, full-wall pages, all effects, and near-silent
+`/api/sound` blips every 9th step to exercise the synth/I2S-TX/amp path):
+**2,273 steps, 0 reboots, 0 errors, 0 refusals, min-heap 48.6 KB, heap drift +212 B,
+34,244 SSE events / 0 drops, 252 stream bursts / 5,340 records / 0 errors,
+2,821/2,821 polls.** Serial captured throughout: no panics, no stalls, no synth write
+failures. The ~5 KB floor delta vs v3.5.0 is the full-duplex I2S port's resident TX
+DMA buffers plus the always-on RX clock heartbeat.
+
 ## v3.5.0 — 2026-07-26
 
 ### Added — the ops surface grows up
