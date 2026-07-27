@@ -707,6 +707,51 @@ paths:
                     items: { type: number }
                     description: "16 log-spaced bands, 125 Hz–7.9 kHz, each 0–1"
 
+  /api/canvas/opsb:
+    post:
+      tags: [Canvas]
+      summary: Binary draw commands (v3.5)
+      description: |
+        The binary twin of `POST /api/canvas/ops` — a fixed-layout encoding
+        (`canvas.opsBin` capability, format version 1) that skips JSON parsing
+        entirely: ~6× smaller and 1.5–1.9× the frame rate on op-heavy scenes. Same
+        semantics (auto-present unless the batch contains SHOW); a malformed batch is
+        a `400` with nothing drawn presented. Game-rate clients should carry the same
+        bytes in stream record `0x06` instead of this endpoint.
+
+        All integers big-endian; coordinates signed int16. Each op is `u8 opcode` +
+        fixed fields: `0x01` CLEAR rgb · `0x02` PIXEL x y rgb · `0x03`/`0x04`
+        HLINE/VLINE x y len rgb · `0x05` LINE x y x1 y1 t rgb · `0x06` RECT x y w h
+        flags t rgb (flags bit0 fill) · `0x07` CIRCLE x y r flags t rgb · `0x08`
+        ELLIPSE x y rx ry flags t rgb · `0x09` TRIANGLE 3×(x y) flags rgb · `0x0A`
+        ROUNDRECT x y w h r flags rgb · `0x0B` GRADIENT x y w h from(3) to(3) dir ·
+        `0x0C` ARC x y r t start end flags rgb · `0x0D` POLY n flags t rgb n×(x y)
+        (flags bit0 fill, bit1 closed outline) · `0x0E` CLIP x y w h (w≤0 clears) ·
+        `0x0F` ORIGIN x y · `0x10` TEXT x y size flags rgb [outline rgb] [shadow rgb]
+        len utf8 (flags bits0-1 align, bit2 aa, bit3/4 has-outline/shadow) · `0x11`
+        SPRITE i x y flags (bit0/1 flip h/v, bits2-3 rot/90, bits4-5 scale−1) ·
+        `0x12` SCROLL dx dy rgb · `0x13` SHOW. Strict decode: an unknown opcode or a
+        truncated op fails the batch — feature-detect via `canvas.opsBin`.
+      requestBody:
+        required: true
+        content: { application/octet-stream: { schema: { type: string, format: binary } } }
+      responses:
+        "200":
+          description: Applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:      { type: boolean }
+                  applied: { type: integer }
+        "400":
+          description: Malformed binary batch (nothing presented)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: Canvas stream active
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
   /api/canvas/stream:
     put:
       tags: [Canvas]
@@ -726,6 +771,7 @@ paths:
         | 0x03 | a JSON array as `POST /api/canvas/ops` | ops (present only via its `show` op) |
         | 0x04 | sheet name | bind a named atlas sheet |
         | 0x05 | *(empty)* | present the back buffer |
+        | 0x06 | a binary op batch as `POST /api/canvas/opsb` (v3.5) | zero-parse ops — present via its SHOW op |
         | 0x00 | *(empty)* | end — the gateway answers `200 {"ok":true,"records":N}` and closes the socket |
 
         Client requirements:
@@ -1828,6 +1874,7 @@ paths:
                       rect:     { type: boolean, example: true, description: "`PUT /api/canvas/rect` partial updates" }
                       rects:    { type: boolean, example: true, description: "`PUT /api/canvas/rects` multi-rect deltas (v3.1)" }
                       stream:   { type: boolean, example: true, description: "`PUT /api/canvas/stream` persistent TLV draw channel (v3.2)" }
+                      opsBin:   { type: integer, example: 1, description: "Binary ops format version accepted by POST /api/canvas/opsb and stream record 0x06 (v3.5)" }
                       anim:     { type: boolean, example: true, description: "`PUT /api/canvas/anim` on-device animation" }
                       ticker:   { type: boolean, example: true, description: "`POST /api/canvas/ticker` scrolling text" }
                       readback: { type: boolean, example: true, description: "`GET /api/canvas/frame` screenshot readback" }

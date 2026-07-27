@@ -776,7 +776,7 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
                     // with headroom and verified below.
     snprintf(cv, sizeof(cv),
              "\"canvas\":{\"formats\":[\"rgb888\",\"rgb565\",\"qoi\"],\"width\":%u,\"height\":%u,"
-             "\"rect\":true,\"rects\":true,\"stream\":true,\"anim\":true,\"ticker\":true,\"readback\":true,"
+             "\"rect\":true,\"rects\":true,\"stream\":true,\"opsBin\":1,\"anim\":true,\"ticker\":true,\"readback\":true,"
              "\"atlas\":{\"named\":true,\"persist\":true,\"maxSheets\":%u,"
              "\"maxBytes\":%u,\"maxSheetBytes\":%u},"
              "\"ops\":[\"clear\",\"pixel\",\"hline\",\"vline\",\"line\",\"rect\",\"circle\",\"ellipse\","
@@ -1307,6 +1307,7 @@ static void canvasLeave() { dispReturnToWall(); }              // hand the panel
    A malformed record aborts the stream (the panel keeps its last frame). */
 static bool canvasRectsApply(const uint8_t* body, size_t len, int* outDone);
 static int  canvasOpsRun(JsonArrayConst ops, bool* shownOut);
+static int  canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* okOut);
 
 static struct {
   httpd_req_t*  req  = nullptr;        // parked async request; non-null = stream open
@@ -1413,6 +1414,12 @@ static bool csExec() {
       return true;
     }
     case 0x05: canvasEnter(false); panelShow(); return true;
+    case 0x06: {                                  // binary ops (v3.5): zero-parse draw list
+      canvasEnter(false);
+      bool okb = true;
+      canvasOpsRunBin(cs.buf, cs.need, nullptr, &okb);
+      return okb;                                 // malformed binary = protocol error
+    }
     default:   return false;                      // unknown type: the framing is not trustworthy
   }
 }
@@ -1672,10 +1679,10 @@ static void canvasOpImage(JsonVariantConst op, int x, int y, int w, int h) {
 }
 
 // Fill (x,y,w,h) with a linear gradient from `from` to `to`, vertical unless horizontal.
-static void canvasOpGradient(int x, int y, int w, int h, JsonVariantConst from, JsonVariantConst to, bool vertical) {
+static void canvasOpGradientRaw(int x, int y, int w, int h,
+                                uint8_t r0, uint8_t g0, uint8_t b0,
+                                uint8_t r1, uint8_t g1, uint8_t b1, bool vertical) {
   if (w <= 0 || h <= 0) return;
-  uint8_t r0 = 0, g0 = 0, b0 = 0, r1 = 0, g1 = 0, b1 = 0;
-  canvasColor(from, r0, g0, b0); canvasColor(to, r1, g1, b1);
   const int n = vertical ? h : w, den = (n > 1) ? (n - 1) : 1;
   for (int i = 0; i < n; i++) {
     uint8_t r = (uint8_t)((int)r0 + ((int)r1 - (int)r0) * i / den);
@@ -1684,6 +1691,11 @@ static void canvasOpGradient(int x, int y, int w, int h, JsonVariantConst from, 
     if (vertical) panelHLine(x, y + i, w, r, g, b);
     else          panelVLine(x + i, y, h, r, g, b);
   }
+}
+static void canvasOpGradient(int x, int y, int w, int h, JsonVariantConst from, JsonVariantConst to, bool vertical) {
+  uint8_t r0 = 0, g0 = 0, b0 = 0, r1 = 0, g1 = 0, b1 = 0;
+  canvasColor(from, r0, g0, b0); canvasColor(to, r1, g1, b1);
+  canvasOpGradientRaw(x, y, w, h, r0, g0, b0, r1, g1, b1, vertical);
 }
 
 // A polyline: connect consecutive [x,y] points with straight lines.
@@ -1852,12 +1864,18 @@ static void canvasArc(int cx, int cy, int rad, int t, int a0, int a1, bool fill,
 }
 
 // Even-odd scanline fill for a closed polygon (up to 16 vertices).
+static void canvasPolyFillPts(const int* vx, const int* vy, int n,
+                              uint8_t r, uint8_t g, uint8_t b);
 static void canvasPolyFill(JsonArrayConst pts, uint8_t r, uint8_t g, uint8_t b) {
   int vx[16], vy[16], n = 0;
   for (JsonVariantConst p : pts) {
     if (n >= 16) break;
     vx[n] = (int)p[0] + gOpsOx; vy[n] = (int)p[1] + gOpsOy; n++;
   }
+  canvasPolyFillPts(vx, vy, n, r, g, b);
+}
+static void canvasPolyFillPts(const int* vx, const int* vy, int n,
+                              uint8_t r, uint8_t g, uint8_t b) {
   if (n < 3) return;
   int minY = vy[0], maxY = vy[0];
   for (int i = 1; i < n; i++) { if (vy[i] < minY) minY = vy[i]; if (vy[i] > maxY) maxY = vy[i]; }
@@ -1921,6 +1939,191 @@ static int alignIdx(const char* a, const char* mid) {   // "left/top"=0, mid=1, 
   if (!strcmp(a, mid)) return 1;
   if (!strcmp(a, "right") || !strcmp(a, "bottom")) return 2;
   return 0;
+}
+
+/* ---- binary ops (v3.5): the zero-parse path for game-rate clients -----------------
+   A fixed-layout encoding of the ops surface: 4-6x smaller than JSON on the wire and
+   ~zero decode cost (the JSON path spends 5-8 ms deserializing a rich frame). Carried
+   by stream record 0x06 and by POST /api/canvas/opsb; advertised as canvas.opsBin
+   (a format version, currently 1).
+
+   All integers big-endian; coordinates SIGNED int16 (games draw off-panel; the panel
+   primitives clip). Each op: u8 opcode + fixed fields. STRICT decode: an unknown
+   opcode or a truncated op is fatal to the batch (binary cannot skip what it cannot
+   size) -- feature-detect via capabilities, don't probe.
+
+     0x01 CLEAR     rgb
+     0x02 PIXEL     x y rgb
+     0x03 HLINE     x y w rgb            0x04 VLINE x y h rgb
+     0x05 LINE      x y x1 y1 t rgb
+     0x06 RECT      x y w h flags t rgb          (flags bit0 = fill)
+     0x07 CIRCLE    x y r flags t rgb
+     0x08 ELLIPSE   x y rx ry flags t rgb
+     0x09 TRIANGLE  x y x1 y1 x2 y2 flags rgb
+     0x0A ROUNDRECT x y w h r flags rgb
+     0x0B GRADIENT  x y w h from(3) to(3) dir    (dir 0 = vertical, 1 = horizontal)
+     0x0C ARC       x y r t start end flags rgb  (flags bit0 = pie fill)
+     0x0D POLY      n flags t rgb then n * (x y) (flags bit0 = fill, bit1 = closed
+                                                  outline; neither = open polyline)
+     0x0E CLIP      x y w h                      (w <= 0 clears)
+     0x0F ORIGIN    x y
+     0x10 TEXT      x y size flags rgb [outline rgb] [shadow rgb] len bytes
+                    (flags: bits0-1 align 0 L / 1 C / 2 R, bit2 aa, bit3 has-outline,
+                     bit4 has-shadow; text UTF-8, len u8)
+     0x11 SPRITE    i x y flags                  (flags: bit0 flipH, bit1 flipV,
+                                                  bits2-3 rot/90, bits4-5 scale-1)
+     0x12 SCROLL    dx dy rgb
+     0x13 SHOW                                                                      */
+static inline int16_t bops16(const uint8_t* p) { return (int16_t)(((uint16_t)p[0] << 8) | p[1]); }
+
+static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* okOut) {
+  int applied = 0; bool shown = false, ok = true;
+  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false;
+  panelClearClip();
+  size_t i = 0;
+  #define BOPS_NEED(n) if (i + (n) > len) { ok = false; break; }
+  while (i < len) {
+    const uint8_t opb = p[i++];
+    switch (opb) {
+      case 0x01: { BOPS_NEED(3);
+        panelFillRect(0, 0, gPanel.panelW, gPanel.panelH, p[i], p[i+1], p[i+2]); i += 3; break; }
+      case 0x02: { BOPS_NEED(7);
+        panelPixel(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy, p[i+4], p[i+5], p[i+6]);
+        i += 7; break; }
+      case 0x03: { BOPS_NEED(9);
+        panelHLine(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy, bops16(p+i+4),
+                   p[i+6], p[i+7], p[i+8]); i += 9; break; }
+      case 0x04: { BOPS_NEED(9);
+        panelVLine(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy, bops16(p+i+4),
+                   p[i+6], p[i+7], p[i+8]); i += 9; break; }
+      case 0x05: { BOPS_NEED(12);
+        canvasThickLine(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy,
+                        bops16(p+i+4) + gOpsOx, bops16(p+i+6) + gOpsOy,
+                        p[i+8], p[i+9], p[i+10], p[i+11]); i += 12; break; }
+      case 0x06: { BOPS_NEED(13);
+        const int x = bops16(p+i) + gOpsOx, y = bops16(p+i+2) + gOpsOy;
+        const int w = bops16(p+i+4), h = bops16(p+i+6);
+        const uint8_t fl = p[i+8], t = p[i+9] ? p[i+9] : 1;
+        if (fl & 1) panelFillRect(x, y, w, h, p[i+10], p[i+11], p[i+12]);
+        else {
+          panelFillRect(x, y, w, t, p[i+10], p[i+11], p[i+12]);
+          panelFillRect(x, y + h - t, w, t, p[i+10], p[i+11], p[i+12]);
+          panelFillRect(x, y, t, h, p[i+10], p[i+11], p[i+12]);
+          panelFillRect(x + w - t, y, t, h, p[i+10], p[i+11], p[i+12]);
+        }
+        i += 13; break; }
+      case 0x07: { BOPS_NEED(11);
+        const int x = bops16(p+i) + gOpsOx, y = bops16(p+i+2) + gOpsOy, r = bops16(p+i+4);
+        const uint8_t fl = p[i+6], t = p[i+7] ? p[i+7] : 1;
+        if (!(fl & 1) && t > 1) canvasArc(x, y, r, t, 0, 360, false, p[i+8], p[i+9], p[i+10]);
+        else panelCircle(x, y, r, fl & 1, p[i+8], p[i+9], p[i+10]);
+        i += 11; break; }
+      case 0x08: { BOPS_NEED(13);
+        const int x = bops16(p+i) + gOpsOx, y = bops16(p+i+2) + gOpsOy;
+        const int rx = bops16(p+i+4), ry = bops16(p+i+6);
+        const uint8_t fl = p[i+8], t = p[i+9] ? p[i+9] : 1;
+        for (int k = 0; k < ((fl & 1) ? 1 : t); k++)
+          panelEllipse(x, y, rx - k, ry - k, fl & 1, p[i+10], p[i+11], p[i+12]);
+        i += 13; break; }
+      case 0x09: { BOPS_NEED(16);
+        panelTriangle(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy,
+                      bops16(p+i+4) + gOpsOx, bops16(p+i+6) + gOpsOy,
+                      bops16(p+i+8) + gOpsOx, bops16(p+i+10) + gOpsOy,
+                      p[i+12] & 1, p[i+13], p[i+14], p[i+15]); i += 16; break; }
+      case 0x0A: { BOPS_NEED(14);
+        panelRoundRect(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy,
+                       bops16(p+i+4), bops16(p+i+6), bops16(p+i+8),
+                       p[i+10] & 1, p[i+11], p[i+12], p[i+13]); i += 14; break; }
+      case 0x0B: { BOPS_NEED(15);
+        canvasOpGradientRaw(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy,
+                            bops16(p+i+4), bops16(p+i+6),
+                            p[i+8], p[i+9], p[i+10], p[i+11], p[i+12], p[i+13],
+                            p[i+14] == 0); i += 15; break; }
+      case 0x0C: { BOPS_NEED(15);
+        canvasArc(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy, bops16(p+i+4), p[i+6],
+                  bops16(p+i+7), bops16(p+i+9), p[i+11] & 1,
+                  p[i+12], p[i+13], p[i+14]); i += 15; break; }
+      case 0x0D: { BOPS_NEED(6);
+        const uint8_t n = p[i], fl = p[i+1], t = p[i+2] ? p[i+2] : 1;
+        const uint8_t cr = p[i+3], cg = p[i+4], cb = p[i+5];
+        size_t q = i + 6;
+        BOPS_NEED(6 + (size_t)n * 4);
+        int vx[16], vy[16];
+        const int keep = n > 16 ? 16 : n;
+        for (int k = 0; k < keep; k++) {
+          vx[k] = bops16(p + q + k * 4) + gOpsOx;
+          vy[k] = bops16(p + q + k * 4 + 2) + gOpsOy;
+        }
+        if (fl & 1) canvasPolyFillPts(vx, vy, keep, cr, cg, cb);
+        else {
+          for (int k = 1; k < keep; k++)
+            canvasThickLine(vx[k-1], vy[k-1], vx[k], vy[k], t, cr, cg, cb);
+          if ((fl & 2) && keep > 2)
+            canvasThickLine(vx[keep-1], vy[keep-1], vx[0], vy[0], t, cr, cg, cb);
+        }
+        i += 6 + (size_t)n * 4; break; }
+      case 0x0E: { BOPS_NEED(8);
+        const int x = bops16(p+i) + gOpsOx, y = bops16(p+i+2) + gOpsOy;
+        const int w = bops16(p+i+4), h = bops16(p+i+6);
+        if (w > 0 && h > 0) {
+          gOpsClip[0] = x; gOpsClip[1] = y; gOpsClip[2] = x + w; gOpsClip[3] = y + h;
+          gOpsClipOn = true;
+        } else gOpsClipOn = false;
+        opsApplyClip(); i += 8; break; }
+      case 0x0F: { BOPS_NEED(4);
+        gOpsOx = bops16(p+i); gOpsOy = bops16(p+i+2); i += 4; break; }
+      case 0x10: { BOPS_NEED(9);
+        const int x = bops16(p+i) + gOpsOx, y = bops16(p+i+2) + gOpsOy;
+        const uint8_t size = p[i+4], fl = p[i+5];
+        const uint8_t cr = p[i+6], cg = p[i+7], cb = p[i+8];
+        size_t q = i + 9;
+        uint8_t orr = 0, org = 0, orb = 0, shr = 0, shg = 0, shb = 0;
+        if (fl & 0x08) { if (q + 3 > len) { ok = false; break; } orr = p[q]; org = p[q+1]; orb = p[q+2]; q += 3; }
+        if (fl & 0x10) { if (q + 3 > len) { ok = false; break; } shr = p[q]; shg = p[q+1]; shb = p[q+2]; q += 3; }
+        if (q + 1 > len) { ok = false; break; }
+        const uint8_t slen = p[q]; q += 1;
+        if (q + slen > len) { ok = false; break; }
+        char txt[128];
+        const uint8_t keep = slen < sizeof(txt) - 1 ? slen : sizeof(txt) - 1;
+        memcpy(txt, p + q, keep); txt[keep] = 0;
+        const int align = fl & 0x03;
+        if (fl & 0x04) {
+          aaTextDraw(x, y, size, txt, align, cr, cg, cb);
+        } else {
+          const Font1252* f = canvasFace(size);
+          char enc[192];
+          const int tw = (int)utf8ToCp1252(txt, enc, sizeof(enc)) * f->width;
+          const int tx = (align == 1) ? x - tw / 2 : (align == 2) ? x - tw : x;
+          if (fl & 0x08)
+            for (int dy2 = -1; dy2 <= 1; dy2++)
+              for (int dx2 = -1; dx2 <= 1; dx2++)
+                { if (dx2 || dy2) canvasText(tx + dx2, y + dy2, txt, orr, org, orb, f); }
+          else if (fl & 0x10) canvasText(tx + 1, y + 1, txt, shr, shg, shb, f);
+          canvasText(tx, y, txt, cr, cg, cb, f);
+        }
+        i = q + slen; break; }
+      case 0x11: { BOPS_NEED(7);
+        const uint16_t ti = (uint16_t)((p[i] << 8) | p[i+1]);
+        const int x = bops16(p+i+2) + gOpsOx, y = bops16(p+i+4) + gOpsOy;
+        const uint8_t fl = p[i+6];
+        canvasAtlasBlitEx(canvasAtlasBoundHandle(), ti, x, y,
+                          fl & 1, fl & 2, (uint16_t)(((fl >> 2) & 3) * 90),
+                          (uint8_t)(((fl >> 4) & 3) + 1));
+        i += 7; break; }
+      case 0x12: { BOPS_NEED(7);
+        panelScroll(bops16(p+i), bops16(p+i+2), p[i+4], p[i+5], p[i+6]); i += 7; break; }
+      case 0x13: panelShow(); shown = true; continue;
+      default: ok = false; break;
+    }
+    if (!ok) break;
+    applied++;                                    // counts like the JSON path (state ops too)
+  }
+  #undef BOPS_NEED
+  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false;
+  panelClearClip();
+  if (shownOut) *shownOut = shown;
+  if (okOut) *okOut = ok;
+  return applied;
 }
 
 static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
@@ -2103,6 +2306,36 @@ static esp_err_t handleApiCanvasOps(httpd_req_t* r) {
   // Answer BEFORE the auto-show: panelShow parks ~one frame as its tear-guard, and
   // serializing that inside the request cost every ops frame ~14 ms of round-trip.
   // Sent after the reply, the wait overlaps the client preparing its next frame.
+  char buf[48];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"applied\":%d}", applied);
+  esp_err_t rc = httpxSend(r, 200, "application/json", buf);
+  if (!shown) panelShow();
+  return rc;
+}
+
+// POST /api/canvas/opsb (v3.5) -- the binary twin of /api/canvas/ops: the fixed-layout
+// encoding documented at canvasOpsRunBin, as a raw body. Same semantics as the JSON
+// path (auto-present unless the batch contained SHOW); a malformed batch is a 400 with
+// nothing presented. Mainly for testing and one-shot clients -- game-rate clients
+// should carry the same bytes in stream record 0x06 instead.
+static esp_err_t handleApiCanvasOpsBin(httpd_req_t* r) {
+  if (!gPanel.ready) return httpxErr(r, 503, "Panel not running");
+  if (csBusy(r)) return ESP_OK;
+  const size_t len = (size_t)r->content_len;
+  if (len < 1 || len > 65536) return httpxErr(r, 400, "Body must be 1..65536 bytes of binary ops");
+  uint8_t* body = (uint8_t*)ps_malloc(len);
+  if (!body) return httpxErr(r, 503, "Out of memory");
+  size_t got = 0;
+  while (got < len) {
+    int n = httpxRecv(r, (char*)body + got, len - got);
+    if (n <= 0) { free(body); return httpxErr(r, 400, "Truncated body"); }
+    got += (size_t)n;
+  }
+  canvasEnter(false);
+  bool shown = false, okb = true;
+  const int applied = canvasOpsRunBin(body, len, &shown, &okb);
+  free(body);
+  if (!okb) return httpxErr(r, 400, "Malformed binary op batch");
   char buf[48];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"applied\":%d}", applied);
   esp_err_t rc = httpxSend(r, 200, "application/json", buf);
@@ -2976,6 +3209,7 @@ void webInit() {
   httpxOn("/api/canvas/transition",  HTTP_POST, handleApiCanvasTransition);
   httpxOn("/api/canvas/ticker",      HTTP_POST, handleApiCanvasTicker);
   httpxOn("/api/canvas/ops",         HTTP_POST, handleApiCanvasOps);
+  httpxOn("/api/canvas/opsb",        HTTP_POST, handleApiCanvasOpsBin);
   httpxOn("/api/canvas/effect",      HTTP_POST, handleApiCanvasEffect);
   httpxStart();
   printf("[Web] HTTP server %s (port 80), %d routes\n",

@@ -27,6 +27,22 @@ HTML-canvas ergonomics (all shared with the stream channel's ops record):
 - **Sprite transforms** — `flip:"h"|"v"|"hv"`, `rot:90|180|270`, `scale:1..4` on atlas
   blits; one sheet now serves every orientation.
 
+- **Binary ops** (`canvas.opsBin` capability, format 1) — a fixed-layout binary
+  encoding of the ops surface for game-rate clients: stream record `0x06` and the
+  REST twin `POST /api/canvas/opsb`. Signed 16-bit coordinates (draw off-panel
+  freely), strict decode (feature-detect, don't probe). Measured: **6.3× smaller**
+  frames and **1.5–1.9× the frame rate** on op-heavy scenes (a 66-op frame: 25 → 46+
+  fps — JSON parse time was the ceiling), pixel-identical output to the JSON path
+  (readback-verified, 0 differing bytes).
+- **The black-panel wedge is now self-healing.** The GDMA output stage can halt with
+  the framebuffer, API and `panel.ok` all healthy — only human eyes ever caught it
+  (twice in v3.0.1, once at a v3.5 OTA boot). taskDisplay now samples the channel's
+  working-descriptor register every second; frozen twice in a row = stalled, and the
+  cure a reboot always applied (stop, reset the LCD FIFO, re-arm the chain, restart)
+  runs in place, loudly logged. Verified end-to-end by deliberate wedge injection:
+  detected and healed in ~2 s with zero false positives under effects, max-rate
+  streaming and idle.
+
 ### Fixed
 
 - Stream close drain 30 → 60 ms: the v3.4.0 soak still saw ~1 in 50 bursts lose the

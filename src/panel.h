@@ -59,6 +59,10 @@ void panelScroll(int dx, int dy, uint8_t fr, uint8_t fg, uint8_t fb);
 // inherits a stale clip. panelClear() intentionally ignores it.
 void panelSetClip(int x0, int y0, int x1, int y1);
 void panelClearClip();
+// Output-stage stall watchdog (v3.5): taskDisplay calls this ~1/s; a frozen GDMA
+// descriptor pointer (the silent black-panel wedge) is detected and the output
+// stage restarted in place. No-op while parked (panelStop) or not ok.
+void panelHealthTick();
 
 // Present the back buffer: re-point the live descriptor chain's tail at the other chain,
 // then wait one frame so the caller cannot draw into a buffer GDMA is still reading.

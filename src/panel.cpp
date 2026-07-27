@@ -66,6 +66,8 @@
 #include <esp_rom_gpio.h>
 #include <esp_rom_sys.h>
 #include <hal/dma_types.h>
+#include <hal/gdma_ll.h>        // current-descriptor register, for the stall watchdog
+#include <soc/gdma_struct.h>
 #include <hal/gpio_hal.h>
 #include <soc/lcd_cam_reg.h>
 #include <soc/lcd_cam_struct.h>
@@ -122,6 +124,8 @@ static word_t*           fb[2]    = {nullptr, nullptr};   // framebuffers
 static dma_descriptor_t* desc[2]  = {nullptr, nullptr};   // one circular chain each
 static int               descN    = 0;                    // descriptors per chain
 static gdma_channel_handle_t dma_chan = nullptr;
+static int  dmaChanId    = -1;      // GDMA channel index, for the stall watchdog
+static bool outputParked = false;   // intentional stop (OTA park): watchdog stands down
 
 static uint16_t W = 0, H = 0;
 static uint8_t  DEPTH = 0, ROWS = 0, ADDR_BITS = 0;
@@ -375,6 +379,7 @@ bool panelBegin(uint16_t width, uint16_t height, uint8_t depth) {
   // (the engine must not write into descriptors we are about to re-point on a swap).
   gdma_strategy_config_t sc = {.owner_check = false, .auto_update_desc = false};
   gdma_apply_strategy(dma_chan, &sc);
+  gdma_get_channel_id(dma_chan, &dmaChanId);        // for the stall watchdog's register read
 
   liveBuf = 0; drawBuf = 1;
   gdma_start(dma_chan, (intptr_t)&desc[0][0]);
@@ -862,6 +867,7 @@ void panelShow() {
 
 void panelStop() {
   if (!info.ok) return;
+  outputParked = true;                              // the stall watchdog stands down
   LCD_CAM.lcd_user.lcd_start = 0;
   gdma_stop(dma_chan);
   // OE is still muxed to LCD_DATA_OUT7, so driving it as GPIO would do nothing. Detach
@@ -883,4 +889,43 @@ void panelResume() {
   gdma_start(dma_chan, (intptr_t)&desc[liveBuf][0]);
   esp_rom_delay_us(1);
   LCD_CAM.lcd_user.lcd_start = 1;
+  outputParked = false;
+}
+
+/* ---- output-stage stall watchdog (v3.5) --------------------------------------------
+   The "black panel, healthy API" wedge: the GDMA channel halts, leaving the
+   framebuffer, the API and panel.ok perfectly healthy with nothing physically lit --
+   observed twice in v3.0.1 under back-to-back swaps (since paced away in panelShow)
+   and once more at a v3.5 OTA boot. Only human eyes ever caught it; a reboot always
+   cured it. This makes the firmware its own witness: the channel's working-descriptor
+   register (outlink_dscr, via gdma_ll_tx_get_prefetched_desc_addr) must move between two samples 1.5 ms apart (the chain fetches a descriptor
+   every ~50 us at 5 MHz, and one full pass is ~14 ms, so two equal samples can never
+   be a coincidental full-loop alias). Frozen on two consecutive ticks = the output
+   stage is dead; the reboot's cure -- stop, reset the LCD FIFO, re-arm the chain,
+   restart -- is applied in place, with the event logged loudly. */
+static void panelOutputRestart() {
+  LCD_CAM.lcd_user.lcd_start = 0;
+  gdma_stop(dma_chan);
+  LCD_CAM.lcd_user.lcd_reset = 1;
+  esp_rom_delay_us(5);
+  desc[liveBuf][descN - 1].next = &desc[liveBuf][0];   // a mid-wedge swap could leave a cross-link
+  gdma_start(dma_chan, (intptr_t)&desc[liveBuf][0]);
+  esp_rom_delay_us(1);
+  LCD_CAM.lcd_user.lcd_start = 1;
+}
+
+void panelHealthTick() {
+  if (!info.ok || !dma_chan || dmaChanId < 0 || outputParked) return;
+  static uint8_t stuck = 0;
+  const uint32_t a1 = gdma_ll_tx_get_prefetched_desc_addr(&GDMA, (uint32_t)dmaChanId);
+  esp_rom_delay_us(1500);
+  const uint32_t a2 = gdma_ll_tx_get_prefetched_desc_addr(&GDMA, (uint32_t)dmaChanId);
+  if (a1 == a2) {
+    if (++stuck >= 2) {
+      printf("[PANEL] output stage STALLED (desc frozen at 0x%08x) -- self-healing\n",
+             (unsigned)a1);
+      panelOutputRestart();
+      stuck = 0;
+    }
+  } else stuck = 0;
 }

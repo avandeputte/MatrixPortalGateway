@@ -405,6 +405,12 @@ void taskDisplay(void* pv) {
   uint32_t lastFrameMs = 0;
   bool     pending     = true;                   // paint once at boot
   while (true) {
+    // Output-stage stall watchdog (~1/s, every display mode): see panelHealthTick.
+    {
+      static unsigned long lastHealth = 0;
+      const unsigned long hn = millis();
+      if (hn - lastHealth >= 1000) { lastHealth = hn; panelHealthTick(); }
+    }
     uint32_t now = millis();
     wdgDispMs = now;
     // A firmware image is streaming in. Don't step reels, don't repaint -- just keep
