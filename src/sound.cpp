@@ -179,6 +179,7 @@ static void synthTask(void* pv) {
 
 bool soundPlay(const uint16_t* freq, const uint16_t* ms, int n, uint8_t vol) {
   if (!gSoundPresent || n < 1) return false;
+  if (gQuietTime) return false;           // Quiet Time silences the speaker (v3.6)
   if (n > SOUND_MAX_NOTES) n = SOUND_MAX_NOTES;
   if (!audioAcquireI2S()) return false;
   taskENTER_CRITICAL(&sndMux);

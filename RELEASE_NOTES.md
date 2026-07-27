@@ -1,5 +1,16 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.6.1 — 2026-07-27
+
+- **Quiet Time now silences the speaker.** Turning Quiet Time on stops any tone
+  mid-play, and `soundPlay` refuses while quiet — the speaker follows the same
+  "dark and silent" rule as the panel.
+- **Settings: a Speaker card** (shown only when the wall has the `sound` capability)
+  with a master **enable** toggle, a **volume** slider, and a Test button. Persisted
+  as `soundEnabled` / `soundVolume` in `GET/POST /api/config`: the enable gates
+  `POST /api/sound` (`403` when off), the volume scales every call
+  (`effective = vol × soundVolume / 100`).
+
 ## v3.6.0 — 2026-07-27
 
 ### Added — the board has a voice

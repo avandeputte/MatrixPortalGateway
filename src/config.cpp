@@ -20,6 +20,8 @@ void cfgSetDefaults() {
   cfg.panelBright   = DEFAULT_BRIGHTNESS;
   cfg.flapMs        = DEFAULT_FLAP_MS;
   cfg.flapMax       = DEFAULT_FLAP_MAX;
+  cfg.soundEnabled  = true;
+  cfg.soundVolume   = 70;
   cfg.hostname[0] = 0;          // blank -> derived from the MAC
   cfg.serialDebug = false;
   gSerialDebug    = false;
@@ -54,10 +56,13 @@ void loadConfig() {
   cfg.panelBright   =           prefs.getUChar("pBright",DEFAULT_BRIGHTNESS);
   cfg.flapMs        = (uint16_t)prefs.getInt  ("flapMs", DEFAULT_FLAP_MS);
   cfg.flapMax       =           prefs.getUChar("flapMax",DEFAULT_FLAP_MAX);
+  cfg.soundEnabled  =           prefs.getBool ("sndEn",  true);
+  cfg.soundVolume   =           prefs.getUChar("sndVol", 70);
   if (cfg.panelBitDepth < 1 || cfg.panelBitDepth > 6) cfg.panelBitDepth = DEFAULT_BIT_DEPTH;
   if (cfg.panelBright < 1) cfg.panelBright = DEFAULT_BRIGHTNESS;
   if (cfg.flapMs < 2 || cfg.flapMs > 500) cfg.flapMs = DEFAULT_FLAP_MS;
   if (cfg.flapMax < 1 || cfg.flapMax > FLAP_ANIM_MAX) cfg.flapMax = DEFAULT_FLAP_MAX;
+  if (cfg.soundVolume > 100) cfg.soundVolume = 70;
   prefs.getString("host", cfg.hostname, sizeof(cfg.hostname));
   if (cfg.hostname[0] && !cfgValidHostname(cfg.hostname)) cfg.hostname[0] = 0;
   cfg.serialDebug = prefs.getBool("dbgSerial", false);
@@ -100,6 +105,8 @@ void saveConfig() {
   prefs.putUChar ("pBright",  cfg.panelBright);
   prefs.putInt   ("flapMs",   cfg.flapMs);
   prefs.putUChar ("flapMax",  cfg.flapMax);
+  prefs.putBool  ("sndEn",    cfg.soundEnabled);
+  prefs.putUChar ("sndVol",   cfg.soundVolume);
   prefs.putString("host",     cfg.hostname);
   prefs.end();
 }

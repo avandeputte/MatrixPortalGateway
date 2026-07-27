@@ -891,6 +891,8 @@ static esp_err_t handleApiConfigGet(httpd_req_t* r) {
   doc["panelBright"]   = cfg.panelBright;
   doc["flapMs"]        = cfg.flapMs;
   doc["flapMax"]       = cfg.flapMax;
+  doc["soundEnabled"]  = cfg.soundEnabled;   // master speaker enable (v3.6)
+  doc["soundVolume"]   = cfg.soundVolume;    // master volume 0..100
   doc["maxFlaps"]      = SF_MAX_FLAPS;   // 237: glyphs + colours + lowercase + pictographs
   doc["bootAnim"]      = cfg.bootAnim;   // library animation autoplayed at boot ("" = none)
   char out[1280];   // headroom for identity + panel + JSON-escaped SSID/TZ/hostname
@@ -984,6 +986,12 @@ static esp_err_t handleApiConfigSettings(httpd_req_t* r) {
     if (v >= 2 && v <= 500) cfg.flapMs = (uint16_t)v; }
   if (doc["flapMax"].is<int>())       { int v = doc["flapMax"];
     if (v >= 1 && v <= FLAP_ANIM_MAX) cfg.flapMax = (uint8_t)v; }
+  if (doc["soundEnabled"].is<bool>()) {
+    cfg.soundEnabled = doc["soundEnabled"];
+    if (!cfg.soundEnabled) soundStop();      // disabling silences anything mid-play
+  }
+  if (doc["soundVolume"].is<int>())   { int v = doc["soundVolume"];
+    if (v >= 0 && v <= 100) cfg.soundVolume = (uint8_t)v; }
   // Boot animation (v2.1): a library name, or "" to disable. Validated so a typo
   // cannot wedge boot; existence is NOT required (the file may be uploaded later).
   if (doc["bootAnim"].is<const char*>()) {
@@ -1495,12 +1503,15 @@ static esp_err_t handleApiSound(httpd_req_t* r) {
     return httpxSend(r, 200, "application/json", buf);
   }
   if (!soundAvailable()) return httpxErr(r, 503, "No speaker codec on this board");
+  // The "stop" and GET paths are always allowed; but a PLAY needs the master enable.
+  // Checked after parsing "stop" below so a stop request is honoured even when disabled.
   JsonDocument doc;
   if (!httpxReadJson(r, doc)) return ESP_OK;
   if (doc["stop"] | false) {
     soundStop();
     return httpxSend(r, 200, "application/json", "{\"ok\":true,\"stopped\":true}");
   }
+  if (!cfg.soundEnabled) return httpxErr(r, 403, "Speaker disabled in settings");
   if (gQuietTime) return httpxErr(r, 409, "Quiet Time is active");
   uint16_t f[SOUND_MAX_NOTES], m[SOUND_MAX_NOTES];
   int n = 0;
@@ -1521,8 +1532,10 @@ static esp_err_t handleApiSound(httpd_req_t* r) {
     n = 1;
   }
   if (!n) return httpxErr(r, 400, "nothing to play");
-  const int vol = doc["vol"] | 60;
-  soundPlay(f, m, n, (uint8_t)(vol < 0 ? 0 : vol > 100 ? 100 : vol));
+  int vol = doc["vol"] | 60;
+  if (vol < 0) vol = 0; else if (vol > 100) vol = 100;
+  vol = vol * cfg.soundVolume / 100;         // master volume (settings) scales every call
+  soundPlay(f, m, n, (uint8_t)vol);
   char buf[48];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"queued\":%d}", n);
   return httpxSend(r, 200, "application/json", buf);

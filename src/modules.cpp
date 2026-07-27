@@ -11,6 +11,7 @@
 
 #include "gateway.h"
 #include "canvas.h"
+#include "sound.h"   // soundStop() when Quiet Time turns on (v3.6)
 
 // Send one flap character. `c` is a single Windows-1252 byte: ASCII 0x20-0x7E, or a high
 // byte (euro/accents/smart punctuation) -- see charset.h. Bytes that aren't a valid flap
@@ -107,7 +108,8 @@ void sfSetQuietTime(bool on) {
     sfHome(-1);          // unlocked, and quiet is still off -- so this is not suppressed
     dispReturnToWall();  // drop any effect/raw-canvas so the blanked wall is what the panel shows
     canvasTickerStopForce();   // the overlay ticker too: quiet means a DARK panel
-    printf("[QUIET] on -- wall blanked (home all)\n");
+    soundStop();               // and SILENT -- kill any tone mid-play (v3.6)
+    printf("[QUIET] on -- wall blanked + speaker silenced (home all)\n");
   }
 
   gQuietTime = on;       // only now: the blanking frame above had to get out first

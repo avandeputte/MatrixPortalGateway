@@ -42,6 +42,8 @@ struct GwConfig {
   uint8_t       panelBright;   // 1..255, multiplied into every colour before it reaches the panel
   uint16_t      flapMs;        // ms per flap step -- the reel's speed
   uint8_t       flapMax;       // flips drawn for one change, 1..FLAP_ANIM_MAX
+  bool          soundEnabled;  // master speaker enable (v3.6); false = silent
+  uint8_t       soundVolume;   // master volume 0..100 -- scales every /api/sound call
 };
 
 // ---- owned globals (defined in globals.cpp) ----
