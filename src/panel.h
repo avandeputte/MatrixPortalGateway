@@ -53,6 +53,12 @@ void panelEllipse(int cx, int cy, int a, int b, bool fill, uint8_t r, uint8_t g,
 // Shift the live frame into the back buffer by (dx,dy); vacated pixels get the fill colour. For a
 // marquee: scroll, draw the newly-revealed edge, then panelShow(). Does not drift on repeat.
 void panelScroll(int dx, int dy, uint8_t fr, uint8_t fg, uint8_t fb);
+// Clip rectangle (v3.5, the ops "clip" op): x0/y0 inclusive, x1/y1 exclusive. Applies
+// to panelPixel and the fill/blit fast paths -- i.e. every drawing primitive -- until
+// cleared. canvasOpsRun clears it at batch start and end, so no other path ever
+// inherits a stale clip. panelClear() intentionally ignores it.
+void panelSetClip(int x0, int y0, int x1, int y1);
+void panelClearClip();
 
 // Present the back buffer: re-point the live descriptor chain's tail at the other chain,
 // then wait one frame so the caller cannot draw into a buffer GDMA is still reading.

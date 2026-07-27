@@ -522,27 +522,49 @@ int canvasAtlasBind(const char* name) {
 
 int canvasAtlasBoundHandle() { return atlasBound; }
 
-bool canvasAtlasBlitFrom(int handle, uint16_t i, int x, int y) {
+// Transformed sprite blit (v3.5): flip before rotate, then integer scale. Source
+// pixels are walked once; each lands as a scale x scale block via the fill fast path
+// (a plain 1x1 panelPixel when scale is 1). Transparency (magenta) skips as always.
+bool canvasAtlasBlitEx(int handle, uint16_t i, int x, int y,
+                       bool flipH, bool flipV, uint16_t rot, uint8_t scale) {
   if (handle < 0 || handle >= ATLAS_MAX_SHEETS || !atlasTab[handle].name[0]) return false;
   AtlasSheet& a = atlasTab[handle];
   if (i >= a.tiles) return false;
+  if (scale < 1) scale = 1; else if (scale > 4) scale = 4;
   a.lastUsedMs = millis();
   const uint8_t* t = a.buf + (size_t)i * a.tileBytes;
-  for (int row = 0; row < a.tileH; row++)
-    for (int col = 0; col < a.tileW; col++) {
-      const uint8_t* p = t + ((size_t)row * a.tileW + col) * a.fmt;
+  const int tw = a.tileW, th = a.tileH;
+  for (int row = 0; row < th; row++)
+    for (int col = 0; col < tw; col++) {
+      const uint8_t* p = t + ((size_t)row * tw + col) * a.fmt;
+      uint8_t cr, cg, cb;
       if (a.fmt == 3) {
         if (p[0] == 255 && p[1] == 0 && p[2] == 255) continue;          // transparent
-        panelPixel(x + col, y + row, p[0], p[1], p[2]);
+        cr = p[0]; cg = p[1]; cb = p[2];
       } else {
         const uint16_t v = ((uint16_t)p[0] << 8) | p[1];                // big-endian rgb565
         if (v == 0xF81F) continue;                                      // transparent
-        panelPixel(x + col, y + row, (uint8_t)(((v >> 11) & 0x1F) << 3),
-                                     (uint8_t)(((v >> 5)  & 0x3F) << 2),
-                                     (uint8_t)((v & 0x1F) << 3));
+        cr = (uint8_t)(((v >> 11) & 0x1F) << 3);
+        cg = (uint8_t)(((v >> 5)  & 0x3F) << 2);
+        cb = (uint8_t)((v & 0x1F) << 3);
       }
+      int sx = flipH ? tw - 1 - col : col;                              // flip in tile space...
+      int sy = flipV ? th - 1 - row : row;
+      int dx, dy;                                                       // ...then rotate CW
+      switch (rot) {
+        case 90:  dx = th - 1 - sy; dy = sx;            break;
+        case 180: dx = tw - 1 - sx; dy = th - 1 - sy;   break;
+        case 270: dx = sy;          dy = tw - 1 - sx;   break;
+        default:  dx = sx;          dy = sy;            break;
+      }
+      if (scale == 1) panelPixel(x + dx, y + dy, cr, cg, cb);
+      else panelFillRect(x + dx * scale, y + dy * scale, scale, scale, cr, cg, cb);
     }
   return true;
+}
+
+bool canvasAtlasBlitFrom(int handle, uint16_t i, int x, int y) {
+  return canvasAtlasBlitEx(handle, i, x, y, false, false, 0, 1);
 }
 
 const uint8_t* canvasAtlasData(const char* name, uint8_t hdr[12], size_t* bytes) {

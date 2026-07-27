@@ -771,7 +771,7 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
   // hand out, and answers this URL without these keys. Stated here so the companion lights up
   // canvas/effect controls from capabilities, not from a firmware-version sniff: `canvas` is the
   // framebuffer a client would push frames to, `effects` the on-device animation set.
-  { char cv[768];   // v3.1: the atlas descriptor + rects flag overflowed 480 and snprintf
+  { char cv[960];   // v3.1: the atlas descriptor + rects flag overflowed 480 and snprintf
                     // TRUNCATED the JSON -- /api/capabilities went invalid, silently. Sized
                     // with headroom and verified below.
     snprintf(cv, sizeof(cv),
@@ -780,7 +780,8 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
              "\"atlas\":{\"named\":true,\"persist\":true,\"maxSheets\":%u,"
              "\"maxBytes\":%u,\"maxSheetBytes\":%u},"
              "\"ops\":[\"clear\",\"pixel\",\"hline\",\"vline\",\"line\",\"rect\",\"circle\",\"ellipse\","
-             "\"triangle\",\"roundrect\",\"gradient\",\"polyline\",\"text\",\"image\",\"sprite\",\"scroll\",\"show\"]},"
+             "\"triangle\",\"roundrect\",\"gradient\",\"polyline\",\"poly\",\"arc\",\"clip\",\"origin\","
+             "\"text\",\"textbox\",\"image\",\"sprite\",\"scroll\",\"show\"]},"
              "\"effects\":%s,\"effectParams\":%s,",
              (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
              (unsigned)ATLAS_MAX_SHEETS, (unsigned)ATLAS_TOTAL_BUDGET,
@@ -1369,8 +1370,10 @@ static void csClose(bool ok, const char* why) {
     httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
     // Let the 200 drain before the session close: an immediate trigger_close raced the
     // response flush on the PSRAM-buffers core and the client saw an RST instead of
-    // its 200 (~1 in 15 bursts; 0 in 281 on stock). 30 ms on taskWeb is one pump tick.
-    delay(30);
+    // its 200 (~1 in 15 bursts; 0 in 281 on stock). 30 ms cured most of it but the
+    // v3.4.0 soak still saw ~1 in 50 -- 60 ms costs nothing (it runs on the pump's
+    // own tick) and the 50-burst close test is the regression gate.
+    delay(60);
   }
   httpd_req_async_handler_complete(req);
   if (fd >= 0) httpd_sess_trigger_close(hd, fd);
@@ -1549,6 +1552,14 @@ static void canvasText(int x, int y, const char* s, uint8_t r, uint8_t g, uint8_
   }
 }
 // A [r,g,b] triple from an op field, leaving the caller's defaults untouched when absent.
+// Like canvasColor, but reports whether a colour was actually present -- for optional
+// style params (outline/shadow) where absence means "don't draw that layer".
+static bool canvasColorGet(JsonVariantConst c, uint8_t& r, uint8_t& g, uint8_t& b) {
+  if (!c.is<JsonArrayConst>() || c.size() < 3) return false;
+  r = (uint8_t)c[0].as<int>(); g = (uint8_t)c[1].as<int>(); b = (uint8_t)c[2].as<int>();
+  return true;
+}
+
 static void canvasColor(JsonVariantConst c, uint8_t& r, uint8_t& g, uint8_t& b) {
   if (c.is<JsonArrayConst>() && c.size() >= 3) {
     r = (uint8_t)c[0].as<int>(); g = (uint8_t)c[1].as<int>(); b = (uint8_t)c[2].as<int>();
@@ -1785,11 +1796,141 @@ static esp_err_t handleApiAnimList(httpd_req_t* r) {
 // applied; *shown reports whether the batch contained an explicit "show". Shared by
 // POST /api/canvas/ops and the stream channel's ops record (v3.2). Caller must have
 // entered canvas mode (canvasEnter) first.
+/* ---- v3.5 ops helpers: thickness, arcs, filled polygons, textbox ------------------ */
+// Batch-scoped drawing state for the "origin" and "clip" ops. Reset at every
+// canvasOpsRun entry AND exit so no other draw path can inherit them.
+static int  gOpsOx = 0, gOpsOy = 0;
+static int  gOpsClip[4];
+static bool gOpsClipOn = false;
+
+static void opsApplyClip() {
+  if (gOpsClipOn) panelSetClip(gOpsClip[0], gOpsClip[1], gOpsClip[2], gOpsClip[3]);
+  else            panelClearClip();
+}
+
+// Bresenham with a w x w filled-square brush -- reads as a solid thick stroke at
+// panel resolutions and costs one fast fillRect per step.
+static void canvasThickLine(int x0, int y0, int x1, int y1, int t,
+                            uint8_t r, uint8_t g, uint8_t b) {
+  if (t <= 1) { panelLine(x0, y0, x1, y1, r, g, b); return; }
+  const int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+  const int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+  int err = dx + dy;
+  const int off = t >> 1;
+  for (;;) {
+    panelFillRect(x0 - off, y0 - off, t, t, r, g, b);
+    if (x0 == x1 && y0 == y1) break;
+    const int e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
+
+// Arc / pie: 0 degrees = 12 o'clock, clockwise (the gauge convention). Outline mode
+// draws the annulus [rad-t+1 .. rad]; fill draws the whole pie slice. Bounding-box
+// scan with one atan2f per candidate pixel -- ops are one-shot draws, not per-frame.
+static void canvasArc(int cx, int cy, int rad, int t, int a0, int a1, bool fill,
+                      uint8_t r, uint8_t g, uint8_t b) {
+  if (rad < 1) return;
+  if (t < 1) t = 1;
+  if (t > rad) t = rad;
+  while (a0 < 0)  { a0 += 360; a1 += 360; }
+  while (a1 < a0) a1 += 360;
+  if (a1 - a0 > 360) a1 = a0 + 360;
+  const long r2o = (long)rad * rad;
+  const long r2i = fill ? -1 : (long)(rad - t) * (rad - t);
+  for (int yy = -rad; yy <= rad; yy++)
+    for (int xx = -rad; xx <= rad; xx++) {
+      const long d2 = (long)xx * xx + (long)yy * yy;
+      if (d2 > r2o || d2 <= r2i) continue;
+      float a = atan2f((float)xx, (float)-yy) * 57.295780f;    // 0 up, CW positive
+      if (a < 0) a += 360.0f;
+      if (a < (float)a0) a += 360.0f;
+      if (a > (float)a1) continue;
+      panelPixel(cx + xx, cy + yy, r, g, b);
+    }
+}
+
+// Even-odd scanline fill for a closed polygon (up to 16 vertices).
+static void canvasPolyFill(JsonArrayConst pts, uint8_t r, uint8_t g, uint8_t b) {
+  int vx[16], vy[16], n = 0;
+  for (JsonVariantConst p : pts) {
+    if (n >= 16) break;
+    vx[n] = (int)p[0] + gOpsOx; vy[n] = (int)p[1] + gOpsOy; n++;
+  }
+  if (n < 3) return;
+  int minY = vy[0], maxY = vy[0];
+  for (int i = 1; i < n; i++) { if (vy[i] < minY) minY = vy[i]; if (vy[i] > maxY) maxY = vy[i]; }
+  for (int y = minY; y <= maxY; y++) {
+    int xs[16], k = 0;
+    for (int i = 0; i < n; i++) {
+      const int j = (i + 1) % n;
+      if ((vy[i] <= y && vy[j] > y) || (vy[j] <= y && vy[i] > y))
+        xs[k++] = vx[i] + (int)((long)(y - vy[i]) * (vx[j] - vx[i]) / (vy[j] - vy[i]));
+    }
+    for (int a = 1; a < k; a++) {                 // insertion sort (k <= 16)
+      const int v = xs[a]; int b2 = a - 1;
+      while (b2 >= 0 && xs[b2] > v) { xs[b2 + 1] = xs[b2]; b2--; }
+      xs[b2 + 1] = v;
+    }
+    for (int a = 0; a + 1 < k; a += 2) panelHLine(xs[a], y, xs[a + 1] - xs[a] + 1, r, g, b);
+  }
+}
+
+// Word-wrapped, aligned text inside a box, clipped to it. halign/valign: 0 start,
+// 1 centre, 2 end. Respects explicit newlines; a word longer than the box hard-breaks.
+static void canvasTextBox(int x, int y, int w, int h, const char* s, const Font1252* f,
+                          int halign, int valign, uint8_t r, uint8_t g, uint8_t b) {
+  char enc[384];
+  utf8ToCp1252(s, enc, sizeof(enc));
+  const int cw = f->width, lh = f->height + 1;
+  const int maxCols = cw ? w / cw : 0;
+  if (maxCols < 1 || h < f->height) return;
+  struct { int start, len; } lines[10];
+  int nl = 0, i = 0;
+  const int len = (int)strlen(enc);
+  while (i < len && nl < 10) {
+    if (enc[i] == ' ') { i++; continue; }
+    int end = i, lastSp = -1;
+    while (end < len && enc[end] != '\n' && end - i < maxCols) {
+      if (enc[end] == ' ') lastSp = end;
+      end++;
+    }
+    int next;
+    if (end >= len)            next = end;
+    else if (enc[end] == '\n') next = end + 1;
+    else if (lastSp > i)     { end = lastSp; next = lastSp + 1; }
+    else                       next = end;
+    lines[nl].start = i; lines[nl].len = end - i; nl++;
+    i = next;
+  }
+  const int totH = nl * lh - 1;
+  int ty = y + (valign == 1 ? (h - totH) / 2 : valign == 2 ? h - totH : 0);
+  panelSetClip(x, y, x + w, y + h);
+  for (int L = 0; L < nl; L++) {
+    const int tw2 = lines[L].len * cw;
+    const int tx = x + (halign == 1 ? (w - tw2) / 2 : halign == 2 ? w - tw2 : 0);
+    for (int c2 = 0; c2 < lines[L].len; c2++)
+      dispDrawGlyph1252(tx + c2 * cw, ty, f, (uint8_t)enc[lines[L].start + c2], 0, 255, r, g, b);
+    ty += lh;
+  }
+  opsApplyClip();                                  // back to the batch's own clip (or none)
+}
+
+static int alignIdx(const char* a, const char* mid) {   // "left/top"=0, mid=1, "right/bottom"=2
+  if (!strcmp(a, mid)) return 1;
+  if (!strcmp(a, "right") || !strcmp(a, "bottom")) return 2;
+  return 0;
+}
+
 static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
   int applied = 0; bool shown = false;
+  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false;
+  panelClearClip();
   for (JsonVariantConst op : ops) {
     const char* k = op["op"] | "";
-    int x = op["x"] | 0, y = op["y"] | 0, w = op["w"] | 0, h = op["h"] | 0;
+    int x = (op["x"] | 0) + gOpsOx, y = (op["y"] | 0) + gOpsOy;
+    int w = op["w"] | 0, h = op["h"] | 0;
     if (!strcmp(k, "clear")) {
       uint8_t r = 0, g = 0, b = 0; canvasColor(op["color"], r, g, b);
       panelFillRect(0, 0, gPanel.panelW, gPanel.panelH, r, g, b);
@@ -1805,14 +1946,20 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
     } else if (!strcmp(k, "rect")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
       if (op["fill"] | false) panelFillRect(x, y, w, h, r, g, b);
-      else { panelHLine(x, y, w, r, g, b); panelHLine(x, y + h - 1, w, r, g, b);
-             panelVLine(x, y, h, r, g, b); panelVLine(x + w - 1, y, h, r, g, b); }
+      else {
+        const int t = op["t"] | 1;                       // outline thickness (v3.5)
+        panelFillRect(x, y, w, t, r, g, b);              panelFillRect(x, y + h - t, w, t, r, g, b);
+        panelFillRect(x, y, t, h, r, g, b);              panelFillRect(x + w - t, y, t, h, r, g, b);
+      }
     } else if (!strcmp(k, "line")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
-      panelLine(x, y, op["x1"] | 0, op["y1"] | 0, r, g, b);
+      canvasThickLine(x, y, (op["x1"] | 0) + gOpsOx, (op["y1"] | 0) + gOpsOy,
+                      op["t"] | 1, r, g, b);
     } else if (!strcmp(k, "circle")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
-      panelCircle(x, y, op["r"] | 0, op["fill"] | false, r, g, b);
+      const int t = op["t"] | 1;
+      if (t > 1 && !(op["fill"] | false)) canvasArc(x, y, op["r"] | 0, t, 0, 360, false, r, g, b);
+      else panelCircle(x, y, op["r"] | 0, op["fill"] | false, r, g, b);
     } else if (!strcmp(k, "image")) {
       canvasOpImage(op, x, y, w, h);
     } else if (!strcmp(k, "atlas")) {
@@ -1824,24 +1971,40 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
       // {"op":"sprite","i":N,"x":X,"y":Y}: blit tile N of the BOUND sheet at (x,y),
       // transparent pixels skipped. Nothing bound or i out of range: skip, don't count.
       const int ti = op["i"] | -1;
-      if (ti < 0 || !canvasAtlasBlitFrom(canvasAtlasBoundHandle(), (uint16_t)ti, x, y)) continue;
+      const char* fl = op["flip"] | "";                  // "h" | "v" | "hv" (v3.5)
+      if (ti < 0 || !canvasAtlasBlitEx(canvasAtlasBoundHandle(), (uint16_t)ti, x, y,
+                                       strchr(fl, 'h') != nullptr, strchr(fl, 'v') != nullptr,
+                                       (uint16_t)(op["rot"] | 0), (uint8_t)(op["scale"] | 1)))
+        continue;
     } else if (!strcmp(k, "scroll")) {
       uint8_t r = 0, g = 0, b = 0; canvasColor(op["color"], r, g, b);   // vacated pixels: black default
       panelScroll(op["dx"] | 0, op["dy"] | 0, r, g, b);
     } else if (!strcmp(k, "triangle")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
-      panelTriangle(x, y, op["x1"] | 0, op["y1"] | 0, op["x2"] | 0, op["y2"] | 0, op["fill"] | false, r, g, b);
+      panelTriangle(x, y, (op["x1"] | 0) + gOpsOx, (op["y1"] | 0) + gOpsOy,
+                    (op["x2"] | 0) + gOpsOx, (op["y2"] | 0) + gOpsOy, op["fill"] | false, r, g, b);
     } else if (!strcmp(k, "roundrect")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
       panelRoundRect(x, y, w, h, op["r"] | 0, op["fill"] | false, r, g, b);
     } else if (!strcmp(k, "ellipse")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
-      panelEllipse(x, y, op["rx"] | 0, op["ry"] | 0, op["fill"] | false, r, g, b);
+      const int t = op["t"] | 1;
+      for (int i = 0; i < (op["fill"] | false ? 1 : t); i++)
+        panelEllipse(x, y, (op["rx"] | 0) - i, (op["ry"] | 0) - i, op["fill"] | false, r, g, b);
     } else if (!strcmp(k, "gradient")) {
       canvasOpGradient(x, y, w, h, op["from"], op["to"], strcmp(op["dir"] | "v", "h") != 0);
     } else if (!strcmp(k, "polyline")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
-      canvasOpPolyline(op["points"], r, g, b);
+      const int t = op["t"] | 1;
+      if (t <= 1 && !gOpsOx && !gOpsOy) canvasOpPolyline(op["points"], r, g, b);
+      else {
+        int px = 0, py = 0; bool first = true;
+        for (JsonVariantConst p : op["points"].as<JsonArrayConst>()) {
+          const int nx = (int)p[0] + gOpsOx, ny = (int)p[1] + gOpsOy;
+          if (!first) canvasThickLine(px, py, nx, ny, t, r, g, b);
+          px = nx; py = ny; first = false;
+        }
+      }
     } else if (!strcmp(k, "text")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
       const char* s = op["s"] | "";
@@ -1853,16 +2016,76 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
         if (cf) f = cf;
       }
       const char* al = op["align"] | "left";
-      char twenc[256];   // glyph count, not byte count: multi-byte UTF-8 skewed centre/right
-      int tx = x, tw = (int)utf8ToCp1252(s, twenc, sizeof(twenc)) * f->width;
-      if      (!strcmp(al, "center")) tx = x - tw / 2;
-      else if (!strcmp(al, "right"))  tx = x - tw;
-      canvasText(tx, y, s, r, g, b, f);
+      if (op["aa"] | false) {                            // v3.5: anti-aliased Orbitron
+        aaTextDraw(x, y, op["size"] | 24, s, alignIdx(al, "center"), r, g, b);
+      } else {
+        char twenc[256];   // glyph count, not byte count: multi-byte UTF-8 skewed centre/right
+        int tx = x, tw = (int)utf8ToCp1252(s, twenc, sizeof(twenc)) * f->width;
+        if      (!strcmp(al, "center")) tx = x - tw / 2;
+        else if (!strcmp(al, "right"))  tx = x - tw;
+        // v3.5 styles: a 1 px outline (8 neighbours) or a +1,+1 drop shadow, drawn first.
+        uint8_t sr, sg, sb;
+        if (canvasColorGet(op["outline"], sr, sg, sb)) {
+          for (int dy2 = -1; dy2 <= 1; dy2++)
+            for (int dx2 = -1; dx2 <= 1; dx2++)
+              if (dx2 || dy2) canvasText(tx + dx2, y + dy2, s, sr, sg, sb, f);
+        } else if (canvasColorGet(op["shadow"], sr, sg, sb)) {
+          canvasText(tx + 1, y + 1, s, sr, sg, sb, f);
+        }
+        canvasText(tx, y, s, r, g, b, f);
+      }
+    } else if (!strcmp(k, "arc")) {
+      // {"op":"arc",x,y,"r":R,"t":T,"start":deg,"end":deg,"fill":bool} -- 0 deg = 12
+      // o'clock, clockwise (the gauge convention). fill=true draws the pie slice.
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      canvasArc(x, y, op["r"] | 0, op["t"] | 2, op["start"] | 0, op["end"] | 360,
+                op["fill"] | false, r, g, b);
+    } else if (!strcmp(k, "poly")) {
+      // Closed polygon: fill (even-odd scanline) or outline with optional thickness.
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      if (op["fill"] | true) canvasPolyFill(op["points"], r, g, b);
+      else {
+        const int t = op["t"] | 1;
+        int px = 0, py = 0, fx = 0, fy = 0; bool first = true;
+        for (JsonVariantConst p : op["points"].as<JsonArrayConst>()) {
+          const int nx = (int)p[0] + gOpsOx, ny = (int)p[1] + gOpsOy;
+          if (first) { fx = nx; fy = ny; }
+          else canvasThickLine(px, py, nx, ny, t, r, g, b);
+          px = nx; py = ny; first = false;
+        }
+        if (!first) canvasThickLine(px, py, fx, fy, t, r, g, b);
+      }
+    } else if (!strcmp(k, "clip")) {
+      // {"op":"clip",x,y,w,h} clips all later ops to the window; bare {"op":"clip"}
+      // clears it. Batch-scoped: canvasOpsRun resets it on entry and exit.
+      if (w > 0 && h > 0) {
+        gOpsClip[0] = x; gOpsClip[1] = y; gOpsClip[2] = x + w; gOpsClip[3] = y + h;
+        gOpsClipOn = true;
+      } else gOpsClipOn = false;
+      opsApplyClip();
+    } else if (!strcmp(k, "origin")) {
+      // {"op":"origin",x,y}: absolute translation added to every later coordinate
+      // (including points arrays); bare {"op":"origin"} resets. Batch-scoped.
+      gOpsOx = op["x"] | 0; gOpsOy = op["y"] | 0;
+    } else if (!strcmp(k, "textbox")) {
+      // {"op":"textbox",x,y,w,h,"s":...,"size":N,"font":...,"align":...,"valign":...,
+      //  "color":[r,g,b]} -- word-wrapped (explicit \n honoured), aligned, clipped.
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      const Font1252* f = canvasFace(op["size"] | 10);
+      if (op["font"].is<const char*>()) {
+        const Font1252* cf = canvasFontByName(op["font"].as<const char*>());
+        if (cf) f = cf;
+      }
+      canvasTextBox(x, y, w, h, op["s"] | "", f,
+                    alignIdx(op["align"] | "left", "center"),
+                    alignIdx(op["valign"] | "top", "middle"), r, g, b);
     } else if (!strcmp(k, "show")) {
       panelShow(); shown = true; continue;
     } else continue;                      // unknown op: skip, do not count
     applied++;
   }
+  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false;
+  panelClearClip();
   if (shownOut) *shownOut = shown;
   return applied;
 }

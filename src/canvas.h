@@ -62,6 +62,10 @@ int  canvasAtlasCommit();                                  // publish: swap in, 
 int  canvasAtlasBind(const char* name);                    // handle, or -1 (lazy FS load inside)
 int  canvasAtlasBoundHandle();                             // the sticky bind, -1 = none
 bool canvasAtlasBlitFrom(int handle, uint16_t i, int x, int y);
+// v3.5 sprite transforms: flip (applied first, in tile space), rotate CW (0/90/180/270),
+// integer scale 1..4. The plain BlitFrom is the identity-transform shim.
+bool canvasAtlasBlitEx(int handle, uint16_t i, int x, int y,
+                       bool flipH, bool flipV, uint16_t rot, uint8_t scale);
 int  canvasAtlasSave(const char* name);                    // 0 / 404 / 507 / 503
 int  canvasAtlasDelete(const char* name);                  // 0 / 404
 void canvasAtlasListJson(void (*sink)(const char*));       // [{name,tiles,w,h,fmt,bytes,resident,persisted},…]

@@ -60,6 +60,13 @@ const char* effectListJson();                 // all names as a JSON array, e.g.
 // the legacy flat "effectParams" union and the new "effectDefs" JSON derive from
 // them at first use.
 const char* effectDefsJson();          // [{id,name,params:[{key,type,...}]}...]
+
+// Anti-aliased Orbitron text for the ops "text" aa path (v3.5): size picks the face
+// (>=30 -> 34 px, >=18 -> 24 px, else 13 px), input is folded to the faces' charset
+// (uppercase A-Z, digits, :.-+%/); unknown glyphs are skipped. align: 0 left, 1
+// centre, 2 right about x. y is the TOP of the glyphs. Returns the drawn width.
+int aaTextDraw(int x, int y, int size, const char* s, int align,
+               uint8_t r, uint8_t g, uint8_t b);
 const char* effectParamsUnionJson();   // legacy flat union, e.g. ["hue","density","audio"]
 
 void effectReset(uint8_t type);   // prepare per-effect state; called only on taskDisplay

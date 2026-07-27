@@ -333,6 +333,21 @@ static void aaText(int px, int by, const AAFont* f, const char* s, uint8_t r, ui
   for (; *s; s++) { aaGlyph(px, by, f, *s, r, g, b); px += aaAdvance(f, *s); }
 }
 
+int aaTextDraw(int x, int y, int size, const char* str, int align,
+               uint8_t r, uint8_t g, uint8_t b) {
+  const AAFont* f = (size >= 30) ? &AAFONT_BIG : (size >= 18) ? &AAFONT_MED : &AAFONT_SMALL;
+  char up[96];
+  size_t n = 0;
+  for (const char* p = str; *p && n < sizeof(up) - 1; p++)
+    up[n++] = (*p >= 'a' && *p <= 'z') ? (char)(*p - 32) : *p;
+  up[n] = 0;
+  int wpx = 0;
+  for (const char* p = up; *p; p++) wpx += aaAdvance(f, *p);
+  int px = (align == 1) ? x - wpx / 2 : (align == 2) ? x - wpx : x;
+  aaText(px, y + f->asc, f, up, r, g, b);
+  return wpx;
+}
+
 // Month names for the spelled-out date, e.g. "JULY 16".
 static const char* const CLK_MONTHS[12] = {
   "JANUARY","FEBRUARY","MARCH","APRIL","MAY","JUNE",

@@ -1,5 +1,38 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.5.0 — 2026-07-26
+
+### Added — the ops surface grows up
+
+Nine additions that take `POST /api/canvas/ops` past GFX-class libraries and close to
+HTML-canvas ergonomics (all shared with the stream channel's ops record):
+
+- **`arc`** — arcs and pie slices: `{x,y,r,t,start,end,fill}`, 0° at 12 o'clock,
+  clockwise. The gauge/meter primitive.
+- **`poly`** — closed polygons, even-odd scanline filled (up to 16 vertices) or
+  outlined with thickness.
+- **Thickness (`t`) everywhere** — `line`, `polyline`, and `rect`/`circle`/`ellipse`
+  outlines take a stroke width; circles render a true annulus.
+- **`clip`** — clip all subsequent ops to a window (bare `clip` clears). Batch-scoped;
+  enforced down in the pixel/fill/blit fast paths so every primitive honours it.
+- **`origin`** — translate all subsequent coordinates (including `points` arrays);
+  clients can build placeable components. Batch-scoped.
+- **Anti-aliased text** — `{"op":"text","aa":true,"size":N}` renders smooth Orbitron
+  (34/24/13 px faces; A–Z 0–9 `:.-+%/`, folded to uppercase). The faces were
+  regenerated with the full charset (~8.5 KB flash for all three).
+- **`textbox`** — word-wrapped text in a box with `align`/`valign`, explicit `\n`
+  honoured, clipped to the box.
+- **Text styles** — `"outline":[r,g,b]` (1 px ring) and `"shadow":[r,g,b]` (+1,+1) on
+  the bitmap-font `text` op.
+- **Sprite transforms** — `flip:"h"|"v"|"hv"`, `rot:90|180|270`, `scale:1..4` on atlas
+  blits; one sheet now serves every orientation.
+
+### Fixed
+
+- Stream close drain 30 → 60 ms: the v3.4.0 soak still saw ~1 in 50 bursts lose the
+  closing 200 to an RST on the PSRAM core (work always completed; only the handshake
+  clipped). The 50-burst close test is the regression gate.
+
 ## v3.4.0 — 2026-07-24
 
 ### Added — the board can hear now

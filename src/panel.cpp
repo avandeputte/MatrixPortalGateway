@@ -446,8 +446,17 @@ static void panelWaitDrawable() {
   swapPending = false;
 }
 
+// The ops clip window (panelSetClip). Full-panel when inactive; panelBegin resets it.
+static int clipX0 = 0, clipY0 = 0, clipX1 = 1 << 14, clipY1 = 1 << 14;
+void panelSetClip(int x0, int y0, int x1, int y1) {
+  clipX0 = x0 < 0 ? 0 : x0;  clipY0 = y0 < 0 ? 0 : y0;
+  clipX1 = x1;               clipY1 = y1;
+}
+void panelClearClip() { clipX0 = 0; clipY0 = 0; clipX1 = 1 << 14; clipY1 = 1 << 14; }
+
 void panelPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b) {
   if (!info.ok || x < 0 || y < 0 || x >= W || y >= H) return;
+  if (x < clipX0 || y < clipY0 || x >= clipX1 || y >= clipY1) return;
   panelWaitDrawable();
   if (bgrOrder) { uint8_t t = r; r = b; b = t; }
   const bool lower = (y >= ROWS);
@@ -480,6 +489,8 @@ void panelFillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b) 
   if (!info.ok) return;
   int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
   int x1 = (x + w > W) ? W : x + w, y1 = (y + h > H) ? H : y + h;
+  if (x0 < clipX0) x0 = clipX0;  if (y0 < clipY0) y0 = clipY0;   // ops clip window
+  if (x1 > clipX1) x1 = clipX1;  if (y1 > clipY1) y1 = clipY1;
   if (x0 >= x1 || y0 >= y1) return;
   panelWaitDrawable();
   if (bgrOrder) { uint8_t t = r; r = b; b = t; }
@@ -529,9 +540,11 @@ static void panelBlitRun(int x, int y, int n) {   // blitQ[]: n quantized pixels
 }
 
 void panelBlitRow888(int x, int y, int n, const uint8_t* rgb) {
-  if (!info.ok || y < 0 || y >= H) return;
-  if (x < 0) { rgb -= 3 * x; n += x; x = 0; }
+  if (!info.ok || y < 0 || y >= H || y < clipY0 || y >= clipY1) return;
+  if (x < clipX0) { rgb += 3 * (clipX0 - x); n -= clipX0 - x; x = clipX0; }
+  if (x < 0)      { rgb -= 3 * x; n += x; x = 0; }
   if (x + n > W) n = W - x;
+  if (x + n > clipX1) n = clipX1 - x;
   if (n <= 0) return;
   panelWaitDrawable();
   const int ri = bgrOrder ? 2 : 0, bi = bgrOrder ? 0 : 2;
@@ -544,9 +557,11 @@ void panelBlitRow888(int x, int y, int n, const uint8_t* rgb) {
 }
 
 void panelBlitRow565(int x, int y, int n, const uint8_t* be565) {
-  if (!info.ok || y < 0 || y >= H) return;
-  if (x < 0) { be565 -= 2 * x; n += x; x = 0; }
+  if (!info.ok || y < 0 || y >= H || y < clipY0 || y >= clipY1) return;
+  if (x < clipX0) { be565 += 2 * (clipX0 - x); n -= clipX0 - x; x = clipX0; }
+  if (x < 0)      { be565 -= 2 * x; n += x; x = 0; }
   if (x + n > W) n = W - x;
+  if (x + n > clipX1) n = clipX1 - x;
   if (n <= 0) return;
   panelWaitDrawable();
   for (int i = 0; i < n; i++) {

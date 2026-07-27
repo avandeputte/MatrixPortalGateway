@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Matrix Portal Gateway API
-  version: "3.4"
+  version: "3.5"
   description: |
     REST API for the **Matrix Portal Gateway** firmware, running on a
     Waveshare ESP32-S3-RGB-Matrix driver board. It emulates a wall of split-flap modules on a
@@ -1426,10 +1426,27 @@ paths:
   /api/canvas/ops:
     post:
       tags: [Canvas]
-      summary: Draw commands — shapes, gradients, sprites, text, scroll (v1.13; 11 ops added v1.25; sprite v2.1)
+      summary: Draw commands — shapes, gradients, sprites, text, scroll (v1.13; 11 ops v1.25; sprite v2.1; 5 ops + styles v3.5)
       description: |
         A JSON **array** of drawing ops, applied in order, then the frame is presented. Handy for
         shapes and labels without composing a whole frame client-side. Auto-takes-over the panel.
+
+        **fw 3.5 additions** (`GET /api/capabilities` `canvas.ops` is authoritative):
+        - `arc` — `{x,y,r,t,start,end,fill}`: arc/annulus segment or pie slice; 0° = 12
+          o'clock, clockwise. `t` = ring thickness (default 2), `fill` draws the slice.
+        - `poly` — closed polygon from `points:[[x,y],…]` (≤16 vertices); `fill` (default
+          true) even-odd scanline, else outline with thickness `t`.
+        - `clip` — `{x,y,w,h}` clips all later ops to the window; bare `{"op":"clip"}`
+          clears. Batch-scoped (reset between batches).
+        - `origin` — `{x,y}` translates every later coordinate (points arrays included);
+          bare form resets. Batch-scoped.
+        - `textbox` — `{x,y,w,h,s,size,font,align,valign,color}`: word-wrapped (explicit
+          `\n` honoured), aligned both axes, clipped to the box.
+        - Thickness `t` on `line`, `polyline`, and `rect`/`circle`/`ellipse` outlines.
+        - `text` styles: `"aa":true` renders smooth Orbitron (sizes 34/24/13 px pick by
+          `size`; charset A–Z 0–9 `:.-+%/`, folded to uppercase); `"outline":[r,g,b]` /
+          `"shadow":[r,g,b]` layer under the bitmap-font path.
+        - `sprite` transforms: `flip:"h"|"v"|"hv"`, `rot:90|180|270`, `scale:1..4`.
         Colours are `[r, g, b]` (0–255), defaulting to white — black for `clear`. Off-panel pixels
         are dropped. Unknown ops are skipped. The advertised op list is `capabilities.canvas.ops`.
 
