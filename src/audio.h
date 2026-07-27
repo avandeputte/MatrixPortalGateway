@@ -23,6 +23,7 @@
 
 #pragma once
 #include <stdint.h>
+#include <driver/i2s_std.h>   // i2s_chan_handle_t (the shared duplex port, below)
 
 #define AUDIO_BANDS 16
 
@@ -40,3 +41,8 @@ bool audioAvailable();               // ES7210 found and configured
 void audioMaybeStart();              // a consumer exists: ensure capture is running
 void audioRead(AudioFrame& out);     // latest features (zeroed when not capturing)
 bool audioCapturing();               // I2S currently running (diagnostics)
+
+// The shared full-duplex I2S port (one wired clock set serves both codecs): sound.cpp
+// acquires the same pair and drives the TX side. Channels persist once created.
+bool audioAcquireI2S();
+i2s_chan_handle_t audioTxChan();

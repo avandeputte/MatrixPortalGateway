@@ -15,6 +15,7 @@
 #define AUD_PIN_BCLK  GPIO_NUM_43
 #define AUD_PIN_WS    GPIO_NUM_38
 #define AUD_PIN_DIN   GPIO_NUM_39
+#define AUD_PIN_DOUT  GPIO_NUM_21
 
 #define AUD_RATE      16000
 #define AUD_HOP       128          // samples per DSP hop (also the FFT size): 8 ms
@@ -45,6 +46,52 @@ static bool esUpdate(uint8_t reg, uint8_t mask, uint8_t bits) {
 static bool gAudioPresent   = false;
 static volatile bool gAudioRun = false;   // capture task alive
 static i2s_chan_handle_t rxChan = NULL;
+static i2s_chan_handle_t txChan = NULL;   // speaker path (sound.cpp) -- shared clocks
+
+// The board wires ONE clock set (MCLK 12 / BCLK 43 / WS 38) to BOTH codecs, so the
+// mic (DIN 39, ES7210) and the speaker (DOUT 21, ES8311) must be one full-duplex I2S
+// port: both channels are allocated TOGETHER on first need and then never deleted --
+// enable/disable per side only. (Deleting one side and re-creating it later fights
+// the shared clock; the idle cost is ~6 KB of DMA buffers, cheap post-v3.3.)
+bool audioAcquireI2S() {
+  if (rxChan && txChan) return true;
+  i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+  chanCfg.dma_desc_num  = 4;
+  chanCfg.dma_frame_num = AUD_HOP;
+  if (i2s_new_channel(&chanCfg, &txChan, &rxChan) != ESP_OK) {
+    printf("[AUDIO] i2s_new_channel (duplex) failed\n");
+    txChan = rxChan = NULL;
+    return false;
+  }
+  i2s_std_config_t std = {
+    .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(AUD_RATE),      // MCLK = 256 x fs = 4.096 MHz
+    .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
+                                                    I2S_SLOT_MODE_STEREO),
+    .gpio_cfg = {
+      .mclk = AUD_PIN_MCLK,
+      .bclk = AUD_PIN_BCLK,
+      .ws   = AUD_PIN_WS,
+      .dout = AUD_PIN_DOUT,
+      .din  = AUD_PIN_DIN,
+      .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
+    },
+  };
+  if (i2s_channel_init_std_mode(rxChan, &std) != ESP_OK ||
+      i2s_channel_init_std_mode(txChan, &std) != ESP_OK) {
+    printf("[AUDIO] i2s duplex init failed\n");
+    return false;
+  }
+  // EMPIRICAL DUPLEX FACT (found the hard way, 2026-07-27): the TX side only clocks
+  // while RX is enabled -- a tone played with the mic channel down produced enable=OK
+  // yet every write timed out (0x107) and silence; the identical tone with RX up
+  // played. So RX stays enabled for the life of the port as the clock heartbeat.
+  // This does NOT run the microphone pipeline: capture (read + DSP) happens only in
+  // audioTask, which starts and stops with its consumers as before; an unread RX DMA
+  // ring just overruns harmlessly.
+  i2s_channel_enable(rxChan);
+  return true;
+}
+i2s_chan_handle_t audioTxChan() { return txChan; }
 
 // Published features. A spinlock keeps reads untorn; the DSP writes ~60/s.
 static AudioFrame     gFrame = {};
@@ -263,10 +310,8 @@ static void audioTask(void* pv) {
     else if (millis() - idleSince > 3000) break;
   }
 
-  // Teardown: disable + delete the channel, zero the published frame.
-  i2s_channel_disable(rxChan);
-  i2s_del_channel(rxChan);
-  rxChan = NULL;
+  // Teardown: the task ends but RX stays ENABLED -- it is the duplex clock heartbeat
+  // (see audioAcquireI2S); only the reading/DSP stops here.
   taskENTER_CRITICAL(&gFrameMux);
   gFrame = AudioFrame{};
   gBeatLatch = false;
@@ -279,34 +324,7 @@ static void audioTask(void* pv) {
 void audioMaybeStart() {
   if (!gAudioPresent || gAudioRun) return;
   if (!tablesReady) { fftTables(); bandTables(); }
-
-  i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-  chanCfg.dma_desc_num  = 4;
-  chanCfg.dma_frame_num = AUD_HOP;
-  if (i2s_new_channel(&chanCfg, NULL, &rxChan) != ESP_OK) {
-    printf("[AUDIO] i2s_new_channel failed\n");
-    return;
-  }
-  i2s_std_config_t std = {
-    .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(AUD_RATE),      // MCLK = 256 x fs = 4.096 MHz
-    .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
-                                                    I2S_SLOT_MODE_STEREO),
-    .gpio_cfg = {
-      .mclk = AUD_PIN_MCLK,
-      .bclk = AUD_PIN_BCLK,
-      .ws   = AUD_PIN_WS,
-      .dout = I2S_GPIO_UNUSED,
-      .din  = AUD_PIN_DIN,
-      .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
-    },
-  };
-  if (i2s_channel_init_std_mode(rxChan, &std) != ESP_OK ||
-      i2s_channel_enable(rxChan) != ESP_OK) {
-    printf("[AUDIO] i2s init/enable failed\n");
-    i2s_del_channel(rxChan);
-    rxChan = NULL;
-    return;
-  }
+  if (!audioAcquireI2S()) return;         // RX is already enabled (the clock heartbeat)
   gAudioRun = true;
   // Core 0 with the other non-render work; ~60 hops/s of float FFT is a light load.
   xTaskCreatePinnedToCore(audioTask, "audio", 4096, NULL, 2, NULL, 0);

@@ -442,6 +442,56 @@ paths:
           description: Linkset
           content: { application/linkset+json: { schema: { type: object } } }
 
+  /api/sound:
+    get:
+      tags: [Status]
+      summary: Speaker state (v3.6)
+      responses:
+        "200":
+          description: Availability + playback state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  available: { type: boolean, description: "ES8311 codec found at boot" }
+                  playing:   { type: boolean }
+    post:
+      tags: [Status]
+      summary: Play tones on the board's speaker (v3.6, `sound` feature token)
+      description: |
+        On-device tone synthesis through the ES8311 DAC and power amp: one tone
+        (`freq` 20–8000 Hz, `ms` ≤ 2000) or a `notes` sequence (`[[freq,ms],…]`,
+        freq 0 = rest, ≤ 32 notes), `vol` 0–100. `{"stop":true}` stops immediately.
+        Anti-click envelopes; the amp powers only while playing. Refused with `409`
+        during Quiet Time. No PCM upload — tones only, by design.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                freq:  { type: integer, minimum: 20, maximum: 8000 }
+                ms:    { type: integer, minimum: 1, maximum: 2000 }
+                notes: { type: array, items: { type: array, items: { type: integer } } }
+                vol:   { type: integer, minimum: 0, maximum: 100, default: 60 }
+                stop:  { type: boolean }
+            example: { notes: [[523,150],[659,150],[784,300]], vol: 70 }
+      responses:
+        "200":
+          description: Queued (or stopped)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:     { type: boolean }
+                  queued: { type: integer }
+        "400": { description: Nothing playable in the request, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Quiet Time is active, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: No speaker codec on this board, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
   /api/canvas:
     get:
       tags: [Canvas]

@@ -1,5 +1,29 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.6.0 — 2026-07-27
+
+### Added — the board has a voice
+
+- **`POST /api/sound`** (`sound` feature token): tones and note sequences on the
+  board's ES8311 DAC + power amp — `{"freq":880,"ms":200,"vol":60}` or
+  `{"notes":[[880,120],[0,40],[1320,160]],"vol":60}` (freq 0 = rest, ≤32 notes,
+  ≤2 s/note), `{"stop":true}`, `GET` for state. Synthesized on-device (16 kHz sine,
+  3 ms anti-click envelopes), refused during Quiet Time, amp powered only while
+  playing (+5 s), self-stopping synth. Game feedback, chimes, alerts. PCM sample
+  playback deliberately deferred.
+- The microphone I2S port became **full-duplex** to carry it (one wired clock set
+  serves both codecs). One hard-won hardware fact is documented in the driver: **the
+  TX side only clocks while RX is enabled**, so the RX channel stays up as the
+  port's clock heartbeat — the microphone *pipeline* still runs only while audio
+  effects want it.
+
+### Improved — gradients grew up
+
+- `gradient` gains **radial** (`dir:"r"`) and **angled** (`"angle":degrees`) modes,
+  and **ordered (Bayer 4×4) dithering, on by default** — banding at 3–4 bitplanes
+  breaks into a fine blend (`"dither":false` restores hard bands). Binary ops:
+  gradient `dir` byte accepts 2 = radial.
+
 ## v3.5.0 — 2026-07-26
 
 ### Added — the ops surface grows up

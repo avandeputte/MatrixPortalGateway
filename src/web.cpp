@@ -6,6 +6,7 @@
 #include "web_ui.h"
 #include <mbedtls/base64.h>   // the canvas "image" op decodes a base64 sprite
 #include "audio.h"           // capabilities audio token + effect "audio" param (v3.4)
+#include "sound.h"           // POST /api/sound + the sound capability token (v3.6)
 #include <fcntl.h>            // non-blocking mode for the canvas stream socket (v3.2)
 #include <lwip/sockets.h>    // setsockopt on the stream socket at close (v3.3)
 
@@ -800,11 +801,14 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
 
   // What the wall can DO, not just show, so a client reads this instead of sniffing the
   // firmware version and guessing.
-  capPut(audioAvailable()
-         ? "\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
-           "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\",\"audio\",\"effectDefs\"]}"
-         : "\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
-           "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\",\"effectDefs\"]}");
+  { char ft[400];
+    snprintf(ft, sizeof(ft),
+             "\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
+             "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\","
+             "\"effectDefs\"%s%s]}",
+             audioAvailable() ? ",\"audio\"" : "",
+             soundAvailable() ? ",\"sound\"" : "");
+    capPut(ft); }
   capFlush();
   return httpxChunkEnd(r);
 }
@@ -1478,6 +1482,52 @@ void canvasStreamPump() {
   if (millis() - cs.lastRx > 30000UL) csClose(false, "idle timeout");
 }
 
+// POST /api/sound (v3.6) -- tones and note sequences on the board's speaker.
+//   {"freq":880,"ms":200,"vol":60}                      one tone
+//   {"notes":[[880,120],[0,40],[1320,160]],"vol":60}    a sequence (freq 0 = rest)
+//   {"stop":true}                                       stop now
+// Refused during Quiet Time, like everything audible/visible. GET reports state.
+static esp_err_t handleApiSound(httpd_req_t* r) {
+  if (r->method == HTTP_GET) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"available\":%s,\"playing\":%s}",
+             soundAvailable() ? "true" : "false", soundPlaying() ? "true" : "false");
+    return httpxSend(r, 200, "application/json", buf);
+  }
+  if (!soundAvailable()) return httpxErr(r, 503, "No speaker codec on this board");
+  JsonDocument doc;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
+  if (doc["stop"] | false) {
+    soundStop();
+    return httpxSend(r, 200, "application/json", "{\"ok\":true,\"stopped\":true}");
+  }
+  if (gQuietTime) return httpxErr(r, 409, "Quiet Time is active");
+  uint16_t f[SOUND_MAX_NOTES], m[SOUND_MAX_NOTES];
+  int n = 0;
+  if (doc["notes"].is<JsonArrayConst>()) {
+    for (JsonVariantConst nv : doc["notes"].as<JsonArrayConst>()) {
+      if (n >= SOUND_MAX_NOTES) break;
+      int fr = nv[0] | 0, ms = nv[1] | 0;
+      if (ms < 1) continue;
+      f[n] = (uint16_t)(fr < 0 ? 0 : fr > 8000 ? 8000 : fr);
+      m[n] = (uint16_t)(ms > 2000 ? 2000 : ms);
+      n++;
+    }
+  } else {
+    const int fr = doc["freq"] | 0, ms = doc["ms"] | 200;
+    if (fr < 20 || fr > 8000) return httpxErr(r, 400, "freq must be 20..8000 Hz (or use notes[])");
+    f[0] = (uint16_t)fr;
+    m[0] = (uint16_t)(ms < 1 ? 1 : ms > 2000 ? 2000 : ms);
+    n = 1;
+  }
+  if (!n) return httpxErr(r, 400, "nothing to play");
+  const int vol = doc["vol"] | 60;
+  soundPlay(f, m, n, (uint8_t)(vol < 0 ? 0 : vol > 100 ? 100 : vol));
+  char buf[48];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"queued\":%d}", n);
+  return httpxSend(r, 200, "application/json", buf);
+}
+
 // GET /api/canvas/audio -- microphone frontend state (v3.4 diagnostics + discovery):
 // whether the ES7210 is present, whether capture is running, and the live features.
 // The features are numbers derived from sound, never samples -- nothing recordable.
@@ -1679,6 +1729,75 @@ static void canvasOpImage(JsonVariantConst op, int x, int y, int w, int h) {
 }
 
 // Fill (x,y,w,h) with a linear gradient from `from` to `to`, vertical unless horizontal.
+// 4x4 Bayer threshold matrix for ordered dithering: at 3-4 bitplanes a smooth ramp
+// quantises into visible bands; adding a position-dependent sub-step offset before the
+// panel quantises breaks each band edge into a fine checker that reads as a smooth
+// blend at viewing distance. Default ON for gradients since v3.6 ("dither":false opts out).
+static const int8_t BAYER4[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
+static inline uint8_t ditherCh(int c, int x, int y, int q) {
+  c += ((BAYER4[((y & 3) << 2) | (x & 3)] - 8) * q) >> 4;
+  return (uint8_t)(c < 0 ? 0 : c > 255 ? 255 : c);
+}
+
+// Gradient fill: mode 0 = vertical, 1 = horizontal, 2 = radial (centre -> corners),
+// 3 = angled (angleDeg: 0 = left->right, 90 = top->bottom, any degree between).
+static void canvasOpGradientEx(int x, int y, int w, int h,
+                               uint8_t r0, uint8_t g0, uint8_t b0,
+                               uint8_t r1, uint8_t g1, uint8_t b1,
+                               int mode, int angleDeg, bool dither) {
+  if (w <= 0 || h <= 0) return;
+  const int q = 256 >> panelInfo().depth;                  // one quantisation step
+  if (mode <= 1 && !dither) {                              // the classic strip fast path
+    const bool vertical = (mode == 0);
+    const int n = vertical ? h : w, den = (n > 1) ? (n - 1) : 1;
+    for (int i = 0; i < n; i++) {
+      const uint8_t r = (uint8_t)((int)r0 + ((int)r1 - (int)r0) * i / den);
+      const uint8_t g = (uint8_t)((int)g0 + ((int)g1 - (int)g0) * i / den);
+      const uint8_t b = (uint8_t)((int)b0 + ((int)b1 - (int)b0) * i / den);
+      if (vertical) panelHLine(x, y + i, w, r, g, b);
+      else          panelVLine(x + i, y, h, r, g, b);
+    }
+    return;
+  }
+  // per-pixel paths (dithered linear, radial, angled)
+  float ax = 0, ay = 0, tmin = 0, tspan = 1;
+  if (mode == 3) {
+    const float rad = (float)angleDeg * 0.0174533f;
+    ax = cosf(rad); ay = sinf(rad);
+    // normalise the projection over the box's corners
+    float t00 = 0, t10 = (w - 1) * ax, t01 = (h - 1) * ay, t11 = t10 + t01;
+    tmin = fminf(fminf(t00, t10), fminf(t01, t11));
+    tspan = fmaxf(fmaxf(t00, t10), fmaxf(t01, t11)) - tmin;
+    if (tspan < 1e-3f) tspan = 1;
+  }
+  const float cx = (w - 1) * 0.5f, cy = (h - 1) * 0.5f;
+  const float maxR = sqrtf(cx * cx + cy * cy);
+  for (int yy = 0; yy < h; yy++)
+    for (int xx = 0; xx < w; xx++) {
+      int t8;
+      switch (mode) {
+        case 0:  t8 = (h > 1) ? 255 * yy / (h - 1) : 0; break;
+        case 1:  t8 = (w > 1) ? 255 * xx / (w - 1) : 0; break;
+        case 2: {
+          const float dx = xx - cx, dy = yy - cy;
+          t8 = (int)(255.0f * sqrtf(dx * dx + dy * dy) / (maxR > 0 ? maxR : 1));
+          break;
+        }
+        default: t8 = (int)(255.0f * ((xx * ax + yy * ay) - tmin) / tspan); break;
+      }
+      if (t8 < 0) t8 = 0; else if (t8 > 255) t8 = 255;
+      int r = r0 + ((r1 - r0) * t8) / 255;
+      int g = g0 + ((g1 - g0) * t8) / 255;
+      int b = b0 + ((b1 - b0) * t8) / 255;
+      if (dither) {
+        panelPixel(x + xx, y + yy, ditherCh(r, x + xx, y + yy, q),
+                   ditherCh(g, x + xx, y + yy, q), ditherCh(b, x + xx, y + yy, q));
+      } else {
+        panelPixel(x + xx, y + yy, (uint8_t)r, (uint8_t)g, (uint8_t)b);
+      }
+    }
+}
+
 static void canvasOpGradientRaw(int x, int y, int w, int h,
                                 uint8_t r0, uint8_t g0, uint8_t b0,
                                 uint8_t r1, uint8_t g1, uint8_t b1, bool vertical) {
@@ -2035,10 +2154,11 @@ static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* o
                        bops16(p+i+4), bops16(p+i+6), bops16(p+i+8),
                        p[i+10] & 1, p[i+11], p[i+12], p[i+13]); i += 14; break; }
       case 0x0B: { BOPS_NEED(15);
-        canvasOpGradientRaw(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy,
-                            bops16(p+i+4), bops16(p+i+6),
-                            p[i+8], p[i+9], p[i+10], p[i+11], p[i+12], p[i+13],
-                            p[i+14] == 0); i += 15; break; }
+        // dir byte: 0 vertical, 1 horizontal, 2 radial (v3.6; dithered like JSON)
+        canvasOpGradientEx(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy,
+                           bops16(p+i+4), bops16(p+i+6),
+                           p[i+8], p[i+9], p[i+10], p[i+11], p[i+12], p[i+13],
+                           p[i+14] <= 2 ? p[i+14] : 0, 0, true); i += 15; break; }
       case 0x0C: { BOPS_NEED(15);
         canvasArc(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy, bops16(p+i+4), p[i+6],
                   bops16(p+i+7), bops16(p+i+9), p[i+11] & 1,
@@ -2195,7 +2315,14 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
       for (int i = 0; i < (op["fill"] | false ? 1 : t); i++)
         panelEllipse(x, y, (op["rx"] | 0) - i, (op["ry"] | 0) - i, op["fill"] | false, r, g, b);
     } else if (!strcmp(k, "gradient")) {
-      canvasOpGradient(x, y, w, h, op["from"], op["to"], strcmp(op["dir"] | "v", "h") != 0);
+      // v3.6: dir "v" | "h" | "r" (radial) | "a" (angled, with "angle" degrees);
+      // ordered dithering default ON ("dither":false for the old hard bands).
+      uint8_t r0 = 0, g0 = 0, b0 = 0, r1 = 0, g1 = 0, b1 = 0;
+      canvasColor(op["from"], r0, g0, b0); canvasColor(op["to"], r1, g1, b1);
+      const char* dir = op["dir"] | (op["angle"].is<int>() ? "a" : "v");
+      const int mode = !strcmp(dir, "h") ? 1 : !strcmp(dir, "r") ? 2 : !strcmp(dir, "a") ? 3 : 0;
+      canvasOpGradientEx(x, y, w, h, r0, g0, b0, r1, g1, b1,
+                         mode, op["angle"] | 0, op["dither"] | true);
     } else if (!strcmp(k, "polyline")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
       const int t = op["t"] | 1;
@@ -3187,6 +3314,8 @@ void webInit() {
   httpxOn("/api/canvas/stream",      HTTP_PUT,  handleApiCanvasStream);
   httpxOn("/api/canvas/stream",      HTTP_GET,  handleApiCanvasStreamGet);
   httpxOn("/api/canvas/audio",       HTTP_GET,  handleApiCanvasAudio);
+  httpxOn("/api/sound",              HTTP_GET,  handleApiSound);
+  httpxOn("/api/sound",              HTTP_POST, handleApiSound);
   httpxOn("/openapi.yaml",           HTTP_GET,  handleOpenapiSpec);
   httpxOn("/.well-known/api-catalog", HTTP_GET, handleApiCatalog);
   httpxOn("/api/canvas/qoi",         HTTP_PUT,  handleApiCanvasQoi);
