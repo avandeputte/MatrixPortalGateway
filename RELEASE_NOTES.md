@@ -49,6 +49,16 @@ HTML-canvas ergonomics (all shared with the stream channel's ops record):
   closing 200 to an RST on the PSRAM core (work always completed; only the handshake
   clipped). The 50-burst close test is the regression gate.
 
+### Certification
+
+2-hour adversarial soak on the 256×64 board, final release binary (full rotation with
+stream bursts — half of them binary ops — full-wall pages, audio effects in the cycle,
+2 SSE clients, dashboard polls): **2,251 steps, 0 reboots, 0 errors, 0 refusals,
+min-heap 53.5 KB, heap drift −132 B, 38,776 SSE events / 0 drops, 281 stream bursts /
+5,967 records / 0 errors, 281/281 clean closes, 2,811/2,811 polls.** Serial captured
+throughout: no panics, no watchdogs, no stalls. The ~12 KB floor delta vs v3.3.0 is
+the audio capture task's internal-RAM footprint while audio effects run.
+
 ## v3.4.0 — 2026-07-24 *(folded into the v3.5.0 release; never tagged separately)*
 
 ### Added — the board can hear now
