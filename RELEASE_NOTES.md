@@ -33,7 +33,7 @@ HTML-canvas ergonomics (all shared with the stream channel's ops record):
   closing 200 to an RST on the PSRAM core (work always completed; only the handshake
   clipped). The 50-burst close test is the regression gate.
 
-## v3.4.0 — 2026-07-24
+## v3.4.0 — 2026-07-24 *(folded into the v3.5.0 release; never tagged separately)*
 
 ### Added — the board can hear now
 

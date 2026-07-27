@@ -417,7 +417,7 @@ paths:
   /openapi.yaml:
     get:
       tags: [Status]
-      summary: This document, served by the device (v3.4)
+      summary: This document, served by the device (v3.5)
       description: |
         The gateway serves its own API contract — the exact spec for the firmware it is
         running, which beats any repo copy. Compressed at build time and sent with
@@ -432,7 +432,7 @@ paths:
   /.well-known/api-catalog:
     get:
       tags: [Status]
-      summary: RFC 9727 API catalog (v3.4)
+      summary: RFC 9727 API catalog (v3.5)
       description: |
         The IETF-standard discovery pointer — a linkset naming this host's APIs and
         linking their descriptions. Here it carries one entry pointing at
@@ -679,7 +679,7 @@ paths:
   /api/canvas/audio:
     get:
       tags: [Canvas]
-      summary: Microphone features (v3.4)
+      summary: Microphone features (v3.5)
       description: |
         The live audio features behind the audio-reactive effects: whether the ES7210
         dual-microphone ADC is present, whether capture is currently running (it starts
@@ -1529,14 +1529,14 @@ paths:
         * `clock` — a digital clock: big anti-aliased HH:MM (JetBrains Mono) in a drifting rainbow,
           with the date and seconds; uses the gateway's configured timezone.
         * `life` — Conway's Game of Life, cells coloured by age, reseeded when it settles.
-        * `spectrum` *(fw 3.4, `audio` feature token)* — 16 log-band microphone spectrum
+        * `spectrum` *(fw 3.5, `audio` feature token)* — 16 log-band microphone spectrum
           analyzer: bars with falling peak caps, bass→treble hue gradient (`hue` rotates it).
-        * `maze` *(fw 3.4)* — a Hunt-and-Kill maze generator, watched live: random-walk
+        * `maze` *(fw 3.5)* — a Hunt-and-Kill maze generator, watched live: random-walk
           carving with a fading trail, a visible hunt sweep, then an animated dead-end-filling
           solve leaving the corner-to-corner path golden; repeats with a fresh maze.
-        * `ripple` *(fw 3.4, `audio` feature token)* — beat-launched expanding rings,
+        * `ripple` *(fw 3.5, `audio` feature token)* — beat-launched expanding rings,
           coloured by the dominant frequency band, loudness-scaled, fading as they grow.
-        * `soundwall` *(fw 3.4, `audio` feature token)* — the flap wall itself reacts: each
+        * `soundwall` *(fw 3.5, `audio` feature token)* — the flap wall itself reacts: each
           beat flips a loudness-scaled splash of cells to a colour flap picked by the dominant
           frequency band; ~3 s of quiet settles the wall home. Runs in genuine wall mode
           (`display/state` stays `mode:"wall"`, the flap preview follows it).
@@ -1561,7 +1561,7 @@ paths:
                 speed:   { type: integer, minimum: 1, maximum: 10 }
                 hue:     { type: integer, minimum: 0, maximum: 255, description: "Base hue override (0–255 colour wheel). Omit to keep the effect's own palette." }
                 density: { type: integer, minimum: 1, maximum: 100, description: "Density override (1–100), e.g. streak count or seeding. Omit for the effect default." }
-                audio:   { type: boolean, description: "fw 3.4: microphone-modulate this effect (fire/matrix/plasma). Requires the audio feature token." }
+                audio:   { type: boolean, description: "fw 3.5: microphone-modulate this effect (fire/matrix/plasma). Requires the audio feature token." }
             example: { type: plasma, speed: 4, hue: 96 }
       responses:
         "200":
@@ -1848,7 +1848,7 @@ paths:
                   effectDefs:
                     type: array
                     description: >
-                      fw 3.4 (`effectDefs` feature token): one entry per effect declaring
+                      fw 3.5 (`effectDefs` feature token): one entry per effect declaring
                       exactly the params it consumes — clients build effect UIs from this
                       instead of hard-coding options. Additive: `effects`/`effectParams`
                       are unchanged for older clients.
@@ -1883,7 +1883,7 @@ paths:
                   effectDefs:
                     type: array
                     description: >
-                      fw 3.4 (`effectDefs` feature token): one entry per effect declaring
+                      fw 3.5 (`effectDefs` feature token): one entry per effect declaring
                       exactly the params it consumes — clients build effect UIs from this
                       instead of hard-coding options. Additive: `effects`/`effectParams`
                       are unchanged for older clients.
