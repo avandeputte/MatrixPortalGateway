@@ -1,5 +1,11 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.8.1 — 2026-07-28
+
+- **Stroke styling** on `line`/`polyline`/`poly`: `cap` (`butt`/`round`/`square`),
+  `join` (`miter`/`round` — round fills thick-polyline corners), and `dash`
+  (`[on,off]`, flowing continuously along a path). Rounds out the drawing surface.
+
 ## v3.8.0 — 2026-07-28
 
 ### Added — compositing and smooth drawing

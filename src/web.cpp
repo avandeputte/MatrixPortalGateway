@@ -2112,6 +2112,61 @@ static void canvasBezier(const int* vx, const int* vy, int n, int t, bool aa,
   }
 }
 
+// --- Stroke styling (v3.8.1): line caps, round joins, dashes. ------------------------
+// A thick line with an end cap: 0 butt (default), 1 round (disc at each end), 2 square
+// (extend each end by t/2 along the line). Caps matter only for t>1.
+static void canvasThickLineCap(float x0, float y0, float x1, float y1, int t, int cap,
+                               uint8_t r, uint8_t g, uint8_t b) {
+  if (t > 1 && cap == 2) {                          // square: extend the ends
+    const float dx = x1 - x0, dy = y1 - y0, len = sqrtf(dx*dx + dy*dy);
+    if (len > 0.001f) { const float ex = dx/len*(t/2.0f), ey = dy/len*(t/2.0f);
+                        x0 -= ex; y0 -= ey; x1 += ex; y1 += ey; }
+  }
+  canvasThickLine((int)lroundf(x0), (int)lroundf(y0), (int)lroundf(x1), (int)lroundf(y1), t, r, g, b);
+  if (t > 1 && cap == 1) {                          // round: a filled disc at each end
+    panelCircle((int)lroundf(x0), (int)lroundf(y0), t/2, true, r, g, b);
+    panelCircle((int)lroundf(x1), (int)lroundf(y1), t/2, true, r, g, b);
+  }
+}
+
+// A dashed thick line following the pattern (on,off) px. `phase` is distance already
+// consumed into the pattern (threaded across polyline segments so dashes flow round the
+// path); returns the ending phase. cap applies to each dash's ends.
+static float canvasDashLine(float x0, float y0, float x1, float y1, int t, int cap,
+                            float on, float off, float phase,
+                            uint8_t r, uint8_t g, uint8_t b) {
+  if (on <= 0) { canvasThickLineCap(x0, y0, x1, y1, t, cap, r, g, b); return phase; }
+  const float dx = x1 - x0, dy = y1 - y0, len = sqrtf(dx*dx + dy*dy);
+  if (len < 0.001f) return phase;
+  const float ux = dx/len, uy = dy/len, period = on + off;
+  float d = 0, p = fmodf(phase, period);
+  while (d < len) {
+    const bool onNow = p < on;
+    const float remain = onNow ? (on - p) : (period - p);
+    const float seg = (remain < len - d) ? remain : (len - d);
+    if (onNow) canvasThickLineCap(x0 + ux*d, y0 + uy*d, x0 + ux*(d+seg), y0 + uy*(d+seg),
+                                  t, cap, r, g, b);
+    d += seg; p += seg; if (p >= period) p -= period;
+  }
+  return p;
+}
+
+// Parse the optional "cap"/"join"/"dash" style off an op. cap/join: 0 butt/miter, 1
+// round, 2 square. dash: [on,off] -> on>0 means dashed. Returns whether dashed.
+static bool canvasStrokeStyle(JsonVariantConst op, int& cap, int& join, float& on, float& off) {
+  const char* c = op["cap"] | "butt";
+  cap = !strcmp(c, "round") ? 1 : !strcmp(c, "square") ? 2 : 0;
+  const char* j = op["join"] | "miter";
+  join = !strcmp(j, "round") ? 1 : 0;
+  on = off = 0;
+  if (op["dash"].is<JsonArrayConst>()) {
+    JsonArrayConst d = op["dash"].as<JsonArrayConst>();
+    if (d.size() >= 1) on  = (float)(d[0].as<int>());
+    off = (d.size() >= 2) ? (float)(d[1].as<int>()) : on;
+  }
+  return on > 0;
+}
+
 // Arc / pie: 0 degrees = 12 o'clock, clockwise (the gauge convention). Outline mode
 // draws the annulus [rad-t+1 .. rad]; fill draws the whole pie slice. Bounding-box
 // scan with one atan2f per candidate pixel -- ops are one-shot draws, not per-frame.
@@ -2437,8 +2492,12 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
     } else if (!strcmp(k, "line")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
       const int lx1 = (op["x1"] | 0) + gOpsOx, ly1 = (op["y1"] | 0) + gOpsOy;
-      if (op["aa"] | false) canvasAALine(x, y, lx1, ly1, r, g, b);   // v3.8: anti-aliased
-      else canvasThickLine(x, y, lx1, ly1, op["t"] | 1, r, g, b);
+      const int lt = op["t"] | 1;
+      int lcap, ljoin; float ldon, ldoff;
+      const bool ldash = canvasStrokeStyle(op, lcap, ljoin, ldon, ldoff);   // v3.8.1
+      if (op["aa"] | false) canvasAALine(x, y, lx1, ly1, r, g, b);          // v3.8: anti-aliased
+      else if (ldash) canvasDashLine(x, y, lx1, ly1, lt, lcap, ldon, ldoff, 0, r, g, b);
+      else canvasThickLineCap(x, y, lx1, ly1, lt, lcap, r, g, b);
     } else if (!strcmp(k, "circle")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
       const int t = op["t"] | 1;
@@ -2489,13 +2548,19 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
       const int t = op["t"] | 1;
       const bool aa = op["aa"] | false;
-      if (t <= 1 && !aa && !gOpsOx && !gOpsOy) canvasOpPolyline(op["points"], r, g, b);
+      int pcap, pjoin; float pdon, pdoff;
+      const bool pdash = canvasStrokeStyle(op, pcap, pjoin, pdon, pdoff);   // v3.8.1
+      if (t <= 1 && !aa && !pdash && !gOpsOx && !gOpsOy) canvasOpPolyline(op["points"], r, g, b);
       else {
-        int px = 0, py = 0; bool first = true;
+        int px = 0, py = 0; bool first = true; float ph = 0;
         for (JsonVariantConst p : op["points"].as<JsonArrayConst>()) {
           const int nx = (int)p[0] + gOpsOx, ny = (int)p[1] + gOpsOy;
-          if (!first) { if (aa) canvasAALine(px, py, nx, ny, r, g, b);
-                        else canvasThickLine(px, py, nx, ny, t, r, g, b); }
+          if (!first) {
+            if (aa) canvasAALine(px, py, nx, ny, r, g, b);
+            else if (pdash) ph = canvasDashLine(px, py, nx, ny, t, pcap, pdon, pdoff, ph, r, g, b);
+            else canvasThickLineCap(px, py, nx, ny, t, pcap, r, g, b);
+          }
+          if (pjoin == 1 && t > 1) panelCircle(nx, ny, t/2, true, r, g, b);   // round joins/caps
           px = nx; py = ny; first = false;
         }
       }
@@ -2541,16 +2606,25 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
       else {
         const int t = op["t"] | 1;
         const bool aa = op["aa"] | false;
-        int px = 0, py = 0, fx = 0, fy = 0; bool first = true;
+        int qcap, qjoin; float qdon, qdoff;
+        const bool qdash = canvasStrokeStyle(op, qcap, qjoin, qdon, qdoff);   // v3.8.1
+        int px = 0, py = 0, fx = 0, fy = 0; bool first = true; float ph = 0;
         for (JsonVariantConst p : op["points"].as<JsonArrayConst>()) {
           const int nx = (int)p[0] + gOpsOx, ny = (int)p[1] + gOpsOy;
           if (first) { fx = nx; fy = ny; }
           else if (aa) canvasAALine(px, py, nx, ny, r, g, b);
-          else canvasThickLine(px, py, nx, ny, t, r, g, b);
+          else if (qdash) ph = canvasDashLine(px, py, nx, ny, t, qcap, qdon, qdoff, ph, r, g, b);
+          else canvasThickLineCap(px, py, nx, ny, t, qcap, r, g, b);
+          if (qjoin == 1 && t > 1 && !first) panelCircle(px, py, t/2, true, r, g, b);
           px = nx; py = ny; first = false;
         }
-        if (!first) { if (aa) canvasAALine(px, py, fx, fy, r, g, b);
-                      else canvasThickLine(px, py, fx, fy, t, r, g, b); }
+        if (!first) {
+          if (aa) canvasAALine(px, py, fx, fy, r, g, b);
+          else if (qdash) canvasDashLine(px, py, fx, fy, t, qcap, qdon, qdoff, ph, r, g, b);
+          else canvasThickLineCap(px, py, fx, fy, t, qcap, r, g, b);
+          if (qjoin == 1 && t > 1) { panelCircle(px, py, t/2, true, r, g, b);
+                                     panelCircle(fx, fy, t/2, true, r, g, b); }
+        }
       }
     } else if (!strcmp(k, "bezier")) {
       // {"op":"bezier","points":[[x,y]x3 or x4],"t":..,"aa":..,"color":..} (v3.8):

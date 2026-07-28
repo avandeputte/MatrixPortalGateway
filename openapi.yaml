@@ -1579,6 +1579,8 @@ paths:
           `canvas.compositing`.
         - **`aa`:true (fw 3.8)** on `line`/`polyline`/`poly`/`circle` for anti-aliased
           strokes; **`bezier`** op (`points` of 3=quadratic or 4=cubic, `aa`, `t`).
+        - **Stroke styling (fw 3.8.1):** `cap` (`butt`/`round`/`square`), `join`
+          (`miter`/`round`) and `dash` (`[on,off]`) on `line`/`polyline`/`poly`.
         Colours are `[r, g, b]` (0–255), defaulting to white — black for `clear`. Off-panel pixels
         are dropped. Unknown ops are skipped. The advertised op list is `capabilities.canvas.ops`.
 
