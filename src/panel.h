@@ -59,6 +59,11 @@ void panelScroll(int dx, int dy, uint8_t fr, uint8_t fg, uint8_t fb);
 // inherits a stale clip. panelClear() intentionally ignores it.
 void panelSetClip(int x0, int y0, int x1, int y1);
 void panelClearClip();
+// Compositing (v3.8): set a blend mode (0 over, 1 add, 2 multiply, 3 screen, 4 max) and
+// alpha (0..255); panelPixel then composites over the back buffer until cleared. AA
+// drawing uses this with coverage as alpha. The ops layer resets it per op.
+void panelSetBlend(uint8_t mode, uint8_t alpha);
+void panelClearBlend();
 // Output-stage stall watchdog (v3.5): taskDisplay calls this ~1/s; a frozen GDMA
 // descriptor pointer (the silent black-panel wedge) is detected and the output
 // stage restarted in place. No-op while parked (panelStop) or not ok.

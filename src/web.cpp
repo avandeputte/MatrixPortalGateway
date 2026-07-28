@@ -782,8 +782,9 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
              "\"atlas\":{\"named\":true,\"persist\":true,\"maxSheets\":%u,"
              "\"maxBytes\":%u,\"maxSheetBytes\":%u},"
              "\"ops\":[\"clear\",\"pixel\",\"hline\",\"vline\",\"line\",\"rect\",\"circle\",\"ellipse\","
-             "\"triangle\",\"roundrect\",\"gradient\",\"polyline\",\"poly\",\"arc\",\"clip\",\"origin\","
-             "\"text\",\"textbox\",\"image\",\"sprite\",\"scroll\",\"show\"]},"
+             "\"triangle\",\"roundrect\",\"gradient\",\"polyline\",\"poly\",\"arc\",\"bezier\","
+             "\"clip\",\"origin\",\"blend\",\"text\",\"textbox\",\"image\",\"sprite\",\"scroll\",\"show\"],"
+             "\"compositing\":{\"alpha\":true,\"blendModes\":[\"over\",\"add\",\"multiply\",\"screen\",\"max\"],\"aa\":true}},"
              "\"effects\":%s,\"effectParams\":%s,",
              (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
              (unsigned)ATLAS_MAX_SHEETS, (unsigned)ATLAS_TOTAL_BUDGET,
@@ -1689,9 +1690,16 @@ static bool canvasColorGet(JsonVariantConst c, uint8_t& r, uint8_t& g, uint8_t& 
   return true;
 }
 
+static int gOpsBlend = 0;   // batch blend mode (v3.8): 0 over 1 add 2 multiply 3 screen 4 max
+static uint8_t gColorAlpha = 255;   // v3.8: last colour alpha, for AA coverage base
 static void canvasColor(JsonVariantConst c, uint8_t& r, uint8_t& g, uint8_t& b) {
   if (c.is<JsonArrayConst>() && c.size() >= 3) {
     r = (uint8_t)c[0].as<int>(); g = (uint8_t)c[1].as<int>(); b = (uint8_t)c[2].as<int>();
+    // v3.8: an optional 4th element is alpha 0..255 -- composite over the back buffer,
+    // combined with the batch blend mode. Absent -> opaque (still honours the mode).
+    const uint8_t a = (c.size() >= 4) ? (uint8_t)c[3].as<int>() : 255;
+    gColorAlpha = a;
+    panelSetBlend((uint8_t)gOpsBlend, a);
   }
 }
 
@@ -2031,6 +2039,79 @@ static void canvasThickLine(int x0, int y0, int x1, int y1, int t,
   }
 }
 
+// --- Anti-aliased drawing (v3.8): rides the blend path, passing edge coverage as alpha
+// (combined with the op's own colour alpha). AA is for thin strokes/curves where jaggies
+// show; thick strokes stay hard-edged. --------------------------------------------------
+static inline float aa_fpart(float x)  { return x - floorf(x); }
+static inline float aa_rfpart(float x) { return 1.0f - aa_fpart(x); }
+
+static void canvasAAPlot(int x, int y, float cov, uint8_t r, uint8_t g, uint8_t b) {
+  if (cov <= 0.003f) return;
+  if (cov > 1.0f) cov = 1.0f;
+  panelSetBlend((uint8_t)gOpsBlend, (uint8_t)(cov * gColorAlpha));
+  panelPixel(x, y, r, g, b);
+}
+
+// Xiaolin Wu's line.
+static void canvasAALine(float x0, float y0, float x1, float y1,
+                         uint8_t r, uint8_t g, uint8_t b) {
+  const bool steep = fabsf(y1 - y0) > fabsf(x1 - x0);
+  if (steep) { float t; t = x0; x0 = y0; y0 = t; t = x1; x1 = y1; y1 = t; }
+  if (x0 > x1) { float t; t = x0; x0 = x1; x1 = t; t = y0; y0 = y1; y1 = t; }
+  const float dx = x1 - x0, dy = y1 - y0;
+  const float grad = (dx == 0.0f) ? 1.0f : dy / dx;
+  #define AAPUT(px, py, c) do { if (steep) canvasAAPlot((int)(py), (int)(px), (c), r, g, b);                                 else        canvasAAPlot((int)(px), (int)(py), (c), r, g, b); } while (0)
+  float xend = roundf(x0), yend = y0 + grad * (xend - x0), xgap = aa_rfpart(x0 + 0.5f);
+  const int xpxl1 = (int)xend; const float ypxl1 = floorf(yend);
+  AAPUT(xpxl1, ypxl1,     aa_rfpart(yend) * xgap);
+  AAPUT(xpxl1, ypxl1 + 1, aa_fpart(yend)  * xgap);
+  float intery = yend + grad;
+  xend = roundf(x1); yend = y1 + grad * (xend - x1); xgap = aa_fpart(x1 + 0.5f);
+  const int xpxl2 = (int)xend; const float ypxl2 = floorf(yend);
+  for (int x = xpxl1 + 1; x < xpxl2; x++) {
+    AAPUT(x, floorf(intery),     aa_rfpart(intery));
+    AAPUT(x, floorf(intery) + 1, aa_fpart(intery));
+    intery += grad;
+  }
+  AAPUT(xpxl2, ypxl2,     aa_rfpart(yend) * xgap);
+  AAPUT(xpxl2, ypxl2 + 1, aa_fpart(yend)  * xgap);
+  #undef AAPUT
+}
+
+// AA circle outline (1 px ring, coverage from radial distance).
+static void canvasAACircle(int cx, int cy, int rad, uint8_t r, uint8_t g, uint8_t b) {
+  if (rad < 1) return;
+  for (int y = -rad - 1; y <= rad + 1; y++)
+    for (int x = -rad - 1; x <= rad + 1; x++) {
+      const float d = sqrtf((float)(x * x + y * y));
+      const float cov = 1.0f - fabsf(d - (float)rad);
+      if (cov > 0.02f) canvasAAPlot(cx + x, cy + y, cov, r, g, b);
+    }
+}
+
+// Bezier (quadratic: 3 points, cubic: 4) flattened to segments, drawn AA or thick.
+static void canvasBezier(const int* vx, const int* vy, int n, int t, bool aa,
+                         uint8_t r, uint8_t g, uint8_t b) {
+  if (n < 3) return;
+  // segment count from a rough control-polygon length
+  float len = 0;
+  for (int i = 1; i < n; i++) len += sqrtf((float)((vx[i]-vx[i-1])*(vx[i]-vx[i-1]) +
+                                                    (vy[i]-vy[i-1])*(vy[i]-vy[i-1])));
+  int seg = (int)(len / 3.0f); if (seg < 6) seg = 6; if (seg > 96) seg = 96;
+  float px = vx[0], py = vy[0];
+  for (int i = 1; i <= seg; i++) {
+    const float u = (float)i / seg, v = 1.0f - u;
+    float qx, qy;
+    if (n == 3) { qx = v*v*vx[0] + 2*v*u*vx[1] + u*u*vx[2];
+                  qy = v*v*vy[0] + 2*v*u*vy[1] + u*u*vy[2]; }
+    else        { qx = v*v*v*vx[0] + 3*v*v*u*vx[1] + 3*v*u*u*vx[2] + u*u*u*vx[3];
+                  qy = v*v*v*vy[0] + 3*v*v*u*vy[1] + 3*v*u*u*vy[2] + u*u*u*vy[3]; }
+    if (aa) canvasAALine(px, py, qx, qy, r, g, b);
+    else    canvasThickLine((int)px, (int)py, (int)qx, (int)qy, t, r, g, b);
+    px = qx; py = qy;
+  }
+}
+
 // Arc / pie: 0 degrees = 12 o'clock, clockwise (the gauge convention). Outline mode
 // draws the annulus [rad-t+1 .. rad]; fill draws the whole pie slice. Bounding-box
 // scan with one atan2f per candidate pixel -- ops are one-shot draws, not per-frame.
@@ -2171,11 +2252,13 @@ static inline int16_t bops16(const uint8_t* p) { return (int16_t)(((uint16_t)p[0
 
 static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* okOut) {
   int applied = 0; bool shown = false, ok = true;
-  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false;
-  panelClearClip();
+  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false; gOpsBlend = 0;
+  panelClearClip(); panelClearBlend();
+  uint8_t binAlpha = 255;                         // v3.8: batch alpha (0x15), applied per op
   size_t i = 0;
   #define BOPS_NEED(n) if (i + (n) > len) { ok = false; break; }
   while (i < len) {
+    panelSetBlend((uint8_t)gOpsBlend, binAlpha);  // per op: batch mode + batch alpha
     const uint8_t opb = p[i++];
     switch (opb) {
       case 0x01: { BOPS_NEED(3);
@@ -2307,14 +2390,16 @@ static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* o
       case 0x12: { BOPS_NEED(7);
         panelScroll(bops16(p+i), bops16(p+i+2), p[i+4], p[i+5], p[i+6]); i += 7; break; }
       case 0x13: panelShow(); shown = true; continue;
+      case 0x14: BOPS_NEED(1); gOpsBlend = (p[i] <= 4) ? p[i] : 0; i += 1; break;   // blend mode (v3.8)
+      case 0x15: BOPS_NEED(1); binAlpha = p[i]; i += 1; break;                       // batch alpha (v3.8)
       default: ok = false; break;
     }
     if (!ok) break;
     applied++;                                    // counts like the JSON path (state ops too)
   }
   #undef BOPS_NEED
-  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false;
-  panelClearClip();
+  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false; gOpsBlend = 0;
+  panelClearClip(); panelClearBlend();
   if (shownOut) *shownOut = shown;
   if (okOut) *okOut = ok;
   return applied;
@@ -2322,9 +2407,10 @@ static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* o
 
 static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
   int applied = 0; bool shown = false;
-  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false;
-  panelClearClip();
+  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false; gOpsBlend = 0;
+  panelClearClip(); panelClearBlend();
   for (JsonVariantConst op : ops) {
+    panelSetBlend((uint8_t)gOpsBlend, 255);   // per op: batch mode, opaque unless a colour sets alpha
     const char* k = op["op"] | "";
     int x = (op["x"] | 0) + gOpsOx, y = (op["y"] | 0) + gOpsOy;
     int w = op["w"] | 0, h = op["h"] | 0;
@@ -2350,12 +2436,14 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
       }
     } else if (!strcmp(k, "line")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
-      canvasThickLine(x, y, (op["x1"] | 0) + gOpsOx, (op["y1"] | 0) + gOpsOy,
-                      op["t"] | 1, r, g, b);
+      const int lx1 = (op["x1"] | 0) + gOpsOx, ly1 = (op["y1"] | 0) + gOpsOy;
+      if (op["aa"] | false) canvasAALine(x, y, lx1, ly1, r, g, b);   // v3.8: anti-aliased
+      else canvasThickLine(x, y, lx1, ly1, op["t"] | 1, r, g, b);
     } else if (!strcmp(k, "circle")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
       const int t = op["t"] | 1;
-      if (t > 1 && !(op["fill"] | false)) canvasArc(x, y, op["r"] | 0, t, 0, 360, false, r, g, b);
+      if ((op["aa"] | false) && !(op["fill"] | false)) canvasAACircle(x, y, op["r"] | 0, r, g, b);
+      else if (t > 1 && !(op["fill"] | false)) canvasArc(x, y, op["r"] | 0, t, 0, 360, false, r, g, b);
       else panelCircle(x, y, op["r"] | 0, op["fill"] | false, r, g, b);
     } else if (!strcmp(k, "image")) {
       canvasOpImage(op, x, y, w, h);
@@ -2400,12 +2488,14 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
     } else if (!strcmp(k, "polyline")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
       const int t = op["t"] | 1;
-      if (t <= 1 && !gOpsOx && !gOpsOy) canvasOpPolyline(op["points"], r, g, b);
+      const bool aa = op["aa"] | false;
+      if (t <= 1 && !aa && !gOpsOx && !gOpsOy) canvasOpPolyline(op["points"], r, g, b);
       else {
         int px = 0, py = 0; bool first = true;
         for (JsonVariantConst p : op["points"].as<JsonArrayConst>()) {
           const int nx = (int)p[0] + gOpsOx, ny = (int)p[1] + gOpsOy;
-          if (!first) canvasThickLine(px, py, nx, ny, t, r, g, b);
+          if (!first) { if (aa) canvasAALine(px, py, nx, ny, r, g, b);
+                        else canvasThickLine(px, py, nx, ny, t, r, g, b); }
           px = nx; py = ny; first = false;
         }
       }
@@ -2450,15 +2540,28 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
       if (op["fill"] | true) canvasPolyFill(op["points"], r, g, b);
       else {
         const int t = op["t"] | 1;
+        const bool aa = op["aa"] | false;
         int px = 0, py = 0, fx = 0, fy = 0; bool first = true;
         for (JsonVariantConst p : op["points"].as<JsonArrayConst>()) {
           const int nx = (int)p[0] + gOpsOx, ny = (int)p[1] + gOpsOy;
           if (first) { fx = nx; fy = ny; }
+          else if (aa) canvasAALine(px, py, nx, ny, r, g, b);
           else canvasThickLine(px, py, nx, ny, t, r, g, b);
           px = nx; py = ny; first = false;
         }
-        if (!first) canvasThickLine(px, py, fx, fy, t, r, g, b);
+        if (!first) { if (aa) canvasAALine(px, py, fx, fy, r, g, b);
+                      else canvasThickLine(px, py, fx, fy, t, r, g, b); }
       }
+    } else if (!strcmp(k, "bezier")) {
+      // {"op":"bezier","points":[[x,y]x3 or x4],"t":..,"aa":..,"color":..} (v3.8):
+      // quadratic (3 points) or cubic (4). aa smooths it.
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      int bx[4], by[4], nb = 0;
+      for (JsonVariantConst p : op["points"].as<JsonArrayConst>()) {
+        if (nb >= 4) break;
+        bx[nb] = (int)p[0] + gOpsOx; by[nb] = (int)p[1] + gOpsOy; nb++;
+      }
+      if (nb >= 3) canvasBezier(bx, by, nb, op["t"] | 1, op["aa"] | false, r, g, b);
     } else if (!strcmp(k, "clip")) {
       // {"op":"clip",x,y,w,h} clips all later ops to the window; bare {"op":"clip"}
       // clears it. Batch-scoped: canvasOpsRun resets it on entry and exit.
@@ -2483,13 +2586,19 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
       canvasTextBox(x, y, w, h, op["s"] | "", f,
                     alignIdx(op["align"] | "left", "center"),
                     alignIdx(op["valign"] | "top", "middle"), r, g, b);
+    } else if (!strcmp(k, "blend")) {
+      // {"op":"blend","mode":"over|add|multiply|screen|max"} -- batch-scoped compositing
+      // mode for subsequent ops (v3.8). Combine with per-colour alpha ([r,g,b,a]).
+      const char* bm = op["mode"] | "over";
+      gOpsBlend = !strcmp(bm, "add") ? 1 : !strcmp(bm, "multiply") ? 2 :
+                  !strcmp(bm, "screen") ? 3 : !strcmp(bm, "max") ? 4 : 0;
     } else if (!strcmp(k, "show")) {
       panelShow(); shown = true; continue;
     } else continue;                      // unknown op: skip, do not count
     applied++;
   }
-  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false;
-  panelClearClip();
+  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false; gOpsBlend = 0;
+  panelClearClip(); panelClearBlend();
   if (shownOut) *shownOut = shown;
   return applied;
 }

@@ -1573,6 +1573,12 @@ paths:
           `size`; charset A–Z 0–9 `:.-+%/`, folded to uppercase); `"outline":[r,g,b]` /
           `"shadow":[r,g,b]` layer under the bitmap-font path.
         - `sprite` transforms: `flip:"h"|"v"|"hv"`, `rot:90|180|270`, `scale:1..4`.
+        - **Compositing (fw 3.8):** a colour may carry a 4th alpha element `[r,g,b,a]`
+          (0–255), and `{"op":"blend","mode":"over|add|multiply|screen|max"}` sets a
+          batch-scoped blend mode — `add` is additive LED-glow. Advertised as
+          `canvas.compositing`.
+        - **`aa`:true (fw 3.8)** on `line`/`polyline`/`poly`/`circle` for anti-aliased
+          strokes; **`bezier`** op (`points` of 3=quadratic or 4=cubic, `aa`, `t`).
         Colours are `[r, g, b]` (0–255), defaulting to white — black for `clear`. Off-panel pixels
         are dropped. Unknown ops are skipped. The advertised op list is `capabilities.canvas.ops`.
 

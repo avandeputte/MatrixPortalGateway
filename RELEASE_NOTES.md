@@ -1,5 +1,33 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.8.0 — 2026-07-28
+
+### Added — compositing and smooth drawing
+
+The canvas ops surface gains what set it apart from GFX-class libraries: **compositing**.
+- **Per-colour alpha** — `"color":[r,g,b,a]` on any drawing op composites over the back
+  buffer.
+- **Blend modes** — `{"op":"blend","mode":"over|add|multiply|screen|max"}`, batch-scoped.
+  `add` is additive — the LED-glow mode where overlapping lights sum, which looks right on
+  a matrix in a way it can't on paper.
+- **Anti-aliased strokes** — `"aa":true` on `line`/`polyline`/`poly`/`circle` (Xiaolin-Wu
+  lines, coverage-blended rings); coverage rides the compositing path, so AA honours alpha
+  and blend mode.
+- **`bezier`** — quadratic (3 points) / cubic (4) curves, AA or thick. The chart/gauge
+  primitive.
+- All of the above are in the **binary ops** encoding too (blend `0x14`, alpha `0x15`),
+  and advertised as `canvas.compositing` in capabilities.
+
+Verified pixel-exact on-device (alpha 50%% → clean midpoint blend, additive doubles,
+multiply/screen, AA edge coverage, bezier curvature). Foundation: a per-pixel
+read-modify-write in the panel driver, reusing the framebuffer readback path.
+
+## v3.7.3 — 2026-07-27
+
+- **Panel Transitions on the gateway's Settings tab.** The persisted transition
+  (v3.7.2) now has a control card on the dashboard — type (none/crossfade/wipe/slide)
+  and duration — feature-gated on the `canvas` capability.
+
 ## v3.7.2 — 2026-07-27
 
 ### Fixed

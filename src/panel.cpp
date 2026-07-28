@@ -459,9 +459,45 @@ void panelSetClip(int x0, int y0, int x1, int y1) {
 }
 void panelClearClip() { clipX0 = 0; clipY0 = 0; clipX1 = 1 << 14; clipY1 = 1 << 14; }
 
+static inline void readPixelRGB(uint8_t buf, int x, int y, uint8_t& r, uint8_t& g, uint8_t& b);
+
+// Compositing (v3.8): the ops layer sets a blend mode + alpha, and panelPixel composites
+// over the current back-buffer pixel instead of overwriting. Modes: 0 over (normal alpha),
+// 1 add (LED glow), 2 multiply, 3 screen, 4 max/lighten. Inactive by default (opaque, the
+// hot path pays only one predictable branch). AA drawing rides this too, passing coverage
+// as alpha. gBlendActive is false unless a mode/alpha actually changes the result.
+static bool    gBlendActive = false;
+static uint8_t gBlendMode   = 0;
+static uint8_t gBlendAlpha  = 255;
+
+static inline uint8_t blendCh(uint8_t mode, int s, int d, int a) {
+  int out;
+  switch (mode) {
+    case 1:  out = d + s * a / 255; break;                                   // add
+    case 2:  { int m = d * s / 255; out = (m * a + d * (255 - a)) / 255; } break;   // multiply
+    case 3:  { int sc = 255 - (255 - s) * (255 - d) / 255;
+               out = (sc * a + d * (255 - a)) / 255; } break;                // screen
+    case 4:  { int ss = s * a / 255; out = ss > d ? ss : d; } break;         // max / lighten
+    default: out = (s * a + d * (255 - a)) / 255; break;                     // over
+  }
+  return (uint8_t)(out > 255 ? 255 : out < 0 ? 0 : out);
+}
+
+void panelSetBlend(uint8_t mode, uint8_t alpha) {
+  gBlendMode = mode; gBlendAlpha = alpha;
+  gBlendActive = (mode != 0 || alpha != 255);
+}
+void panelClearBlend() { gBlendActive = false; gBlendMode = 0; gBlendAlpha = 255; }
+
 void panelPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b) {
   if (!info.ok || x < 0 || y < 0 || x >= W || y >= H) return;
   if (x < clipX0 || y < clipY0 || x >= clipX1 || y >= clipY1) return;
+  if (gBlendActive) {                              // composite over the back-buffer pixel
+    uint8_t dr, dg, db; readPixelRGB(drawBuf, x, y, dr, dg, db);
+    r = blendCh(gBlendMode, r, dr, gBlendAlpha);
+    g = blendCh(gBlendMode, g, dg, gBlendAlpha);
+    b = blendCh(gBlendMode, b, db, gBlendAlpha);
+  }
   panelWaitDrawable();
   if (bgrOrder) { uint8_t t = r; r = b; b = t; }
   const bool lower = (y >= ROWS);
@@ -492,6 +528,11 @@ void panelFillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b) 
   // ~25 ms (50K branchy read-modify-writes). Hoist the per-(row,plane) masks and run
   // a tight word loop instead: same quant, same bit assembly, ~5x faster.
   if (!info.ok) return;
+  if (gBlendActive) {                              // blending: the fast path can't composite
+    for (int yy = 0; yy < h; yy++)
+      for (int xx = 0; xx < w; xx++) panelPixel(x + xx, y + yy, r, g, b);
+    return;
+  }
   int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
   int x1 = (x + w > W) ? W : x + w, y1 = (y + h > H) ? H : y + h;
   if (x0 < clipX0) x0 = clipX0;  if (y0 < clipY0) y0 = clipY0;   // ops clip window
