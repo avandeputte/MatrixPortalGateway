@@ -10,7 +10,16 @@
   `GET /api/environment` (`{available, tempC, tempF, rh, ageMs}`), an `env` object in
   `GET /api/status`, and an **Environment card on the dashboard Status page** (shown
   only when the sensor is present). Note it reads a few degrees warm — it sits next to
-  the LED panel and the ESP32.
+  the LED panel and the ESP32 —
+  correct it with the **temperature offset** on the Settings page (`tempOffset`, °C;
+  `GET /api/environment` also reports `rawTempC` and `offsetC`).
+
+### Fixed
+
+- **Dashboard Status page: the lower half is populated again.** A dead reference to the
+  MQTT status element (removed in v3.0) threw in `renderStatus` and aborted it, leaving
+  Modules, Min Heap Ever, Stack Min, Gateway Time and NTP Sync blank since v3.0. Removed.
+- Status stat boxes are wider and no longer break values mid-token (IPs, temperatures).
 
 ## v3.6.1 — 2026-07-27
 

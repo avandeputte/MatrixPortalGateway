@@ -833,9 +833,11 @@ size_t statusJson(char* outBuf, size_t outCap) {
   unsigned stkDsp = hTaskDisp ? uxTaskGetStackHighWaterMark(hTaskDisp) : 0;
   // Environment (v3.7): the cached SHTC3 reading, or {"ok":false} when absent/pending.
   char envf[80]; float eT, eH; uint32_t eAge;
-  if (sensorRead(eT, eH, eAge))
+  if (sensorRead(eT, eH, eAge)) {
+    const float tcal = eT + cfg.tempOffsetC10 / 10.0f;   // calibration offset (v3.7)
     snprintf(envf, sizeof(envf), "{\"ok\":true,\"tempC\":%.1f,\"rh\":%.0f,\"age\":%lu}",
-             eT, eH, (unsigned long)(eAge / 1000));
+             tcal, eH, (unsigned long)(eAge / 1000));
+  }
   else snprintf(envf, sizeof(envf), "{\"ok\":false}");
   size_t n = (size_t)snprintf(outBuf, outCap,
     "{\"uptime\":%lu,\"tx\":%lu,"
@@ -901,6 +903,7 @@ static esp_err_t handleApiConfigGet(httpd_req_t* r) {
   doc["flapMax"]       = cfg.flapMax;
   doc["soundEnabled"]  = cfg.soundEnabled;   // master speaker enable (v3.6)
   doc["soundVolume"]   = cfg.soundVolume;    // master volume 0..100
+  doc["tempOffset"]    = cfg.tempOffsetC10 / 10.0;   // SHTC3 temp calibration, degC (v3.7)
   doc["maxFlaps"]      = SF_MAX_FLAPS;   // 237: glyphs + colours + lowercase + pictographs
   doc["bootAnim"]      = cfg.bootAnim;   // library animation autoplayed at boot ("" = none)
   char out[1280];   // headroom for identity + panel + JSON-escaped SSID/TZ/hostname
@@ -1000,6 +1003,11 @@ static esp_err_t handleApiConfigSettings(httpd_req_t* r) {
   }
   if (doc["soundVolume"].is<int>())   { int v = doc["soundVolume"];
     if (v >= 0 && v <= 100) cfg.soundVolume = (uint8_t)v; }
+  if (doc["tempOffset"].is<float>() || doc["tempOffset"].is<int>()) {
+    float o = doc["tempOffset"].as<float>();
+    if (o < -30) o = -30; else if (o > 30) o = 30;
+    cfg.tempOffsetC10 = (int16_t)lroundf(o * 10.0f);
+  }
   // Boot animation (v2.1): a library name, or "" to disable. Validated so a typo
   // cannot wedge boot; existence is NOT required (the file may be uploaded later).
   if (doc["bootAnim"].is<const char*>()) {
@@ -1553,10 +1561,14 @@ static esp_err_t handleApiSound(httpd_req_t* r) {
 static esp_err_t handleApiEnvironment(httpd_req_t* r) {
   float t, h; uint32_t age;
   char buf[128];
-  if (sensorAvailable() && sensorRead(t, h, age))
+  if (sensorAvailable() && sensorRead(t, h, age)) {
+    const float off = cfg.tempOffsetC10 / 10.0f;
+    const float tc = t + off;                            // calibrated (v3.7)
     snprintf(buf, sizeof(buf),
-             "{\"available\":true,\"tempC\":%.2f,\"tempF\":%.1f,\"rh\":%.1f,\"ageMs\":%lu}",
-             t, t * 9.0f / 5.0f + 32.0f, h, (unsigned long)age);
+             "{\"available\":true,\"tempC\":%.2f,\"tempF\":%.1f,\"rh\":%.1f,"
+             "\"rawTempC\":%.2f,\"offsetC\":%.1f,\"ageMs\":%lu}",
+             tc, tc * 9.0f / 5.0f + 32.0f, h, t, off, (unsigned long)age);
+  }
   else
     snprintf(buf, sizeof(buf), "{\"available\":%s}", sensorAvailable() ? "true" : "false");
   return httpxSend(r, 200, "application/json", buf);

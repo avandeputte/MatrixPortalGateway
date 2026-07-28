@@ -44,6 +44,8 @@ struct GwConfig {
   uint8_t       flapMax;       // flips drawn for one change, 1..FLAP_ANIM_MAX
   bool          soundEnabled;  // master speaker enable (v3.6); false = silent
   uint8_t       soundVolume;   // master volume 0..100 -- scales every /api/sound call
+  int16_t       tempOffsetC10; // SHTC3 temperature calibration, TENTHS of degC (v3.7);
+                               // added to the raw reading to correct board self-heating
 };
 
 // ---- owned globals (defined in globals.cpp) ----

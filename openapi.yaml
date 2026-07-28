@@ -460,9 +460,11 @@ paths:
                 type: object
                 properties:
                   available: { type: boolean }
-                  tempC:     { type: number, description: "°C" }
-                  tempF:     { type: number, description: "°F" }
+                  tempC:     { type: number, description: "°C, calibration offset applied (v3.7)" }
+                  tempF:     { type: number, description: "°F, calibration offset applied" }
                   rh:        { type: number, description: "relative humidity %" }
+                  rawTempC:  { type: number, description: "°C before the calibration offset (v3.7)" }
+                  offsetC:   { type: number, description: "the applied temperature offset, °C (v3.7)" }
                   ageMs:     { type: integer, description: "ms since the reading was taken" }
   /api/sound:
     get:
@@ -2355,6 +2357,7 @@ paths:
                 panelBright:   { type: integer, minimum: 1, maximum: 255, example: 160, description: "Global panel brightness, 1..255. Applies on the next frame, no reboot. Also settable live via GET/POST /api/display/brightness (v2.2), which is the same persisted value." }
                 soundEnabled:  { type: boolean, description: "Master speaker enable (v3.6): false silences the speaker (POST /api/sound -> 403, and disabling mid-play stops the tone)." }
                 soundVolume:   { type: integer, minimum: 0, maximum: 100, description: "Master speaker volume 0..100 (v3.6): scales every POST /api/sound call." }
+                tempOffset:    { type: number, minimum: -30, maximum: 30, description: "Temperature calibration offset in degC (v3.7), added to the SHTC3 reading to correct board self-heating." }
                 panelBGR:
                   type: boolean
                   example: true
@@ -2757,6 +2760,7 @@ components:
         panelBright:   { type: integer, description: "Panel brightness 1–255", example: 160 }
         soundEnabled:  { type: boolean, description: "Master speaker enable (v3.6)" }
         soundVolume:   { type: integer, description: "Master speaker volume 0-100 (v3.6)" }
+        tempOffset:    { type: number, description: "Temperature calibration offset, degC (v3.7)" }
         flapMs:        { type: integer, description: "ms per flap of the flip animation", example: 60 }
         flapMax:       { type: integer, description: "Max flips per character change", example: 64 }
         maxFlaps:      { type: integer, description: "Flaps on the drawn reel: glyphs + colours + lowercase + pictographs", example: 237 }
