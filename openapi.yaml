@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Matrix Portal Gateway API
-  version: "3.5"
+  version: "3.9"
   description: |
     REST API for the **Matrix Portal Gateway** firmware, running on a
     Waveshare ESP32-S3-RGB-Matrix driver board. It emulates a wall of split-flap modules on a
@@ -1581,6 +1581,24 @@ paths:
           strokes; **`bezier`** op (`points` of 3=quadratic or 4=cubic, `aa`, `t`).
         - **Stroke styling (fw 3.8.1):** `cap` (`butt`/`round`/`square`), `join`
           (`miter`/`round`) and `dash` (`[on,off]`) on `line`/`polyline`/`poly`.
+        - **Transform stack (fw 3.9):** `{"op":"translate","x":,"y":}`,
+          `{"op":"scale","x":,"y":}` (`y` defaults to `x`), `{"op":"rotate","deg":}`
+          compose an affine transform; `{"op":"save"}` / `{"op":"restore"}` push/pop it
+          (depth 8). Point/line ops (`line`, `polyline`, `poly`, `triangle`, `bezier`,
+          `pixel`) transform every vertex, so rotation works; box-anchored fills
+          (`rect`, `circle`, `ellipse`, `roundrect`, `arc`) transform the anchor and scale
+          the size but stay axis-aligned (rotate a sprite via its own `rot`). `origin`
+          is the backward-compatible pure-translate reset. Batch-scoped.
+        - **Offscreen layers (fw 3.9):** `{"op":"layer"}` redirects subsequent draws into
+          a shadow buffer; `{"op":"composite","x":,"y":,"mode":"over|add|multiply|screen|max",
+          "alpha":0-255}` blends that whole group back at an offset with one group blend +
+          opacity (group opacity — the thing per-op alpha can't express). One layer at a
+          time; an unclosed layer is discarded at batch end. Advertised as
+          `canvas.compositing.layers`.
+        - **Ops macros (fw 3.9):** `{"op":"define","name":,"ops":[…]}` registers a reusable
+          op sequence; `{"op":"call","name":,"x":,"y":}` replays it under a pushed transform
+          translated by `(x,y)`. Batch-scoped (≤12 macros), nestable to depth 4. Advertised
+          as `canvas.compositing.macros`.
         Colours are `[r, g, b]` (0–255), defaulting to white — black for `clear`. Off-panel pixels
         are dropped. Unknown ops are skipped. The advertised op list is `capabilities.canvas.ops`.
 

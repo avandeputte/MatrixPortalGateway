@@ -64,6 +64,13 @@ void panelClearClip();
 // drawing uses this with coverage as alpha. The ops layer resets it per op.
 void panelSetBlend(uint8_t mode, uint8_t alpha);
 void panelClearBlend();
+// Offscreen layers (v3.9): panelLayerBegin() redirects every drawing primitive into a
+// full-panel RGBA shadow; panelLayerComposite() blends that group back at (ox,oy) with one
+// group blend mode + alpha (group opacity). panelLayerDiscard() drops it undrawn. The ops
+// layer discards any open layer at batch end so it can't leak into another draw path.
+bool panelLayerBegin();
+void panelLayerComposite(int ox, int oy, uint8_t mode, uint8_t galpha);
+void panelLayerDiscard();
 // Output-stage stall watchdog (v3.5): taskDisplay calls this ~1/s; a frozen GDMA
 // descriptor pointer (the silent black-panel wedge) is detected and the output
 // stage restarted in place. No-op while parked (panelStop) or not ok.

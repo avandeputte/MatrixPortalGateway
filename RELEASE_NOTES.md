@@ -1,5 +1,33 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.9.0 — 2026-07-28
+
+### Added — the last of the canvas/ops surface
+
+Three features that complete the drawing model, all JSON-ops (the binary encoding keeps its
+lean translate-only path). Advertised under `canvas.compositing` in capabilities.
+
+- **Transform stack.** `translate` / `scale` / `rotate` compose an affine transform;
+  `save` / `restore` push and pop it (depth 8). Point/line ops (`line`, `polyline`, `poly`,
+  `triangle`, `bezier`, `pixel`) transform every vertex, so **rotation works** — a
+  horizontal line under `rotate 90` draws vertical. Box-anchored fills (`rect`, `circle`,
+  `ellipse`, `roundrect`, `arc`) transform the anchor and scale the size but stay
+  axis-aligned (rotate those via a sprite's own `rot`). `origin` stays as the
+  backward-compatible pure-translate reset.
+- **Offscreen layers.** `{"op":"layer"}` redirects drawing into a full-panel RGBA shadow;
+  `{"op":"composite","x","y","mode","alpha"}` blends the whole group back with one group
+  blend + opacity — **group opacity**, which per-op alpha can't express (fade an entire
+  composed scene as a unit). Buffer lives in PSRAM only between `layer` and `composite`;
+  an unclosed layer is discarded at batch end.
+- **Ops macros.** `{"op":"define","name","ops":[…]}` registers a reusable op sequence;
+  `{"op":"call","name","x","y"}` replays it under a pushed transform translated by `(x,y)`.
+  Batch-scoped (≤12 macros), nestable to depth 4 — stamp a shape across the panel without
+  re-sending its ops.
+
+Verified pixel-exact on-device via readback: rotated line goes vertical, `save`/`restore`
+isolates a nested translate, macros stamp at translated offsets, and a 50%-alpha blue layer
+composites over red into a clean purple `(109,0,146)`.
+
 ## v3.8.1 — 2026-07-28
 
 - **Stroke styling** on `line`/`polyline`/`poly`: `cap` (`butt`/`round`/`square`),

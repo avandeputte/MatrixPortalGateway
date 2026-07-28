@@ -489,9 +489,60 @@ void panelSetBlend(uint8_t mode, uint8_t alpha) {
 }
 void panelClearBlend() { gBlendActive = false; gBlendMode = 0; gBlendAlpha = 255; }
 
+// Offscreen layers (v3.9): while a layer is open, every drawing primitive redirects into
+// this full-panel RGBA shadow (a[3] marks written pixels / carries AA coverage) instead
+// of the framebuffer. panelLayerComposite blends the whole group back onto the canvas with
+// one group blend+alpha -- i.e. group opacity, the thing per-op alpha can't express. One
+// layer at a time; the buffer lives in PSRAM only between begin and composite/discard.
+static uint8_t* gLayerBuf = nullptr;          // W*H*4 RGBA, or null when no layer is open
+
+bool panelLayerBegin() {
+  if (gLayerBuf) { memset(gLayerBuf, 0, (size_t)W * H * 4); return true; }
+  gLayerBuf = (uint8_t*)heap_caps_calloc((size_t)W * H * 4, 1, MALLOC_CAP_SPIRAM);
+  if (!gLayerBuf) gLayerBuf = (uint8_t*)calloc((size_t)W * H * 4, 1);   // tiny panels: internal
+  return gLayerBuf != nullptr;
+}
+void panelLayerDiscard() {                    // drop an open layer without drawing it
+  if (!gLayerBuf) return;
+  free(gLayerBuf); gLayerBuf = nullptr;
+}
+void panelLayerComposite(int ox, int oy, uint8_t mode, uint8_t galpha) {
+  if (!gLayerBuf) return;
+  uint8_t* buf = gLayerBuf; gLayerBuf = nullptr;   // stop redirecting: draws hit the panel now
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++) {
+      const uint8_t* px = &buf[((size_t)y * W + x) * 4];
+      if (!px[3]) continue;                        // untouched: transparent
+      const uint8_t a = (uint8_t)((int)px[3] * galpha / 255);
+      if (!a) continue;
+      panelSetBlend(mode, a);
+      panelPixel(x + ox, y + oy, px[0], px[1], px[2]);
+    }
+  panelClearBlend();
+  free(buf);
+}
+
+// Write one pixel into the open layer (over-compositing within the layer so AA edges and
+// per-op alpha accumulate before the group is flattened). Returns true if a layer consumed it.
+static inline bool layerWrite(int x, int y, uint8_t r, uint8_t g, uint8_t b) {
+  if (!gLayerBuf) return false;
+  if (x < 0 || y < 0 || x >= W || y >= H) return true;
+  if (x < clipX0 || y < clipY0 || x >= clipX1 || y >= clipY1) return true;
+  uint8_t* px = &gLayerBuf[((size_t)y * W + x) * 4];
+  const uint8_t a = gBlendActive ? gBlendAlpha : 255;
+  if (gBlendActive && px[3]) {                     // blend over what the layer already holds
+    px[0] = blendCh(gBlendMode, r, px[0], gBlendAlpha);
+    px[1] = blendCh(gBlendMode, g, px[1], gBlendAlpha);
+    px[2] = blendCh(gBlendMode, b, px[2], gBlendAlpha);
+    if (a > px[3]) px[3] = a;
+  } else { px[0] = r; px[1] = g; px[2] = b; px[3] = a; }
+  return true;
+}
+
 void panelPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b) {
   if (!info.ok || x < 0 || y < 0 || x >= W || y >= H) return;
   if (x < clipX0 || y < clipY0 || x >= clipX1 || y >= clipY1) return;
+  if (layerWrite(x, y, r, g, b)) return;          // redirected into the open offscreen layer
   if (gBlendActive) {                              // composite over the back-buffer pixel
     uint8_t dr, dg, db; readPixelRGB(drawBuf, x, y, dr, dg, db);
     r = blendCh(gBlendMode, r, dr, gBlendAlpha);
@@ -528,7 +579,7 @@ void panelFillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b) 
   // ~25 ms (50K branchy read-modify-writes). Hoist the per-(row,plane) masks and run
   // a tight word loop instead: same quant, same bit assembly, ~5x faster.
   if (!info.ok) return;
-  if (gBlendActive) {                              // blending: the fast path can't composite
+  if (gBlendActive || gLayerBuf) {                 // blending / open layer: the fast path can't composite
     for (int yy = 0; yy < h; yy++)
       for (int xx = 0; xx < w; xx++) panelPixel(x + xx, y + yy, r, g, b);
     return;
@@ -587,6 +638,10 @@ static void panelBlitRun(int x, int y, int n) {   // blitQ[]: n quantized pixels
 
 void panelBlitRow888(int x, int y, int n, const uint8_t* rgb) {
   if (!info.ok || y < 0 || y >= H || y < clipY0 || y >= clipY1) return;
+  if (gLayerBuf) {                                 // open layer: no fast path, go per-pixel
+    for (int i = 0; i < n; i++) panelPixel(x + i, y, rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
+    return;
+  }
   if (x < clipX0) { rgb += 3 * (clipX0 - x); n -= clipX0 - x; x = clipX0; }
   if (x < 0)      { rgb -= 3 * x; n += x; x = 0; }
   if (x + n > W) n = W - x;
@@ -604,6 +659,14 @@ void panelBlitRow888(int x, int y, int n, const uint8_t* rgb) {
 
 void panelBlitRow565(int x, int y, int n, const uint8_t* be565) {
   if (!info.ok || y < 0 || y >= H || y < clipY0 || y >= clipY1) return;
+  if (gLayerBuf) {                                 // open layer: no fast path, go per-pixel
+    for (int i = 0; i < n; i++) {
+      const uint16_t v = ((uint16_t)be565[i * 2] << 8) | be565[i * 2 + 1];
+      panelPixel(x + i, y, (uint8_t)(((v >> 11) & 0x1F) << 3),
+                 (uint8_t)(((v >> 5) & 0x3F) << 2), (uint8_t)((v & 0x1F) << 3));
+    }
+    return;
+  }
   if (x < clipX0) { be565 += 2 * (clipX0 - x); n -= clipX0 - x; x = clipX0; }
   if (x < 0)      { be565 -= 2 * x; n += x; x = 0; }
   if (x + n > W) n = W - x;

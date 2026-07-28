@@ -773,7 +773,7 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
   // hand out, and answers this URL without these keys. Stated here so the companion lights up
   // canvas/effect controls from capabilities, not from a firmware-version sniff: `canvas` is the
   // framebuffer a client would push frames to, `effects` the on-device animation set.
-  { char cv[960];   // v3.1: the atlas descriptor + rects flag overflowed 480 and snprintf
+  { char cv[1120];   // v3.1: the atlas descriptor + rects flag overflowed 480 and snprintf
                     // TRUNCATED the JSON -- /api/capabilities went invalid, silently. Sized
                     // with headroom and verified below.
     snprintf(cv, sizeof(cv),
@@ -783,8 +783,11 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
              "\"maxBytes\":%u,\"maxSheetBytes\":%u},"
              "\"ops\":[\"clear\",\"pixel\",\"hline\",\"vline\",\"line\",\"rect\",\"circle\",\"ellipse\","
              "\"triangle\",\"roundrect\",\"gradient\",\"polyline\",\"poly\",\"arc\",\"bezier\","
-             "\"clip\",\"origin\",\"blend\",\"text\",\"textbox\",\"image\",\"sprite\",\"scroll\",\"show\"],"
-             "\"compositing\":{\"alpha\":true,\"blendModes\":[\"over\",\"add\",\"multiply\",\"screen\",\"max\"],\"aa\":true}},"
+             "\"clip\",\"origin\",\"save\",\"restore\",\"translate\",\"scale\",\"rotate\","
+             "\"layer\",\"composite\",\"define\",\"call\","
+             "\"blend\",\"text\",\"textbox\",\"image\",\"sprite\",\"scroll\",\"show\"],"
+             "\"compositing\":{\"alpha\":true,\"blendModes\":[\"over\",\"add\",\"multiply\",\"screen\",\"max\"],\"aa\":true,"
+             "\"transform\":true,\"layers\":true,\"macros\":true}},"
              "\"effects\":%s,\"effectParams\":%s,",
              (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
              (unsigned)ATLAS_MAX_SHEETS, (unsigned)ATLAS_TOTAL_BUDGET,
@@ -1359,7 +1362,7 @@ static void canvasLeave() { dispReturnToWall(); }              // hand the panel
    captured. One stream at a time; drawing REST endpoints answer 409 while it is open.
    A malformed record aborts the stream (the panel keeps its last frame). */
 static bool canvasRectsApply(const uint8_t* body, size_t len, int* outDone);
-static int  canvasOpsRun(JsonArrayConst ops, bool* shownOut);
+static int  canvasOpsRun(JsonArrayConst ops, bool* shownOut, int depth = 0);
 static int  canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* okOut);
 
 static struct {
@@ -2013,8 +2016,42 @@ static esp_err_t handleApiAnimList(httpd_req_t* r) {
 // Batch-scoped drawing state for the "origin" and "clip" ops. Reset at every
 // canvasOpsRun entry AND exit so no other draw path can inherit them.
 static int  gOpsOx = 0, gOpsOy = 0;
+// Affine transform stack (v3.9, JSON ops): a 2x3 matrix [a b c d e f] with
+// X = a*x + c*y + e, Y = b*x + d*y + f. save/restore push/pop; translate/scale/rotate
+// compose; origin resets to a pure translate (backward compatible). Point/line ops
+// transform every vertex (rotation works); box-anchored fills transform the anchor and
+// scale the size (rotation moves them but keeps them axis-aligned -- sprites rotate via
+// their own `rot`). Binary ops keep the simpler translate-only path.
+static float gM[6] = {1,0,0,1,0,0};
+static float gMStack[8][6];
+static int   gMSp = 0;
+static inline int   xfX(float x, float y) { return (int)lroundf(gM[0]*x + gM[2]*y + gM[4]); }
+static inline int   xfY(float x, float y) { return (int)lroundf(gM[1]*x + gM[3]*y + gM[5]); }
+static inline float xfSX() { return sqrtf(gM[0]*gM[0] + gM[1]*gM[1]); }
+static inline float xfSY() { return sqrtf(gM[2]*gM[2] + gM[3]*gM[3]); }
+static inline int   xfW(int w) { return (int)lroundf(w * xfSX()); }
+static inline int   xfH(int h) { return (int)lroundf(h * xfSY()); }
+static inline int   xfR(int r) { return (int)lroundf(r * (xfSX() + xfSY()) * 0.5f); }
+static void xfReset() { gM[0]=1; gM[1]=0; gM[2]=0; gM[3]=1; gM[4]=0; gM[5]=0; gMSp=0; }
+static void xfTranslate(float x, float y) { gM[4] += gM[0]*x + gM[2]*y; gM[5] += gM[1]*x + gM[3]*y; }
+static void xfScale(float sx, float sy) { gM[0]*=sx; gM[1]*=sx; gM[2]*=sy; gM[3]*=sy; }
+static void xfRotate(float deg) {
+  const float r = deg * 0.0174532925f, c = cosf(r), s = sinf(r);
+  const float a=gM[0], b=gM[1], cc=gM[2], d=gM[3];
+  gM[0] = a*c + cc*s; gM[1] = b*c + d*s; gM[2] = -a*s + cc*c; gM[3] = -b*s + d*c;
+}
 static int  gOpsClip[4];
 static bool gOpsClipOn = false;
+
+// Ops macros (v3.9): {"op":"define","name":"star","ops":[...]} registers a reusable op
+// sequence; {"op":"call","name":"star","x":X,"y":Y} replays it under a pushed transform
+// translated by (x,y). Batch-scoped (the table clears at the top of a depth-0 run) and the
+// op arrays are borrowed references into the live request document, so they stay valid for
+// the whole synchronous run. A recursion cap stops a macro that calls itself forever.
+#define OPS_MAX_MACROS 12
+static char          gMacroName[OPS_MAX_MACROS][16];
+static JsonArrayConst gMacroOps[OPS_MAX_MACROS];
+static int           gMacroN = 0;
 
 static void opsApplyClip() {
   if (gOpsClipOn) panelSetClip(gOpsClip[0], gOpsClip[1], gOpsClip[2], gOpsClip[3]);
@@ -2199,7 +2236,7 @@ static void canvasPolyFill(JsonArrayConst pts, uint8_t r, uint8_t g, uint8_t b) 
   int vx[16], vy[16], n = 0;
   for (JsonVariantConst p : pts) {
     if (n >= 16) break;
-    vx[n] = (int)p[0] + gOpsOx; vy[n] = (int)p[1] + gOpsOy; n++;
+    vx[n] = xfX((int)p[0], (int)p[1]); vy[n] = xfY((int)p[0], (int)p[1]); n++;
   }
   canvasPolyFillPts(vx, vy, n, r, g, b);
 }
@@ -2460,15 +2497,18 @@ static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* o
   return applied;
 }
 
-static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
+static int canvasOpsRun(JsonArrayConst ops, bool* shownOut, int depth) {
   int applied = 0; bool shown = false;
-  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false; gOpsBlend = 0;
-  panelClearClip(); panelClearBlend();
+  if (depth == 0) {                       // top-level batch: reset all batch-scoped state
+    gOpsClipOn = false; gOpsBlend = 0; xfReset(); gMacroN = 0;
+    panelClearClip(); panelClearBlend(); panelLayerDiscard();
+  }
   for (JsonVariantConst op : ops) {
     panelSetBlend((uint8_t)gOpsBlend, 255);   // per op: batch mode, opaque unless a colour sets alpha
     const char* k = op["op"] | "";
-    int x = (op["x"] | 0) + gOpsOx, y = (op["y"] | 0) + gOpsOy;
-    int w = op["w"] | 0, h = op["h"] | 0;
+    const int lx = op["x"] | 0, ly = op["y"] | 0;
+    int x = xfX(lx, ly), y = xfY(lx, ly);     // transformed anchor (v3.9)
+    int w = xfW(op["w"] | 0), h = xfH(op["h"] | 0);
     if (!strcmp(k, "clear")) {
       uint8_t r = 0, g = 0, b = 0; canvasColor(op["color"], r, g, b);
       panelFillRect(0, 0, gPanel.panelW, gPanel.panelH, r, g, b);
@@ -2491,7 +2531,7 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
       }
     } else if (!strcmp(k, "line")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
-      const int lx1 = (op["x1"] | 0) + gOpsOx, ly1 = (op["y1"] | 0) + gOpsOy;
+      const int lx1 = xfX(op["x1"] | 0, op["y1"] | 0), ly1 = xfY(op["x1"] | 0, op["y1"] | 0);
       const int lt = op["t"] | 1;
       int lcap, ljoin; float ldon, ldoff;
       const bool ldash = canvasStrokeStyle(op, lcap, ljoin, ldon, ldoff);   // v3.8.1
@@ -2501,9 +2541,10 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
     } else if (!strcmp(k, "circle")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
       const int t = op["t"] | 1;
-      if ((op["aa"] | false) && !(op["fill"] | false)) canvasAACircle(x, y, op["r"] | 0, r, g, b);
-      else if (t > 1 && !(op["fill"] | false)) canvasArc(x, y, op["r"] | 0, t, 0, 360, false, r, g, b);
-      else panelCircle(x, y, op["r"] | 0, op["fill"] | false, r, g, b);
+      const int cr = xfR(op["r"] | 0);
+      if ((op["aa"] | false) && !(op["fill"] | false)) canvasAACircle(x, y, cr, r, g, b);
+      else if (t > 1 && !(op["fill"] | false)) canvasArc(x, y, cr, t, 0, 360, false, r, g, b);
+      else panelCircle(x, y, cr, op["fill"] | false, r, g, b);
     } else if (!strcmp(k, "image")) {
       canvasOpImage(op, x, y, w, h);
     } else if (!strcmp(k, "atlas")) {
@@ -2525,16 +2566,17 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
       panelScroll(op["dx"] | 0, op["dy"] | 0, r, g, b);
     } else if (!strcmp(k, "triangle")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
-      panelTriangle(x, y, (op["x1"] | 0) + gOpsOx, (op["y1"] | 0) + gOpsOy,
-                    (op["x2"] | 0) + gOpsOx, (op["y2"] | 0) + gOpsOy, op["fill"] | false, r, g, b);
+      panelTriangle(x, y, xfX(op["x1"] | 0, op["y1"] | 0), xfY(op["x1"] | 0, op["y1"] | 0),
+                    xfX(op["x2"] | 0, op["y2"] | 0), xfY(op["x2"] | 0, op["y2"] | 0),
+                    op["fill"] | false, r, g, b);
     } else if (!strcmp(k, "roundrect")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
-      panelRoundRect(x, y, w, h, op["r"] | 0, op["fill"] | false, r, g, b);
+      panelRoundRect(x, y, w, h, xfR(op["r"] | 0), op["fill"] | false, r, g, b);
     } else if (!strcmp(k, "ellipse")) {
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
       const int t = op["t"] | 1;
       for (int i = 0; i < (op["fill"] | false ? 1 : t); i++)
-        panelEllipse(x, y, (op["rx"] | 0) - i, (op["ry"] | 0) - i, op["fill"] | false, r, g, b);
+        panelEllipse(x, y, xfW(op["rx"] | 0) - i, xfH(op["ry"] | 0) - i, op["fill"] | false, r, g, b);
     } else if (!strcmp(k, "gradient")) {
       // v3.6: dir "v" | "h" | "r" (radial) | "a" (angled, with "angle" degrees);
       // ordered dithering default ON ("dither":false for the old hard bands).
@@ -2550,11 +2592,12 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
       const bool aa = op["aa"] | false;
       int pcap, pjoin; float pdon, pdoff;
       const bool pdash = canvasStrokeStyle(op, pcap, pjoin, pdon, pdoff);   // v3.8.1
-      if (t <= 1 && !aa && !pdash && !gOpsOx && !gOpsOy) canvasOpPolyline(op["points"], r, g, b);
+      const bool ident = (gM[0]==1&&gM[1]==0&&gM[2]==0&&gM[3]==1&&gM[4]==0&&gM[5]==0);
+      if (t <= 1 && !aa && !pdash && ident) canvasOpPolyline(op["points"], r, g, b);
       else {
         int px = 0, py = 0; bool first = true; float ph = 0;
         for (JsonVariantConst p : op["points"].as<JsonArrayConst>()) {
-          const int nx = (int)p[0] + gOpsOx, ny = (int)p[1] + gOpsOy;
+          const int nx = xfX((int)p[0], (int)p[1]), ny = xfY((int)p[0], (int)p[1]);
           if (!first) {
             if (aa) canvasAALine(px, py, nx, ny, r, g, b);
             else if (pdash) ph = canvasDashLine(px, py, nx, ny, t, pcap, pdon, pdoff, ph, r, g, b);
@@ -2597,7 +2640,7 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
       // {"op":"arc",x,y,"r":R,"t":T,"start":deg,"end":deg,"fill":bool} -- 0 deg = 12
       // o'clock, clockwise (the gauge convention). fill=true draws the pie slice.
       uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
-      canvasArc(x, y, op["r"] | 0, op["t"] | 2, op["start"] | 0, op["end"] | 360,
+      canvasArc(x, y, xfR(op["r"] | 0), op["t"] | 2, op["start"] | 0, op["end"] | 360,
                 op["fill"] | false, r, g, b);
     } else if (!strcmp(k, "poly")) {
       // Closed polygon: fill (even-odd scanline) or outline with optional thickness.
@@ -2610,7 +2653,7 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
         const bool qdash = canvasStrokeStyle(op, qcap, qjoin, qdon, qdoff);   // v3.8.1
         int px = 0, py = 0, fx = 0, fy = 0; bool first = true; float ph = 0;
         for (JsonVariantConst p : op["points"].as<JsonArrayConst>()) {
-          const int nx = (int)p[0] + gOpsOx, ny = (int)p[1] + gOpsOy;
+          const int nx = xfX((int)p[0], (int)p[1]), ny = xfY((int)p[0], (int)p[1]);
           if (first) { fx = nx; fy = ny; }
           else if (aa) canvasAALine(px, py, nx, ny, r, g, b);
           else if (qdash) ph = canvasDashLine(px, py, nx, ny, t, qcap, qdon, qdoff, ph, r, g, b);
@@ -2633,7 +2676,7 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
       int bx[4], by[4], nb = 0;
       for (JsonVariantConst p : op["points"].as<JsonArrayConst>()) {
         if (nb >= 4) break;
-        bx[nb] = (int)p[0] + gOpsOx; by[nb] = (int)p[1] + gOpsOy; nb++;
+        bx[nb] = xfX((int)p[0], (int)p[1]); by[nb] = xfY((int)p[0], (int)p[1]); nb++;
       }
       if (nb >= 3) canvasBezier(bx, by, nb, op["t"] | 1, op["aa"] | false, r, g, b);
     } else if (!strcmp(k, "clip")) {
@@ -2645,9 +2688,21 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
       } else gOpsClipOn = false;
       opsApplyClip();
     } else if (!strcmp(k, "origin")) {
-      // {"op":"origin",x,y}: absolute translation added to every later coordinate
-      // (including points arrays); bare {"op":"origin"} resets. Batch-scoped.
-      gOpsOx = op["x"] | 0; gOpsOy = op["y"] | 0;
+      // {"op":"origin",x,y}: reset the transform to a pure translation (v3.9 keeps this
+      // backward-compatible: no scale/rotate). Bare form resets to identity.
+      xfReset(); gM[4] = op["x"] | 0; gM[5] = op["y"] | 0;
+    } else if (!strcmp(k, "save")) {
+      if (gMSp < 8) { memcpy(gMStack[gMSp++], gM, sizeof(gM)); }        // push transform (v3.9)
+    } else if (!strcmp(k, "restore")) {
+      if (gMSp > 0) { memcpy(gM, gMStack[--gMSp], sizeof(gM)); }        // pop
+    } else if (!strcmp(k, "translate")) {
+      xfTranslate((float)(op["x"] | 0), (float)(op["y"] | 0));
+    } else if (!strcmp(k, "scale")) {
+      const float sx = op["x"].is<float>() || op["x"].is<int>() ? (float)op["x"].as<float>() : 1.0f;
+      const float sy = op["y"].is<float>() || op["y"].is<int>() ? (float)op["y"].as<float>() : sx;
+      xfScale(sx, sy);
+    } else if (!strcmp(k, "rotate")) {
+      xfRotate((float)(op["deg"] | 0));
     } else if (!strcmp(k, "textbox")) {
       // {"op":"textbox",x,y,w,h,"s":...,"size":N,"font":...,"align":...,"valign":...,
       //  "color":[r,g,b]} -- word-wrapped (explicit \n honoured), aligned, clipped.
@@ -2666,13 +2721,50 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
       const char* bm = op["mode"] | "over";
       gOpsBlend = !strcmp(bm, "add") ? 1 : !strcmp(bm, "multiply") ? 2 :
                   !strcmp(bm, "screen") ? 3 : !strcmp(bm, "max") ? 4 : 0;
+    } else if (!strcmp(k, "layer")) {
+      // {"op":"layer"}: begin an offscreen group -- subsequent draws accumulate into a
+      // shadow buffer instead of the canvas, to be flattened by a later "composite".
+      panelLayerBegin();
+    } else if (!strcmp(k, "composite")) {
+      // {"op":"composite","x":ox,"y":oy,"mode":"over|add|...","alpha":0..255}: blend the
+      // open layer back onto the canvas with one group blend + opacity, then close it.
+      const char* bm = op["mode"] | "over";
+      const uint8_t gm = !strcmp(bm, "add") ? 1 : !strcmp(bm, "multiply") ? 2 :
+                         !strcmp(bm, "screen") ? 3 : !strcmp(bm, "max") ? 4 : 0;
+      panelLayerComposite(op["x"] | 0, op["y"] | 0, gm, (uint8_t)(op["alpha"] | 255));
+    } else if (!strcmp(k, "define")) {
+      // {"op":"define","name":"star","ops":[...]}: register a reusable op sequence.
+      const char* nm = op["name"] | "";
+      if (nm[0] && op["ops"].is<JsonArrayConst>() && gMacroN < OPS_MAX_MACROS) {
+        strlcpy(gMacroName[gMacroN], nm, sizeof(gMacroName[0]));
+        gMacroOps[gMacroN] = op["ops"].as<JsonArrayConst>();
+        gMacroN++;
+      }
+    } else if (!strcmp(k, "call")) {
+      // {"op":"call","name":"star","x":X,"y":Y}: replay a macro under a pushed transform
+      // translated by (x,y). Nested calls allowed up to a small recursion cap.
+      const char* nm = op["name"] | "";
+      if (depth < 4) {
+        for (int m = 0; m < gMacroN; m++) {
+          if (strcmp(gMacroName[m], nm)) continue;
+          float saved[6]; memcpy(saved, gM, sizeof(gM));
+          xfTranslate((float)(op["x"] | 0), (float)(op["y"] | 0));
+          bool subShown = false;
+          applied += canvasOpsRun(gMacroOps[m], &subShown, depth + 1);
+          if (subShown) shown = true;
+          memcpy(gM, saved, sizeof(gM));
+          break;
+        }
+      }
     } else if (!strcmp(k, "show")) {
       panelShow(); shown = true; continue;
     } else continue;                      // unknown op: skip, do not count
     applied++;
   }
-  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false; gOpsBlend = 0;
-  panelClearClip(); panelClearBlend();
+  if (depth == 0) {
+    gOpsClipOn = false; gOpsBlend = 0; xfReset(); gMacroN = 0;
+    panelClearClip(); panelClearBlend(); panelLayerDiscard();
+  }
   if (shownOut) *shownOut = shown;
   return applied;
 }
