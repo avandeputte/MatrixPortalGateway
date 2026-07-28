@@ -816,6 +816,15 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
 }
 
 // The status JSON, shared by GET /api/status and the SSE `status` event (v3.2).
+static float envCompRH(float rawT, float rawRH, float offC) {
+  if (offC == 0.0f) return rawRH;
+  const float ta   = rawT + offC;
+  const float ps_s = expf(17.62f * rawT / (243.12f + rawT));
+  const float ps_a = expf(17.62f * ta   / (243.12f + ta));
+  float rh = rawRH * ps_s / ps_a;
+  return rh < 0 ? 0 : rh > 100 ? 100 : rh;
+}
+
 size_t statusJson(char* outBuf, size_t outCap) {
   // Use snprintf to avoid JsonDocument heap allocation (called every 3s by browser)
   char rtcBuf[24]; rtcFormatTime(rtcBuf, sizeof(rtcBuf));
@@ -834,9 +843,11 @@ size_t statusJson(char* outBuf, size_t outCap) {
   // Environment (v3.7): the cached SHTC3 reading, or {"ok":false} when absent/pending.
   char envf[80]; float eT, eH; uint32_t eAge;
   if (sensorRead(eT, eH, eAge)) {
-    const float tcal = eT + cfg.tempOffsetC10 / 10.0f;   // calibration offset (v3.7)
+    const float offc = cfg.tempOffsetC10 / 10.0f;        // calibration offset (v3.7)
+    const float tcal = eT + offc;
+    const float rhc  = envCompRH(eT, eH, offc);          // RH follows the same offset
     snprintf(envf, sizeof(envf), "{\"ok\":true,\"tempC\":%.1f,\"rh\":%.0f,\"age\":%lu}",
-             tcal, eH, (unsigned long)(eAge / 1000));
+             tcal, rhc, (unsigned long)(eAge / 1000));
   }
   else snprintf(envf, sizeof(envf), "{\"ok\":false}");
   size_t n = (size_t)snprintf(outBuf, outCap,
@@ -1564,10 +1575,11 @@ static esp_err_t handleApiEnvironment(httpd_req_t* r) {
   if (sensorAvailable() && sensorRead(t, h, age)) {
     const float off = cfg.tempOffsetC10 / 10.0f;
     const float tc = t + off;                            // calibrated (v3.7)
+    const float rhc = envCompRH(t, h, off);              // ambient RH from the same offset
     snprintf(buf, sizeof(buf),
              "{\"available\":true,\"tempC\":%.2f,\"tempF\":%.1f,\"rh\":%.1f,"
-             "\"rawTempC\":%.2f,\"offsetC\":%.1f,\"ageMs\":%lu}",
-             tc, tc * 9.0f / 5.0f + 32.0f, h, t, off, (unsigned long)age);
+             "\"rawTempC\":%.2f,\"rawRH\":%.1f,\"offsetC\":%.1f,\"ageMs\":%lu}",
+             tc, tc * 9.0f / 5.0f + 32.0f, rhc, t, h, off, (unsigned long)age);
   }
   else
     snprintf(buf, sizeof(buf), "{\"available\":%s}", sensorAvailable() ? "true" : "false");

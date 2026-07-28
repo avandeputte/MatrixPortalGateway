@@ -12,7 +12,10 @@
   only when the sensor is present). Note it reads a few degrees warm — it sits next to
   the LED panel and the ESP32 —
   correct it with the **temperature offset** on the Settings page (`tempOffset`, °C;
-  `GET /api/environment` also reports `rawTempC` and `offsetC`).
+  `GET /api/environment` also reports `rawTempC`, `rawRH` and `offsetC`). **Humidity is
+  corrected from the same offset** — a hot sensor reads relative humidity low, and the
+  temperature delta recovers the true ambient RH by the psychrometric (Magnus)
+  relation, so one calibration fixes both temperature and humidity.
 
 ### Fixed
 

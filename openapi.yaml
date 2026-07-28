@@ -462,8 +462,9 @@ paths:
                   available: { type: boolean }
                   tempC:     { type: number, description: "°C, calibration offset applied (v3.7)" }
                   tempF:     { type: number, description: "°F, calibration offset applied" }
-                  rh:        { type: number, description: "relative humidity %" }
+                  rh:        { type: number, description: "relative humidity %, temperature-compensated from the offset (v3.7)" }
                   rawTempC:  { type: number, description: "°C before the calibration offset (v3.7)" }
+                  rawRH:     { type: number, description: "relative humidity % before compensation (v3.7)" }
                   offsetC:   { type: number, description: "the applied temperature offset, °C (v3.7)" }
                   ageMs:     { type: integer, description: "ms since the reading was taken" }
   /api/sound:
