@@ -46,6 +46,8 @@ struct GwConfig {
   uint8_t       soundVolume;   // master volume 0..100 -- scales every /api/sound call
   int16_t       tempOffsetC10; // SHTC3 temperature calibration, TENTHS of degC (v3.7);
                                // added to the raw reading to correct board self-heating
+  uint8_t       transType;     // canvas full-frame transition (v3.7.2): 0 none 1 crossfade 2 wipe 3 slide
+  uint16_t      transMs;       // transition duration, 100..2000 ms
 };
 
 // ---- owned globals (defined in globals.cpp) ----

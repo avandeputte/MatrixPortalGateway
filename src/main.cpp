@@ -117,6 +117,7 @@ void setup() {
   // 5. Filesystem, then the thing that restores from it: the virtual modules' own
   //    state (/vmods.dat). Nothing else on this board is sticky.
   sfFsInit(fatfsRecover);
+  gTransType = cfg.transType; gTransMs = cfg.transMs;   // restore persisted transition (v3.7.2)
   vmBuildReel();      // the shared reel: every CP1252 glyph, then the colours
   vmInit((int)gPanel.cols * (int)gPanel.rows);
 

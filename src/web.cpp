@@ -915,6 +915,9 @@ static esp_err_t handleApiConfigGet(httpd_req_t* r) {
   doc["soundEnabled"]  = cfg.soundEnabled;   // master speaker enable (v3.6)
   doc["soundVolume"]   = cfg.soundVolume;    // master volume 0..100
   doc["tempOffset"]    = cfg.tempOffsetC10 / 10.0;   // SHTC3 temp calibration, degC (v3.7)
+  { static const char* const TN[4] = {"none","crossfade","wipe","slide"};
+    doc["transitionType"] = TN[cfg.transType <= 3 ? cfg.transType : 0];   // persisted (v3.7.2)
+    doc["transitionMs"]   = cfg.transMs; }
   doc["maxFlaps"]      = SF_MAX_FLAPS;   // 237: glyphs + colours + lowercase + pictographs
   doc["bootAnim"]      = cfg.bootAnim;   // library animation autoplayed at boot ("" = none)
   char out[1280];   // headroom for identity + panel + JSON-escaped SSID/TZ/hostname
@@ -1913,6 +1916,8 @@ static esp_err_t handleApiCanvasTransition(httpd_req_t* r) {
   if (ms < 100) ms = 100;
   if (ms > 2000) ms = 2000;
   gTransType = ty; gTransMs = (uint16_t)ms;
+  cfg.transType = ty; cfg.transMs = (uint16_t)ms;   // persist (v3.7.2): survive reboot/reflash
+  saveConfig();
   char resp[64];
   snprintf(resp, sizeof(resp), "{\"ok\":true,\"type\":\"%s\",\"ms\":%d}", t, ms);
   return httpxSend(r, 200, "application/json", resp);

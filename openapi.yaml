@@ -1142,8 +1142,10 @@ paths:
       description: |
         Sets a transition that subsequent `PUT /api/canvas/frame` uploads present through: the
         incoming frame is staged in PSRAM, the outgoing frame is captured from the framebuffer,
-        and the tween is rendered on-device. **Sticky until changed, runtime-only** — a reboot
-        returns to hard cuts (`none`). rect, qoi and anim presents are unaffected.
+        and the tween is rendered on-device. **Persisted since v3.7.2** — saved to NVS and
+        restored at boot (it was runtime-only before, resetting to hard cuts on every
+        reboot); `GET /api/config` reports it as `transitionType`/`transitionMs`. rect, qoi
+        and anim presents are unaffected.
 
         * `none` — a hard cut (the default).
         * `crossfade` — blend old → new.
@@ -2762,6 +2764,8 @@ components:
         soundEnabled:  { type: boolean, description: "Master speaker enable (v3.6)" }
         soundVolume:   { type: integer, description: "Master speaker volume 0-100 (v3.6)" }
         tempOffset:    { type: number, description: "Temperature calibration offset, degC (v3.7)" }
+        transitionType: { type: string, enum: [none, crossfade, wipe, slide], description: "Persisted canvas transition (v3.7.2)" }
+        transitionMs:  { type: integer, description: "Persisted transition duration, ms (v3.7.2)" }
         flapMs:        { type: integer, description: "ms per flap of the flip animation", example: 60 }
         flapMax:       { type: integer, description: "Max flips per character change", example: 64 }
         maxFlaps:      { type: integer, description: "Flaps on the drawn reel: glyphs + colours + lowercase + pictographs", example: 237 }

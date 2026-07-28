@@ -1,5 +1,14 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.7.2 — 2026-07-27
+
+### Fixed
+
+- **Canvas transitions now persist.** `POST /api/canvas/transition` was runtime-only,
+  so the configured crossfade/wipe/slide reset to hard cuts on every reboot and reflash.
+  It is now saved to NVS and restored at boot; `GET /api/config` reports it as
+  `transitionType` / `transitionMs`.
+
 ## v3.7.1 — 2026-07-27
 
 ### Fixed
