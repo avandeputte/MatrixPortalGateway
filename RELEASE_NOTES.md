@@ -1,5 +1,17 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.7.1 — 2026-07-27
+
+### Fixed
+
+- **Quiet Time now blanks canvas content, not just flaps.** The raw-canvas endpoints
+  (`frame`, `ops`, `opsb`, `rects`, `rect`, `qoi`, `stream`, `anim`, `gif`) had no
+  Quiet-Time guard, so a companion pushing a canvas app lit the panel right through
+  Quiet Time even though the flap path was suppressed. They now refuse with `409`
+  while Quiet Time is on — the panel stays dark, matching effects, ticker, anim-play
+  and sound (which already refused). The one flap page in a mixed playlist is no
+  longer the only thing suppressed.
+
 ## v3.7.0 — 2026-07-27
 
 ### Added — the board reads the room

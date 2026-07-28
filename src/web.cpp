@@ -1321,6 +1321,16 @@ static void canvasStandDown() {
   while (!gDispParked && (uint32_t)(millis() - t0) < 250) { wdgWebMs = millis(); delay(2); }
 }
 // Take the panel over (waiting for the renderer to park), then optionally blank it.
+// Quiet Time keeps the panel DARK: every canvas CONTENT endpoint refuses while it is on,
+// so a companion's canvas apps cannot light the panel (the flap path is suppressed in
+// frames.cpp; effects/ticker/anim-play/sound already refuse -- this closes the
+// raw-canvas gap: frame/ops/rects/rect/qoi/stream/anim/gif/opsb). v3.7.1
+static bool quietBlocked(httpd_req_t* r) {
+  if (!gQuietTime) return false;
+  httpxErr(r, 409, "Quiet Time is active");
+  return true;
+}
+
 static void canvasEnter(bool clear) {
   if (!gCanvasMode) canvasStandDown();
   if (clear && gPanel.ready) { panelClear(); panelShow(); }
@@ -1619,6 +1629,7 @@ static esp_err_t handleApiCanvasStreamGet(httpd_req_t* r) {
 // PUT /api/canvas/stream -- open the channel (see the block comment above).
 static esp_err_t handleApiCanvasStream(httpd_req_t* r) {
   if (!gPanel.ready)     return httpxErr(r, 503, "Panel not running");
+  if (quietBlocked(r)) return ESP_OK;
   if (cs.req)            return httpxErr(r, 409, "a stream is already open");
   if (gOtaInProgress)    return httpxErr(r, 503, "OTA in progress");
   if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP)
@@ -2481,6 +2492,7 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut) {
 // POST /api/canvas/ops
 static esp_err_t handleApiCanvasOps(httpd_req_t* r) {
   if (!gPanel.ready) { httpxErr(r, 503, "Panel not running"); return ESP_OK; }
+  if (quietBlocked(r)) return ESP_OK;
   if (csBusy(r)) return ESP_OK;
   JsonDocument doc;
   if (!httpxReadJson(r, doc)) return ESP_OK;
@@ -2505,6 +2517,7 @@ static esp_err_t handleApiCanvasOps(httpd_req_t* r) {
 // should carry the same bytes in stream record 0x06 instead.
 static esp_err_t handleApiCanvasOpsBin(httpd_req_t* r) {
   if (!gPanel.ready) return httpxErr(r, 503, "Panel not running");
+  if (quietBlocked(r)) return ESP_OK;
   if (csBusy(r)) return ESP_OK;
   const size_t len = (size_t)r->content_len;
   if (len < 1 || len > 65536) return httpxErr(r, 400, "Body must be 1..65536 bytes of binary ops");
@@ -2535,6 +2548,7 @@ static esp_err_t handleApiCanvasOpsBin(httpd_req_t* r) {
 // after the last byte. Bodies stream through httpxBuf, the shared raw-body buffer (httpx.h).
 static esp_err_t handleApiCanvasFrame(httpd_req_t* r) {
   if (!gPanel.ready) return httpxErr(r, 503, "Panel not running");
+  if (quietBlocked(r)) return ESP_OK;
   if (cs.req) return httpxErr(r, 409, "canvas stream active -- close it first");
   const size_t px  = (size_t)gPanel.panelW * gPanel.panelH;
   const size_t len = (size_t)r->content_len;
@@ -2622,6 +2636,7 @@ static esp_err_t handleApiCanvasFrameGet(httpd_req_t* r) {
 // Drawn ON TOP of what is on screen: the back buffer is synced to the live frame first.
 static esp_err_t handleApiCanvasRect(httpd_req_t* r) {
   if (!gPanel.ready) return httpxErr(r, 503, "Panel not running");
+  if (quietBlocked(r)) return ESP_OK;
   if (cs.req) return httpxErr(r, 409, "canvas stream active -- close it first");
   static const char* BAD = "Body must be an 8-byte x,y,w,h header then w*h*3 or w*h*2 pixels";
   const size_t len = (size_t)r->content_len;
@@ -2712,6 +2727,7 @@ static bool canvasRectsApply(const uint8_t* body, size_t len, int* outDone) {
 // rows blitted. No transitions -- deltas are incremental updates, not presents.
 static esp_err_t handleApiCanvasRects(httpd_req_t* r) {
   if (!gPanel.ready) return httpxErr(r, 503, "Panel not running");
+  if (quietBlocked(r)) return ESP_OK;
   if (cs.req) return httpxErr(r, 409, "canvas stream active -- close it first");
   if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP)
     return httpxErr(r, 507, "Low on memory -- try again in a moment");
@@ -2810,6 +2826,7 @@ static size_t recvWhole(httpd_req_t* r, uint8_t** buf, size_t* cap, size_t need,
 
 static esp_err_t handleApiCanvasQoi(httpd_req_t* r) {
   if (csBusy(r)) return ESP_OK;
+  if (quietBlocked(r)) return ESP_OK;
   if (!gPanel.ready) return httpxErr(r, 503, "Panel not running or out of memory");
   if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP)
     return httpxErr(r, 507, "Low on memory -- try again in a moment");   // stressed: back off
@@ -2844,6 +2861,7 @@ static esp_err_t animRawReply(httpd_req_t* r, int e) {
 }
 static esp_err_t handleApiCanvasAnim(httpd_req_t* r) {
   if (csBusy(r)) return ESP_OK;
+  if (quietBlocked(r)) return ESP_OK;
   if (!gPanel.ready) return animRawReply(r, 503);
   if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) return animRawReply(r, 507);   // stressed: back off
   const size_t len = (size_t)r->content_len;
@@ -2994,6 +3012,7 @@ static esp_err_t handleApiAtlasDelete(httpd_req_t* r) {
 #define CANVAS_GIF_MAX_BYTES  (4096u * 1024u)
 static esp_err_t handleApiCanvasGif(httpd_req_t* r) {
   if (csBusy(r)) return ESP_OK;
+  if (quietBlocked(r)) return ESP_OK;
   if (!gPanel.ready) return httpxErr(r, 503, "Panel not running");
   if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP)
     return httpxErr(r, 507, "Low on memory -- try again in a moment");   // stressed: back off
