@@ -442,6 +442,28 @@ paths:
           description: Linkset
           content: { application/linkset+json: { schema: { type: object } } }
 
+  /api/environment:
+    get:
+      tags: [Status]
+      summary: Onboard temperature + humidity (v3.7, `environment` token)
+      description: |
+        The board's Sensirion SHTC3 sensor, polled once every ~10 s. Present only on
+        hardware that carries it (advertised as the `environment` capability token; the
+        same reading also rides `GET /api/status` under `env`). Note the temperature
+        reads a few degrees warm — the sensor sits near the LED panel and the ESP32.
+      responses:
+        "200":
+          description: Reading (or availability when no reading yet / absent)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  available: { type: boolean }
+                  tempC:     { type: number, description: "°C" }
+                  tempF:     { type: number, description: "°F" }
+                  rh:        { type: number, description: "relative humidity %" }
+                  ageMs:     { type: integer, description: "ms since the reading was taken" }
   /api/sound:
     get:
       tags: [Status]
@@ -2677,6 +2699,7 @@ components:
         time:      { type: string,  description: "Local RTC time", example: "2026-06-10 14:32:01" }
         ntpSynced: { type: boolean, example: true }
         quiet:     { type: boolean, description: "true if quiet time is on (flaps do not move for display updates)", example: false }
+        env:       { type: object, description: "SHTC3 temp/humidity (v3.7): {ok, tempC, rh, age}; ok:false when absent or no reading yet" }
         minheap:   { type: integer, description: "Minimum free heap ever observed (bytes)", example: 98000 }
         stk:
           type: object

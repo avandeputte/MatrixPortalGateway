@@ -1,6 +1,7 @@
 #include "gateway.h"
 #include "audio.h"
 #include "sound.h"
+#include "sensor.h"
 #include "canvas.h"   // canvasAnimLoadPlay: the boot animation
 #include <esp_ota_ops.h>   // esp_ota_get_running_partition(): which slot are we actually running?
 
@@ -103,6 +104,7 @@ void setup() {
   //     never touches I2C again (capture start/stop is I2S-only). See audio.h.
   audioInit();
   soundInit();   // ES8311 speaker DAC -- same single-threaded I2C window
+  sensorInit();  // SHTC3 temp/humidity -- same single-threaded I2C window
 
   // 4. Plan the panel geometry. The module grid can be clamped by the panel (a
   //    15-column wall does not fit 64 px), and the wall IS the module list, so

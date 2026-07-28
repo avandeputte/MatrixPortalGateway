@@ -1,5 +1,6 @@
 #include "gateway.h"
 #include "sse.h"   // taskWeb is the SSE push pump (v3.0)
+#include "sensor.h"   // SHTC3 temp/humidity, polled from taskRTC (v3.7)
 
 
 
@@ -89,12 +90,18 @@ static void quietScheduleTick() {
 }
 
 void taskRTC(void* pv) {
-  uint32_t lastSched = 0;
+  uint32_t lastSched = 0, lastEnv = 0;
   while (true) {
     rtcRead();
     if (lastSched == 0 || millis() - lastSched > 5000UL) {
       lastSched = millis();
       quietScheduleTick();     // evaluate the quiet window every 5s (prompt flip)
+    }
+    // Environment sensor (v3.7): runtime I2C stays on THIS task (the bus has no lock);
+    // temp/humidity move slowly, so every 10 s is ample. First read soon after boot.
+    if (lastEnv == 0 || millis() - lastEnv > 10000UL) {
+      lastEnv = millis();
+      sensorPoll();
     }
     vTaskDelay(pdMS_TO_TICKS(1000));
   }

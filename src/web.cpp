@@ -7,6 +7,7 @@
 #include <mbedtls/base64.h>   // the canvas "image" op decodes a base64 sprite
 #include "audio.h"           // capabilities audio token + effect "audio" param (v3.4)
 #include "sound.h"           // POST /api/sound + the sound capability token (v3.6)
+#include "sensor.h"          // env fields in status + the environment token (v3.7)
 #include <fcntl.h>            // non-blocking mode for the canvas stream socket (v3.2)
 #include <lwip/sockets.h>    // setsockopt on the stream socket at close (v3.3)
 
@@ -805,9 +806,10 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
     snprintf(ft, sizeof(ft),
              "\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
              "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\","
-             "\"effectDefs\"%s%s]}",
+             "\"effectDefs\"%s%s%s]}",
              audioAvailable() ? ",\"audio\"" : "",
-             soundAvailable() ? ",\"sound\"" : "");
+             soundAvailable() ? ",\"sound\"" : "",
+             sensorAvailable() ? ",\"environment\"" : "");
     capPut(ft); }
   capFlush();
   return httpxChunkEnd(r);
@@ -829,6 +831,12 @@ size_t statusJson(char* outBuf, size_t outCap) {
   // v3.0: seconds since the companion last checked in (-1 = never / deregistered)
   long compAge = gCompanionSeenMs ? (long)((millis() - gCompanionSeenMs) / 1000UL) : -1;
   unsigned stkDsp = hTaskDisp ? uxTaskGetStackHighWaterMark(hTaskDisp) : 0;
+  // Environment (v3.7): the cached SHTC3 reading, or {"ok":false} when absent/pending.
+  char envf[80]; float eT, eH; uint32_t eAge;
+  if (sensorRead(eT, eH, eAge))
+    snprintf(envf, sizeof(envf), "{\"ok\":true,\"tempC\":%.1f,\"rh\":%.0f,\"age\":%lu}",
+             eT, eH, (unsigned long)(eAge / 1000));
+  else snprintf(envf, sizeof(envf), "{\"ok\":false}");
   size_t n = (size_t)snprintf(outBuf, outCap,
     "{\"uptime\":%lu,\"tx\":%lu,"
     "\"wifi\":%s,\"ip\":\"%d.%d.%d.%d\",\"apip\":\"%d.%d.%d.%d\","
@@ -837,7 +845,7 @@ size_t statusJson(char* outBuf, size_t outCap) {
     "\"panel\":{\"ok\":%s,\"w\":%u,\"h\":%u,\"cols\":%u,\"rows\":%u,"
     "\"cellW\":%u,\"cellH\":%u,\"depth\":%u,\"font\":\"%s\",\"vmods\":%d},"
     "\"time\":\"%s\",\"ntpSynced\":%s,\"quiet\":%s,"
-    "\"companion\":{\"url\":\"%s\",\"status\":\"%s\",\"age\":%ld}}",
+    "\"companion\":{\"url\":\"%s\",\"status\":\"%s\",\"age\":%ld},\"env\":%s}",
     millis()/1000, txCount,
     (WiFi.status()==WL_CONNECTED)?"true":"false",
     lip[0],lip[1],lip[2],lip[3],
@@ -851,7 +859,7 @@ size_t statusJson(char* outBuf, size_t outCap) {
     rtcBuf,
     ntpSynced?"true":"false",
     gQuietTime?"true":"false",
-    cfg.companionUrl, gCompanionStatus, compAge);
+    cfg.companionUrl, gCompanionStatus, compAge, envf);
   return n < outCap ? n : outCap - 1;
 }
 
@@ -1538,6 +1546,19 @@ static esp_err_t handleApiSound(httpd_req_t* r) {
   soundPlay(f, m, n, (uint8_t)vol);
   char buf[48];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"queued\":%d}", n);
+  return httpxSend(r, 200, "application/json", buf);
+}
+
+// GET /api/environment (v3.7) -- the onboard SHTC3 temperature + humidity reading.
+static esp_err_t handleApiEnvironment(httpd_req_t* r) {
+  float t, h; uint32_t age;
+  char buf[128];
+  if (sensorAvailable() && sensorRead(t, h, age))
+    snprintf(buf, sizeof(buf),
+             "{\"available\":true,\"tempC\":%.2f,\"tempF\":%.1f,\"rh\":%.1f,\"ageMs\":%lu}",
+             t, t * 9.0f / 5.0f + 32.0f, h, (unsigned long)age);
+  else
+    snprintf(buf, sizeof(buf), "{\"available\":%s}", sensorAvailable() ? "true" : "false");
   return httpxSend(r, 200, "application/json", buf);
 }
 
@@ -3327,6 +3348,7 @@ void webInit() {
   httpxOn("/api/canvas/stream",      HTTP_PUT,  handleApiCanvasStream);
   httpxOn("/api/canvas/stream",      HTTP_GET,  handleApiCanvasStreamGet);
   httpxOn("/api/canvas/audio",       HTTP_GET,  handleApiCanvasAudio);
+  httpxOn("/api/environment",        HTTP_GET,  handleApiEnvironment);
   httpxOn("/api/sound",              HTTP_GET,  handleApiSound);
   httpxOn("/api/sound",              HTTP_POST, handleApiSound);
   httpxOn("/openapi.yaml",           HTTP_GET,  handleOpenapiSpec);

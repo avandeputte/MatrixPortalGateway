@@ -1,5 +1,17 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.7.0 — 2026-07-27
+
+### Added — the board reads the room
+
+- **Onboard temperature + humidity** from the board's Sensirion **SHTC3** sensor
+  (`environment` feature token). Polled every ~10 s on the one task that owns runtime
+  I2C (the bus has no lock), with CRC-checked readings. Exposed three ways:
+  `GET /api/environment` (`{available, tempC, tempF, rh, ageMs}`), an `env` object in
+  `GET /api/status`, and an **Environment card on the dashboard Status page** (shown
+  only when the sensor is present). Note it reads a few degrees warm — it sits next to
+  the LED panel and the ESP32.
+
 ## v3.6.1 — 2026-07-27
 
 - **Quiet Time now silences the speaker.** Turning Quiet Time on stops any tone
