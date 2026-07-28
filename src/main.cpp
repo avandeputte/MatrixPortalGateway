@@ -2,6 +2,7 @@
 #include "audio.h"
 #include "sound.h"
 #include "sensor.h"
+#include "sdcard.h"
 #include "canvas.h"   // canvasAnimLoadPlay: the boot animation
 #include <esp_ota_ops.h>   // esp_ota_get_running_partition(): which slot are we actually running?
 
@@ -117,6 +118,7 @@ void setup() {
   // 5. Filesystem, then the thing that restores from it: the virtual modules' own
   //    state (/vmods.dat). Nothing else on this board is sticky.
   sfFsInit(fatfsRecover);
+  sdInit();           // microSD (v3.10): mount the TF card if one is fitted (setup() only)
   gTransType = cfg.transType; gTransMs = cfg.transMs;   // restore persisted transition (v3.7.2)
   vmBuildReel();      // the shared reel: every CP1252 glyph, then the colours
   vmInit((int)gPanel.cols * (int)gPanel.rows);

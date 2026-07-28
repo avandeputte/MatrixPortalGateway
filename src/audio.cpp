@@ -96,6 +96,10 @@ i2s_chan_handle_t audioTxChan() { return txChan; }
 // Published features. A spinlock keeps reads untorn; the DSP writes ~60/s.
 static AudioFrame     gFrame = {};
 static portMUX_TYPE   gFrameMux = portMUX_INITIALIZER_UNLOCKED;
+// Oscilloscope tap (v3.10): the DC-removed mono hop, auto-gain-scaled to ±127, published
+// each hop under gFrameMux alongside gFrame. Separate from AudioFrame so the hot per-frame
+// audioRead() copy (spectrum/soundwall) stays lean -- only the scope effect pays for it.
+static int8_t         gScope[AUDIO_SCOPE] = {0};
 static volatile bool  gBeatLatch = false;
 
 bool audioAvailable() { return gAudioPresent; }
@@ -106,6 +110,13 @@ void audioRead(AudioFrame& out) {
   out = gFrame;
   out.beat = gBeatLatch;
   gBeatLatch = false;                     // beat is consume-once per reader cycle
+  taskEXIT_CRITICAL(&gFrameMux);
+}
+
+void audioReadScope(int8_t* out, int n) {
+  if (n > AUDIO_SCOPE) n = AUDIO_SCOPE;
+  taskENTER_CRITICAL(&gFrameMux);
+  for (int i = 0; i < n; i++) out[i] = gScope[i];
   taskEXIT_CRITICAL(&gFrameMux);
 }
 
@@ -253,13 +264,20 @@ static void audioTask(void* pv) {
       continue;
     }
 
-    // Mono mix + DC removal (one-pole HPF) + window into the FFT buffer.
+    // Mono mix + DC removal (one-pole HPF) + window into the FFT buffer. The un-windowed
+    // dcOut is also captured for the oscilloscope, scaled by the PREVIOUS hop's auto-gain
+    // envelope so quiet rooms still fill the trace; committed to gScope below with gFrame.
+    static_assert(AUD_HOP == AUDIO_SCOPE, "scope buffer must match one DSP hop");
+    int8_t sc[AUDIO_SCOPE];
+    const float scInv = 127.0f / (envMax * 4.0f + 0.02f);
     float rms = 0;
     for (int i = 0; i < AUD_HOP; i++) {
       const float s = ((int32_t)raw[i * 2] + raw[i * 2 + 1]) * (0.5f / 32768.0f);
       dcOut = s - dcPrev + 0.995f * dcOut;
       dcPrev = s;
       rms += dcOut * dcOut;
+      float sv = dcOut * scInv;
+      sc[i] = (int8_t)(sv > 127 ? 127 : sv < -127 ? -127 : sv);
       fftRe[i] = dcOut * hann[i];
       fftIm[i] = 0;
     }
@@ -302,6 +320,7 @@ static void audioTask(void* pv) {
     const bool latch = gBeatLatch || beat;
     gFrame = f;
     gBeatLatch = latch;
+    for (int i = 0; i < AUDIO_SCOPE; i++) gScope[i] = sc[i];
     taskEXIT_CRITICAL(&gFrameMux);
 
     // Self-stop: no consumer for 3 s ends capture entirely (mic data stops flowing).
@@ -314,6 +333,7 @@ static void audioTask(void* pv) {
   // (see audioAcquireI2S); only the reading/DSP stops here.
   taskENTER_CRITICAL(&gFrameMux);
   gFrame = AudioFrame{};
+  for (int i = 0; i < AUDIO_SCOPE; i++) gScope[i] = 0;
   gBeatLatch = false;
   taskEXIT_CRITICAL(&gFrameMux);
   gAudioRun = false;

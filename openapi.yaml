@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Matrix Portal Gateway API
-  version: "3.9"
+  version: "3.10"
   description: |
     REST API for the **Matrix Portal Gateway** firmware, running on a
     Waveshare ESP32-S3-RGB-Matrix driver board. It emulates a wall of split-flap modules on a
@@ -467,6 +467,86 @@ paths:
                   rawRH:     { type: number, description: "relative humidity % before compensation (v3.7)" }
                   offsetC:   { type: number, description: "the applied temperature offset, °C (v3.7)" }
                   ageMs:     { type: integer, description: "ms since the reading was taken" }
+  /api/sd:
+    get:
+      tags: [Status]
+      summary: microSD card presence + capacity (v3.10, `sd` token)
+      description: |
+        The onboard TF card slot (SD_MMC 1-bit). Present only when a card is mounted at boot
+        (advertised as the `sd` capability token; the same info also rides `GET /api/status`
+        under `sd`). Always answers 200; `present:false` when no card is fitted.
+      responses:
+        "200":
+          description: Card presence and capacity
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  present: { type: boolean }
+                  type:    { type: string, description: "MMC | SDSC | SDHC" }
+                  sizeMB:  { type: integer }
+                  usedMB:  { type: integer }
+                  freeMB:  { type: integer }
+  /api/sd/list:
+    get:
+      tags: [Status]
+      summary: List a directory on the SD card (v3.10)
+      parameters:
+        - { name: path, in: query, schema: { type: string, default: "/" }, description: "card-absolute path; must start with /, no .." }
+      responses:
+        "200":
+          description: One directory level
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name: { type: string }
+                    dir:  { type: boolean }
+                    size: { type: integer, description: "bytes (0 for directories)" }
+        "400": { description: Bad path }
+        "404": { description: Not a directory }
+        "503": { description: No card mounted }
+  /api/sd/get:
+    get:
+      tags: [Status]
+      summary: Download a file from the SD card (v3.10)
+      parameters:
+        - { name: path, in: query, required: true, schema: { type: string }, description: "card-absolute path" }
+      responses:
+        "200": { description: Raw file bytes, application/octet-stream }
+        "400": { description: Bad path / is a directory }
+        "404": { description: Not found }
+        "503": { description: No card mounted }
+  /api/sd/put:
+    put:
+      tags: [Status]
+      summary: Upload a file to the SD card (v3.10)
+      parameters:
+        - { name: path, in: query, required: true, schema: { type: string }, description: "card-absolute path; overwrites" }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: { schema: { type: string, format: binary } }
+      responses:
+        "200": { description: "{ok:true, bytes:N}" }
+        "400": { description: Bad path / truncated body }
+        "503": { description: No card mounted }
+        "507": { description: Write failed }
+  /api/sd/delete:
+    delete:
+      tags: [Status]
+      summary: Delete a file from the SD card (v3.10)
+      parameters:
+        - { name: path, in: query, required: true, schema: { type: string }, description: "card-absolute path (files only)" }
+      responses:
+        "200": { description: Deleted }
+        "400": { description: Bad path / is a directory }
+        "404": { description: Not found }
+        "503": { description: No card mounted }
   /api/sound:
     get:
       tags: [Status]
@@ -1709,7 +1789,7 @@ paths:
             schema:
               type: object
               properties:
-                type:    { type: string, enum: [plasma, fire, matrix, fliporama, clock, life, spectrum, soundwall, maze, ripple, none] }
+                type:    { type: string, enum: [plasma, fire, matrix, fliporama, clock, life, spectrum, soundwall, maze, ripple, scope, none] }
                 speed:   { type: integer, minimum: 1, maximum: 10 }
                 hue:     { type: integer, minimum: 0, maximum: 255, description: "Base hue override (0–255 colour wheel). Omit to keep the effect's own palette." }
                 density: { type: integer, minimum: 1, maximum: 100, description: "Density override (1–100), e.g. streak count or seeding. Omit for the effect default." }
@@ -2056,14 +2136,9 @@ paths:
                               max:     { type: integer, description: "int params only" }
                               default: { description: "Absent = omitting the param keeps the effect's own built-in look" }
                               label:   { type: string, example: Audio reactive }
-                  effectParams:
-                    type: array
-                    description: "Optional per-start effect parameters `POST /api/canvas/effect` accepts beyond `speed`."
-                    items: { type: string }
-                    example: ["hue", "density"]
                   features:
                     type: array
-                    description: "Capability tokens a client checks instead of sniffing the firmware version. 'canvas', 'effects' and 'ticker' appear on the Matrix gateway only. 'brightness' (v2.2) says the panel brightness is live-settable via GET/POST /api/display/brightness (also persisted as panelBright in POST /api/config/settings, 1..255, applied on the next frame)."
+                    description: "Capability tokens a client checks instead of sniffing the firmware version. 'canvas', 'effects' and 'ticker' appear on the Matrix gateway only. 'brightness' (v2.2) says the panel brightness is live-settable via GET/POST /api/display/brightness (also persisted as panelBright in POST /api/config/settings, 1..255, applied on the next frame). Hardware-conditional tokens appear only when the peripheral is present: 'audio' (mics), 'sound' (speaker), 'environment' (SHTC3), 'sd' (mounted microSD card, v3.10)."
                     items: { type: string }
                     example: ["cells","colors","index","lowercase","pictographs","quiet","ota","canvas","effects","ticker","brightness","events"]
 

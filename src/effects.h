@@ -20,7 +20,8 @@
   X(SPECTRUM,  "spectrum")  \
   X(SOUNDWALL, "soundwall") \
   X(MAZE,      "maze")      \
-  X(RIPPLE,    "ripple")
+  X(RIPPLE,    "ripple")    \
+  X(SCOPE,     "scope")
 
 enum EffectType : uint8_t {
   EFFECT_NONE = 0,

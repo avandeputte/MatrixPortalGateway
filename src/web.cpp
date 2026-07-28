@@ -8,6 +8,8 @@
 #include "audio.h"           // capabilities audio token + effect "audio" param (v3.4)
 #include "sound.h"           // POST /api/sound + the sound capability token (v3.6)
 #include "sensor.h"          // env fields in status + the environment token (v3.7)
+#include "sdcard.h"          // microSD info + the sd token (v3.10)
+#include "SD_MMC.h"          // /api/sd/* file operations
 #include <fcntl.h>            // non-blocking mode for the canvas stream socket (v3.2)
 #include <lwip/sockets.h>    // setsockopt on the stream socket at close (v3.3)
 
@@ -810,10 +812,11 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
     snprintf(ft, sizeof(ft),
              "\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
              "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\","
-             "\"effectDefs\"%s%s%s]}",
+             "\"effectDefs\"%s%s%s%s]}",
              audioAvailable() ? ",\"audio\"" : "",
              soundAvailable() ? ",\"sound\"" : "",
-             sensorAvailable() ? ",\"environment\"" : "");
+             sensorAvailable() ? ",\"environment\"" : "",
+             sdReady() ? ",\"sd\"" : "");
     capPut(ft); }
   capFlush();
   return httpxChunkEnd(r);
@@ -854,6 +857,12 @@ size_t statusJson(char* outBuf, size_t outCap) {
              tcal, rhc, (unsigned long)(eAge / 1000));
   }
   else snprintf(envf, sizeof(envf), "{\"ok\":false}");
+  // microSD (v3.10): card presence + capacity, or {"ok":false} when no card is fitted.
+  char sdf[96]; uint64_t sdSz, sdUsed; const char* sdType;
+  if (sdInfo(sdSz, sdUsed, sdType))
+    snprintf(sdf, sizeof(sdf), "{\"ok\":true,\"type\":\"%s\",\"sizeMB\":%llu,\"usedMB\":%llu}",
+             sdType, sdSz, sdUsed);
+  else snprintf(sdf, sizeof(sdf), "{\"ok\":false}");
   size_t n = (size_t)snprintf(outBuf, outCap,
     "{\"uptime\":%lu,\"tx\":%lu,"
     "\"wifi\":%s,\"ip\":\"%d.%d.%d.%d\",\"apip\":\"%d.%d.%d.%d\","
@@ -862,7 +871,7 @@ size_t statusJson(char* outBuf, size_t outCap) {
     "\"panel\":{\"ok\":%s,\"w\":%u,\"h\":%u,\"cols\":%u,\"rows\":%u,"
     "\"cellW\":%u,\"cellH\":%u,\"depth\":%u,\"font\":\"%s\",\"vmods\":%d},"
     "\"time\":\"%s\",\"ntpSynced\":%s,\"quiet\":%s,"
-    "\"companion\":{\"url\":\"%s\",\"status\":\"%s\",\"age\":%ld},\"env\":%s}",
+    "\"companion\":{\"url\":\"%s\",\"status\":\"%s\",\"age\":%ld},\"env\":%s,\"sd\":%s}",
     millis()/1000, txCount,
     (WiFi.status()==WL_CONNECTED)?"true":"false",
     lip[0],lip[1],lip[2],lip[3],
@@ -876,13 +885,13 @@ size_t statusJson(char* outBuf, size_t outCap) {
     rtcBuf,
     ntpSynced?"true":"false",
     gQuietTime?"true":"false",
-    cfg.companionUrl, gCompanionStatus, compAge, envf);
+    cfg.companionUrl, gCompanionStatus, compAge, envf, sdf);
   return n < outCap ? n : outCap - 1;
 }
 
 // GET /api/status
 static esp_err_t handleApiStatus(httpd_req_t* r) {
-  char out[900];
+  char out[1000];
   statusJson(out, sizeof(out));
   return httpxSend(r, 200, "application/json", out);
 }
@@ -1601,6 +1610,108 @@ static esp_err_t handleApiEnvironment(httpd_req_t* r) {
   else
     snprintf(buf, sizeof(buf), "{\"available\":%s}", sensorAvailable() ? "true" : "false");
   return httpxSend(r, 200, "application/json", buf);
+}
+
+/* ---- microSD (v3.10): browse / download / upload / delete the TF card -------------
+   All paths are card-absolute (must start with "/"); ".." is rejected so a request can
+   never escape the card root. Every endpoint 503s when no card is mounted. */
+static bool sdPathOk(const String& p) {
+  if (p.length() == 0 || p[0] != '/') return false;
+  if (p.indexOf("..") >= 0) return false;
+  if (p.length() > 250) return false;
+  return true;
+}
+
+// GET /api/sd -- card presence + capacity.
+static esp_err_t handleApiSd(httpd_req_t* r) {
+  uint64_t sz = 0, used = 0; const char* type = "none";
+  char buf[160];
+  if (sdInfo(sz, used, type))
+    snprintf(buf, sizeof(buf),
+             "{\"present\":true,\"type\":\"%s\",\"sizeMB\":%llu,\"usedMB\":%llu,\"freeMB\":%llu}",
+             type, sz, used, sz > used ? sz - used : 0);
+  else
+    snprintf(buf, sizeof(buf), "{\"present\":false}");
+  return httpxSend(r, 200, "application/json", buf);
+}
+
+// GET /api/sd/list?path=/ -- one directory level as a JSON array of {name,dir,size}.
+static esp_err_t handleApiSdList(httpd_req_t* r) {
+  if (!sdReady()) return httpxErr(r, 503, "No SD card");
+  String path = httpxArg(r, "path"); if (path.length() == 0) path = "/";
+  if (!sdPathOk(path)) return httpxErr(r, 400, "Bad path");
+  File dir = SD_MMC.open(path);
+  if (!dir || !dir.isDirectory()) { if (dir) dir.close(); return httpxErr(r, 404, "Not a directory"); }
+  httpd_resp_set_type(r, "application/json");
+  httpxChunkStr(r, "[");
+  bool first = true;
+  for (File e = dir.openNextFile(); e; e = dir.openNextFile()) {
+    char row[320];
+    const char* nm = e.name();                       // basename on SD_MMC
+    snprintf(row, sizeof(row), "%s{\"name\":\"%s\",\"dir\":%s,\"size\":%u}",
+             first ? "" : ",", nm, e.isDirectory() ? "true" : "false", (unsigned)e.size());
+    httpxChunkStr(r, row);
+    first = false;
+    e.close();
+    wdgWebMs = millis();
+  }
+  dir.close();
+  httpxChunkStr(r, "]");
+  return httpxChunkEnd(r);
+}
+
+// GET /api/sd/get?path=/dir/file -- stream a file back as raw bytes.
+static esp_err_t handleApiSdGet(httpd_req_t* r) {
+  if (!sdReady()) return httpxErr(r, 503, "No SD card");
+  String path = httpxArg(r, "path");
+  if (!sdPathOk(path)) return httpxErr(r, 400, "Bad path");
+  File f = SD_MMC.open(path, "r");
+  if (!f) return httpxErr(r, 404, "Not found");
+  if (f.isDirectory()) { f.close(); return httpxErr(r, 400, "Is a directory"); }
+  httpd_resp_set_hdr(r, "Cache-Control", "no-store");
+  httpd_resp_set_type(r, "application/octet-stream");
+  while (size_t got = f.read(httpxBuf, sizeof(httpxBuf))) {
+    httpxChunk(r, (const char*)httpxBuf, got);
+    wdgWebMs = millis();
+  }
+  f.close();
+  return httpxChunkEnd(r);
+}
+
+// PUT /api/sd/put?path=/dir/file -- write the raw body to the card (overwrites).
+static esp_err_t handleApiSdPut(httpd_req_t* r) {
+  if (!sdReady()) return httpxErr(r, 503, "No SD card");
+  String path = httpxArg(r, "path");
+  if (!sdPathOk(path)) return httpxErr(r, 400, "Bad path");
+  const size_t len = r->content_len;
+  File f = SD_MMC.open(path, "w");
+  if (!f) return httpxErr(r, 507, "Open for write failed");
+  size_t recvd = 0;
+  while (recvd < len) {
+    int n = httpxRecv(r, (char*)httpxBuf, min(len - recvd, (size_t)sizeof(httpxBuf)));
+    if (n <= 0) { f.close(); return httpxErr(r, 400, "Truncated body"); }
+    if (f.write(httpxBuf, (size_t)n) != (size_t)n) { f.close(); return httpxErr(r, 507, "Write failed"); }
+    recvd += (size_t)n;
+    wdgWebMs = millis();
+  }
+  f.close();
+  char out[64];
+  snprintf(out, sizeof(out), "{\"ok\":true,\"bytes\":%u}", (unsigned)recvd);
+  return httpxSend(r, 200, "application/json", out);
+}
+
+// DELETE /api/sd/delete?path=/dir/file -- remove a file (not directories).
+static esp_err_t handleApiSdDelete(httpd_req_t* r) {
+  if (!sdReady()) return httpxErr(r, 503, "No SD card");
+  String path = httpxArg(r, "path");
+  if (!sdPathOk(path)) return httpxErr(r, 400, "Bad path");
+  if (!SD_MMC.exists(path)) return httpxErr(r, 404, "Not found");
+  File f = SD_MMC.open(path, "r");
+  const bool isDir = f && f.isDirectory();
+  if (f) f.close();
+  if (isDir) return httpxErr(r, 400, "Is a directory");
+  if (!SD_MMC.remove(path)) return httpxErr(r, 507, "Delete failed");
+  return httpxSend(r, 200, "application/json", "{\"ok\":true}");
 }
 
 // GET /api/canvas/audio -- microphone frontend state (v3.4 diagnostics + discovery):
@@ -3672,6 +3783,11 @@ void webInit() {
   httpxOn("/api/canvas/stream",      HTTP_GET,  handleApiCanvasStreamGet);
   httpxOn("/api/canvas/audio",       HTTP_GET,  handleApiCanvasAudio);
   httpxOn("/api/environment",        HTTP_GET,  handleApiEnvironment);
+  httpxOn("/api/sd",                 HTTP_GET,    handleApiSd);
+  httpxOn("/api/sd/list",            HTTP_GET,    handleApiSdList);
+  httpxOn("/api/sd/get",             HTTP_GET,    handleApiSdGet);
+  httpxOn("/api/sd/put",             HTTP_PUT,    handleApiSdPut);
+  httpxOn("/api/sd/delete",          HTTP_DELETE, handleApiSdDelete);
   httpxOn("/api/sound",              HTTP_GET,  handleApiSound);
   httpxOn("/api/sound",              HTTP_POST, handleApiSound);
   httpxOn("/openapi.yaml",           HTTP_GET,  handleOpenapiSpec);

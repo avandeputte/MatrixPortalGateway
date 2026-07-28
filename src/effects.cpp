@@ -47,6 +47,12 @@ static uint32_t fxTick  = 0;              // raw frame counter, for gating the s
 static uint8_t* fxBuf = nullptr;
 static int      fxCap = 0;
 
+// Row-blit scratch (v3.10): the full-screen effects (plasma, fire) touch every pixel every
+// frame. Assembling one RGB888 row and handing it to panelBlitRow888 -- the fill/blit fast
+// path, one quantise + one word-loop per bitplane -- replaces W*H branchy panelPixel calls
+// (~4-6x faster per the panel driver notes), which buys headroom for the audio effects.
+static uint8_t fxRow[PANEL_MAX_W * 3];
+
 // Matrix rain: a falling head per column, position in 1/16-row fixed point.
 static int32_t  mHead[FX_MAXW];
 static uint8_t  mSpeed[FX_MAXW];          // base fall rate, 1/16 rows/frame
@@ -148,6 +154,7 @@ static const uint8_t P_LIFE[]    = { EPI_SPEED, EPI_HUE, EPI_DENSITY };
 static const uint8_t P_SPECT[]   = { EPI_HUE };
 static const uint8_t P_MAZE[]    = { EPI_SPEED, EPI_HUE };
 static const uint8_t P_RIPPLE[]  = { EPI_SPEED, EPI_HUE };
+static const uint8_t P_SCOPE[]   = { EPI_HUE };
 static const uint8_t P_NONE_[1]  = { 0 };                  // zero-length arrays are not C++
 
 struct EffectDefRow { uint8_t id; const char* title; const uint8_t* p; uint8_t np; };
@@ -162,6 +169,7 @@ static const EffectDefRow DEFS[] = {
   { EFFECT_SOUNDWALL, "Soundwall",   P_NONE_,  0 },
   { EFFECT_MAZE,      "Maze",        P_MAZE,   2 },
   { EFFECT_RIPPLE,    "Beat Ripples",P_RIPPLE, 2 },
+  { EFFECT_SCOPE,     "Oscilloscope",P_SCOPE,  1 },
 };
 // Registering an effect in EFFECT_TABLE without a def row (or vice versa) must not
 // compile: the def list is how clients discover the effect's options. EFFECT_COUNT
@@ -221,7 +229,7 @@ const char* effectParamsUnionJson() {
 }
 
 const char* effectListJson() {
-  static char buf[96];
+  static char buf[160];
   if (!buf[0]) {
     int n = 0; buf[n++] = '[';
     for (int i = 0; i < EFFECT_COUNT; i++)
@@ -814,6 +822,7 @@ void effectReset(uint8_t type) {
     case EFFECT_SOUNDWALL: swLastLoudMs = 0; audioMaybeStart(); break;
     case EFFECT_MAZE:      if (fxBuf) mzInit(); break;
     case EFFECT_RIPPLE:    memset(ripPool, 0, sizeof(ripPool)); audioMaybeStart(); break;
+    case EFFECT_SCOPE:     audioMaybeStart(); break;
     default: break;
   }
 }
@@ -822,7 +831,7 @@ static void renderPlasma() {
   const int W = gPanel.panelW, H = gPanel.panelH;
   const uint32_t t = fxFrame;
   const int hue = gEffectHue;             // one volatile read per frame, not per pixel
-  for (int y = 0; y < H; y++)
+  for (int y = 0; y < H; y++) {
     for (int x = 0; x < W; x++) {
       uint8_t a = sinT[(uint8_t)(x * 2 + t)];
       uint8_t b = sinT[(uint8_t)(y * 3 - t)];
@@ -830,8 +839,10 @@ static void renderPlasma() {
       uint8_t d = sinT[(uint8_t)((x - y) + t)];
       uint8_t idx = (uint8_t)(((int)a + b + c + d) >> 2);
       if (hue >= 0) idx = (uint8_t)(idx + hue);                 // tint: rotate the palette
-      panelPixel(x, y, plasmaPal[idx][0], plasmaPal[idx][1], plasmaPal[idx][2]);
+      fxRow[x * 3] = plasmaPal[idx][0]; fxRow[x * 3 + 1] = plasmaPal[idx][1]; fxRow[x * 3 + 2] = plasmaPal[idx][2];
     }
+    panelBlitRow888(0, y, W, fxRow);
+  }
   panelShow();
 }
 
@@ -862,11 +873,13 @@ static void renderFire() {
       int v = pixel - decay;
       fxBuf[(y - 1) * W + nx] = (uint8_t)(v < 0 ? 0 : v);
     }
-  for (int y = 0; y < H; y++)
+  for (int y = 0; y < H; y++) {
     for (int x = 0; x < W; x++) {
       uint8_t h = fxBuf[y * W + x];
-      panelPixel(x, y, firePal[h][0], firePal[h][1], firePal[h][2]);
+      fxRow[x * 3] = firePal[h][0]; fxRow[x * 3 + 1] = firePal[h][1]; fxRow[x * 3 + 2] = firePal[h][2];
     }
+    panelBlitRow888(0, y, W, fxRow);
+  }
   panelShow();
 }
 
@@ -938,6 +951,33 @@ static void renderSpectrum() {
   panelShow();
 }
 
+/* ---- oscilloscope (v3.10): time-domain mic waveform ---- */
+static int8_t scopeBuf[AUDIO_SCOPE];
+static void renderScope() {
+  const int W = gPanel.panelW, H = gPanel.panelH;
+  audioReadScope(scopeBuf, AUDIO_SCOPE);
+  panelClear();
+  const int mid = H / 2;
+  panelFillRect(0, mid, W, 1, 0, 26, 26);          // dim centre reference line
+  // Trace colour: hue param, else a classic phosphor green. A beat flashes it white-hot.
+  uint8_t r, g, b;
+  if (gEffectHue >= 0) hsv((uint8_t)gEffectHue, r, g, b); else { r = 0; g = 255; b = 140; }
+  if (fxAudOn && fxAud.beat) { r = 220; g = 255; b = 220; }
+  const int amp = (H / 2) - 1;
+  int prevY = mid;
+  for (int x = 0; x < W; x++) {
+    const int si = x * AUDIO_SCOPE / W;             // resample the 128-pt hop across the panel
+    int y = mid - (int)scopeBuf[si] * amp / 127;
+    if (y < 0) y = 0; else if (y >= H) y = H - 1;
+    // connect to the previous column so the trace is continuous, not dotted
+    int y0 = (x == 0) ? y : (prevY < y ? prevY : y);
+    int y1 = (x == 0) ? y : (prevY < y ? y : prevY);
+    for (int yy = y0; yy <= y1; yy++) panelPixel(x, yy, r, g, b);
+    prevY = y;
+  }
+  panelShow();
+}
+
 /* ---- soundwall (v3.4): the flap wall itself is the visual ---- */
 // Runs on taskDisplay every display tick while gEffect == EFFECT_SOUNDWALL, with the
 // NORMAL wall renderer still active: this only pokes vmodule targets and lets the
@@ -979,7 +1019,7 @@ void effectSoundwallTick() {
 
 void effectRender(uint8_t type) {
   if (!gPanel.ready) return;
-  fxAudOn = (type == EFFECT_SPECTRUM) || (type == EFFECT_RIPPLE) ||
+  fxAudOn = (type == EFFECT_SPECTRUM) || (type == EFFECT_RIPPLE) || (type == EFFECT_SCOPE) ||
             (gEffectAudioMod && audioAvailable());
   if (fxAudOn) audioRead(fxAud); else fxAud = AudioFrame{};
   fxFrame += gEffectSpeed;
@@ -1002,6 +1042,7 @@ void effectRender(uint8_t type) {
     case EFFECT_SPECTRUM:  renderSpectrum();  break;
     case EFFECT_MAZE:      renderMaze();      break;
     case EFFECT_RIPPLE:    renderRipple();    break;
+    case EFFECT_SCOPE:     renderScope();     break;
     // EFFECT_SOUNDWALL never reaches effectRender: taskDisplay routes it to
     // effectSoundwallTick() and keeps the wall renderer running.
     default: break;

@@ -1,5 +1,30 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.10.0 — 2026-07-28
+
+### Added — microSD, an oscilloscope effect, and faster effects
+
+- **microSD support.** The onboard TF card slot is now mounted at boot (SD_MMC 1-bit on the
+  Waveshare-documented pins: CLK=1, CMD=44, D0=17). Browse, download, upload and delete via
+  `GET /api/sd`, `GET /api/sd/list`, `GET /api/sd/get`, `PUT /api/sd/put`,
+  `DELETE /api/sd/delete` — paths are card-absolute and `..`-guarded. Card size/usage shows
+  on the Status page and rides `GET /api/status` under `sd`; advertised as the `sd`
+  capability token (present only when a card is mounted). Absent-card and mount failures are
+  handled gracefully — endpoints answer 503, exactly like the speaker/sensor when absent.
+- **Oscilloscope effect** (`scope`). A live time-domain trace of the mic waveform: the
+  DC-removed mono hop, auto-gain-scaled so quiet rooms still fill the trace, drawn as a
+  continuous phosphor-green line over a dim centre reference, flashing white-hot on a beat.
+  `hue` recolours it. Rounds out the audio-reactive set (spectrum / soundwall / ripple).
+- **Row-buffer blitters for the effects path.** Plasma and fire — the two effects that touch
+  every pixel every frame — now assemble one RGB888 row and hand it to the panel's fast
+  blit path (one quantise + one word-loop per bitplane) instead of `W×H` per-pixel calls.
+  ~4–6× faster on those renders per the driver notes, which buys headroom for the audio
+  effects. Output is pixel-identical (verified: plasma 100 % fill, fire unchanged).
+
+All three verified on-device: plasma/fire via readback, the oscilloscope tracing a played
+tone (centre line across all columns, deflection in 203/256 columns), and the SD REST
+surface routing correctly (info 200, file ops 503 with no card fitted).
+
 ## v3.9.0 — 2026-07-28
 
 ### Added — the last of the canvas/ops surface

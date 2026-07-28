@@ -26,6 +26,7 @@
 #include <driver/i2s_std.h>   // i2s_chan_handle_t (the shared duplex port, below)
 
 #define AUDIO_BANDS 16
+#define AUDIO_SCOPE 128        // time-domain waveform samples exposed for the oscilloscope
 
 struct AudioFrame {
   float    level;               // 0..1 overall loudness (auto-gained RMS)
@@ -40,6 +41,7 @@ void audioInit();                    // probe + configure the ES7210 (setup() on
 bool audioAvailable();               // ES7210 found and configured
 void audioMaybeStart();              // a consumer exists: ensure capture is running
 void audioRead(AudioFrame& out);     // latest features (zeroed when not capturing)
+void audioReadScope(int8_t* out, int n);  // latest DC-removed mono waveform, auto-gain-scaled to ±127
 bool audioCapturing();               // I2S currently running (diagnostics)
 
 // The shared full-duplex I2S port (one wired clock set serves both codecs): sound.cpp
