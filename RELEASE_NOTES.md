@@ -11,6 +11,9 @@
   on the Status page and rides `GET /api/status` under `sd`; advertised as the `sd`
   capability token (present only when a card is mounted). Absent-card and mount failures are
   handled gracefully — endpoints answer 503, exactly like the speaker/sensor when absent.
+  The dashboard **Files tab** gains a microSD browser (appears only when a card is mounted):
+  capacity bar, directory navigation, per-file download/delete, and upload to the current
+  folder.
 - **Oscilloscope effect** (`scope`). A live time-domain trace of the mic waveform: the
   DC-removed mono hop, auto-gain-scaled so quiet rooms still fill the trace, drawn as a
   continuous phosphor-green line over a dim centre reference, flashing white-hot on a beat.
