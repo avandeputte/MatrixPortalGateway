@@ -1,5 +1,33 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.12.0 — 2026-07-29
+
+### Added — binary ops format 2: full parity with the JSON surface
+
+The binary encoding (`POST /api/canvas/opsb` + stream record `0x06`) gains everything
+that was JSON-only, advertised as `canvas.opsBin: 2`. **Purely additive** — format-1
+batches decode byte-identically (`ORIGIN` keeps its exact old meaning as a matrix
+reset + pure translate); a client sends the new opcodes only when `opsBin ≥ 2`.
+
+- **Transform stack**: `0x16` SAVE / `0x17` RESTORE / `0x18` TRANSLATE / `0x19` SCALE
+  (u16 8.8 fixed-point) / `0x1A` ROTATE. Every coordinate now runs through the same
+  affine matrix as the JSON decoder — vertex ops rotate fully, box fills anchor+scale.
+- **Offscreen layers**: `0x1B` LAYER / `0x1C` COMPOSITE (x y mode alpha) — group opacity.
+- **Macros**: `0x1D` DEFINE (id 0–7 + length-prefixed embedded binary ops) / `0x1E` CALL
+  (scoped replay under a pushed translate, nestable to depth 4) — stamp a sprite-like
+  shape at game rate without resending its ops.
+- **`0x1F` BEZIER** (quadratic/cubic, aa flag) and **`0x20` AALINE**; additive `aa` flag
+  bits on CIRCLE (bit 1) and POLY (bit 2).
+- Cleanup: the decoders now share one transform implementation (the legacy binary
+  translate-only globals are gone).
+
+Also fixes the device-served `/openapi.yaml` being invalid YAML since v3.11.1 (an
+unquoted `?` in the mkdir endpoint description broke parsers).
+
+Verified on-device via readback: rotated binary line renders vertical (21/21 px),
+save/restore isolation, 2× scale, layer composite at α128, macro stamping, bezier +
+AA line, the circle aa flag, and format-1 ORIGIN behaviour unchanged.
+
 ## v3.11.1 — 2026-07-29
 
 ### Fixed — comprehensive-review sweep

@@ -780,7 +780,7 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
                     // with headroom and verified below.
     snprintf(cv, sizeof(cv),
              "\"canvas\":{\"formats\":[\"rgb888\",\"rgb565\",\"qoi\"],\"width\":%u,\"height\":%u,"
-             "\"rect\":true,\"rects\":true,\"stream\":true,\"opsBin\":1,\"anim\":true,\"ticker\":true,\"readback\":true,"
+             "\"rect\":true,\"rects\":true,\"stream\":true,\"opsBin\":2,\"anim\":true,\"ticker\":true,\"readback\":true,"
              "\"atlas\":{\"named\":true,\"persist\":true,\"maxSheets\":%u,"
              "\"maxBytes\":%u,\"maxSheetBytes\":%u},"
              "\"ops\":[\"clear\",\"pixel\",\"hline\",\"vline\",\"line\",\"rect\",\"circle\",\"ellipse\","
@@ -1381,7 +1381,7 @@ static void canvasLeave() { dispReturnToWall(); }              // hand the panel
    A malformed record aborts the stream (the panel keeps its last frame). */
 static bool canvasRectsApply(const uint8_t* body, size_t len, int* outDone);
 static int  canvasOpsRun(JsonArrayConst ops, bool* shownOut, int depth = 0);
-static int  canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* okOut);
+static int  canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* okOut, int depth = 0);
 
 static struct {
   httpd_req_t*  req  = nullptr;        // parked async request; non-null = stream open
@@ -2139,10 +2139,8 @@ static esp_err_t handleApiAnimList(httpd_req_t* r) {
 // POST /api/canvas/ops and the stream channel's ops record (v3.2). Caller must have
 // entered canvas mode (canvasEnter) first.
 /* ---- v3.5 ops helpers: thickness, arcs, filled polygons, textbox ------------------ */
-// Batch-scoped drawing state for the "origin" and "clip" ops. Reset at every
-// canvasOpsRun entry AND exit so no other draw path can inherit them.
-static int  gOpsOx = 0, gOpsOy = 0;
-// Affine transform stack (v3.9, JSON ops): a 2x3 matrix [a b c d e f] with
+// Affine transform stack (v3.9; since opsBin v2 shared by BOTH the JSON and binary
+// decoders): a 2x3 matrix [a b c d e f] with
 // X = a*x + c*y + e, Y = b*x + d*y + f. save/restore push/pop; translate/scale/rotate
 // compose; origin resets to a pure translate (backward compatible). Point/line ops
 // transform every vertex (rotation works); box-anchored fills transform the anchor and
@@ -2465,38 +2463,62 @@ static int alignIdx(const char* a, const char* mid) {   // "left/top"=0, mid=1, 
      0x11 SPRITE    i x y flags                  (flags: bit0 flipH, bit1 flipV,
                                                   bits2-3 rot/90, bits4-5 scale-1)
      0x12 SCROLL    dx dy rgb
-     0x13 SHOW                                                                      */
+     0x13 SHOW
+     0x14 BLEND     mode                         0x15 ALPHA a         (both v3.8)
+   -- opsBin v2 (fw 3.12): full parity with the JSON transform/layer/macro surface.
+      All coordinates now run through the SAME affine transform as JSON ops (ORIGIN is
+      a matrix reset + translate, so v1 batches behave identically):
+     0x16 SAVE                                   0x17 RESTORE         (stack depth 8)
+     0x18 TRANSLATE x y                          (s16 pixels)
+     0x19 SCALE     sx sy                        (u16 8.8 fixed; sy 0 = uniform)
+     0x1A ROTATE    deg                          (s16 degrees, clockwise)
+     0x1B LAYER                                  0x1C COMPOSITE x y mode alpha
+     0x1D DEFINE    id len(u16) blob             (id 0-7; blob = embedded binary ops)
+     0x1E CALL      id x y                       (replay under a pushed translate;
+                                                  nestable to depth 4, state-scoped)
+     0x1F BEZIER    n t flags rgb n*(x y)        (n 3|4; flags bit0 = aa)
+     0x20 AALINE    x y x1 y1 rgb                (1 px anti-aliased)
+      Additive flag bits: CIRCLE flags bit1 = aa outline; POLY flags bit2 = aa
+      outline/polyline.                                                             */
 static inline int16_t bops16(const uint8_t* p) { return (int16_t)(((uint16_t)p[0] << 8) | p[1]); }
 
-static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* okOut) {
+// Binary macro slots (opsBin v2): borrowed pointers into the live request/stream buffer,
+// valid for the whole synchronous run, like the JSON macro table. Batch-scoped.
+static const uint8_t* gBinMacroPtr[8] = {};
+static uint16_t       gBinMacroLen[8] = {};
+static uint8_t        gBinAlpha       = 255;    // batch alpha (0x15); scoped across CALL
+
+static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* okOut, int depth) {
   int applied = 0; bool shown = false, ok = true;
-  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false; gOpsBlend = 0;
-  panelClearClip(); panelClearBlend();
-  uint8_t binAlpha = 255;                         // v3.8: batch alpha (0x15), applied per op
+  if (depth == 0) {                              // top-level batch: reset all batch-scoped state
+    gOpsClipOn = false; gOpsBlend = 0; gBinAlpha = 255; xfReset();
+    memset(gBinMacroPtr, 0, sizeof(gBinMacroPtr));
+    panelClearClip(); panelClearBlend(); panelLayerDiscard();
+  }
   size_t i = 0;
   #define BOPS_NEED(n) if (i + (n) > len) { ok = false; break; }
+  // Transformed point / size helpers: read s16 pairs through the shared affine matrix
+  // (identity + ORIGIN translate for v1 clients, so their batches decode unchanged).
+  #define BXY(o)  const int x = xfX(bops16(p+i+(o)), bops16(p+i+(o)+2)), \
+                            y = xfY(bops16(p+i+(o)), bops16(p+i+(o)+2))
   while (i < len) {
-    panelSetBlend((uint8_t)gOpsBlend, binAlpha);  // per op: batch mode + batch alpha
+    panelSetBlend((uint8_t)gOpsBlend, gBinAlpha); // per op: batch mode + batch alpha
     const uint8_t opb = p[i++];
     switch (opb) {
       case 0x01: { BOPS_NEED(3);
         panelFillRect(0, 0, gPanel.panelW, gPanel.panelH, p[i], p[i+1], p[i+2]); i += 3; break; }
-      case 0x02: { BOPS_NEED(7);
-        panelPixel(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy, p[i+4], p[i+5], p[i+6]);
-        i += 7; break; }
-      case 0x03: { BOPS_NEED(9);
-        panelHLine(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy, bops16(p+i+4),
-                   p[i+6], p[i+7], p[i+8]); i += 9; break; }
-      case 0x04: { BOPS_NEED(9);
-        panelVLine(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy, bops16(p+i+4),
-                   p[i+6], p[i+7], p[i+8]); i += 9; break; }
-      case 0x05: { BOPS_NEED(12);
-        canvasThickLine(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy,
-                        bops16(p+i+4) + gOpsOx, bops16(p+i+6) + gOpsOy,
+      case 0x02: { BOPS_NEED(7); BXY(0);
+        panelPixel(x, y, p[i+4], p[i+5], p[i+6]); i += 7; break; }
+      case 0x03: { BOPS_NEED(9); BXY(0);
+        panelHLine(x, y, xfW(bops16(p+i+4)), p[i+6], p[i+7], p[i+8]); i += 9; break; }
+      case 0x04: { BOPS_NEED(9); BXY(0);
+        panelVLine(x, y, xfH(bops16(p+i+4)), p[i+6], p[i+7], p[i+8]); i += 9; break; }
+      case 0x05: { BOPS_NEED(12); BXY(0);
+        canvasThickLine(x, y,
+                        xfX(bops16(p+i+4), bops16(p+i+6)), xfY(bops16(p+i+4), bops16(p+i+6)),
                         p[i+8], p[i+9], p[i+10], p[i+11]); i += 12; break; }
-      case 0x06: { BOPS_NEED(13);
-        const int x = bops16(p+i) + gOpsOx, y = bops16(p+i+2) + gOpsOy;
-        const int w = bops16(p+i+4), h = bops16(p+i+6);
+      case 0x06: { BOPS_NEED(13); BXY(0);
+        const int w = xfW(bops16(p+i+4)), h = xfH(bops16(p+i+6));
         const uint8_t fl = p[i+8], t = p[i+9] ? p[i+9] : 1;
         if (fl & 1) panelFillRect(x, y, w, h, p[i+10], p[i+11], p[i+12]);
         else {
@@ -2506,36 +2528,34 @@ static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* o
           panelFillRect(x + w - t, y, t, h, p[i+10], p[i+11], p[i+12]);
         }
         i += 13; break; }
-      case 0x07: { BOPS_NEED(11);
-        const int x = bops16(p+i) + gOpsOx, y = bops16(p+i+2) + gOpsOy, r = bops16(p+i+4);
+      case 0x07: { BOPS_NEED(11); BXY(0);
+        const int r = xfR(bops16(p+i+4));
         const uint8_t fl = p[i+6], t = p[i+7] ? p[i+7] : 1;
-        if (!(fl & 1) && t > 1) canvasArc(x, y, r, t, 0, 360, false, p[i+8], p[i+9], p[i+10]);
+        if ((fl & 2) && !(fl & 1)) canvasAACircle(x, y, r, p[i+8], p[i+9], p[i+10]);   // aa (v2)
+        else if (!(fl & 1) && t > 1) canvasArc(x, y, r, t, 0, 360, false, p[i+8], p[i+9], p[i+10]);
         else panelCircle(x, y, r, fl & 1, p[i+8], p[i+9], p[i+10]);
         i += 11; break; }
-      case 0x08: { BOPS_NEED(13);
-        const int x = bops16(p+i) + gOpsOx, y = bops16(p+i+2) + gOpsOy;
-        const int rx = bops16(p+i+4), ry = bops16(p+i+6);
+      case 0x08: { BOPS_NEED(13); BXY(0);
+        const int rx = xfW(bops16(p+i+4)), ry = xfH(bops16(p+i+6));
         const uint8_t fl = p[i+8], t = p[i+9] ? p[i+9] : 1;
         for (int k = 0; k < ((fl & 1) ? 1 : t); k++)
           panelEllipse(x, y, rx - k, ry - k, fl & 1, p[i+10], p[i+11], p[i+12]);
         i += 13; break; }
       case 0x09: { BOPS_NEED(16);
-        panelTriangle(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy,
-                      bops16(p+i+4) + gOpsOx, bops16(p+i+6) + gOpsOy,
-                      bops16(p+i+8) + gOpsOx, bops16(p+i+10) + gOpsOy,
+        panelTriangle(xfX(bops16(p+i),    bops16(p+i+2)),  xfY(bops16(p+i),    bops16(p+i+2)),
+                      xfX(bops16(p+i+4),  bops16(p+i+6)),  xfY(bops16(p+i+4),  bops16(p+i+6)),
+                      xfX(bops16(p+i+8),  bops16(p+i+10)), xfY(bops16(p+i+8),  bops16(p+i+10)),
                       p[i+12] & 1, p[i+13], p[i+14], p[i+15]); i += 16; break; }
-      case 0x0A: { BOPS_NEED(14);
-        panelRoundRect(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy,
-                       bops16(p+i+4), bops16(p+i+6), bops16(p+i+8),
+      case 0x0A: { BOPS_NEED(14); BXY(0);
+        panelRoundRect(x, y, xfW(bops16(p+i+4)), xfH(bops16(p+i+6)), xfR(bops16(p+i+8)),
                        p[i+10] & 1, p[i+11], p[i+12], p[i+13]); i += 14; break; }
-      case 0x0B: { BOPS_NEED(15);
+      case 0x0B: { BOPS_NEED(15); BXY(0);
         // dir byte: 0 vertical, 1 horizontal, 2 radial (v3.6; dithered like JSON)
-        canvasOpGradientEx(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy,
-                           bops16(p+i+4), bops16(p+i+6),
+        canvasOpGradientEx(x, y, xfW(bops16(p+i+4)), xfH(bops16(p+i+6)),
                            p[i+8], p[i+9], p[i+10], p[i+11], p[i+12], p[i+13],
                            p[i+14] <= 2 ? p[i+14] : 0, 0, true); i += 15; break; }
-      case 0x0C: { BOPS_NEED(15);
-        canvasArc(bops16(p+i) + gOpsOx, bops16(p+i+2) + gOpsOy, bops16(p+i+4), p[i+6],
+      case 0x0C: { BOPS_NEED(15); BXY(0);
+        canvasArc(x, y, xfR(bops16(p+i+4)), p[i+6],
                   bops16(p+i+7), bops16(p+i+9), p[i+11] & 1,
                   p[i+12], p[i+13], p[i+14]); i += 15; break; }
       case 0x0D: { BOPS_NEED(6);
@@ -2546,29 +2566,32 @@ static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* o
         int vx[16], vy[16];
         const int keep = n > 16 ? 16 : n;
         for (int k = 0; k < keep; k++) {
-          vx[k] = bops16(p + q + k * 4) + gOpsOx;
-          vy[k] = bops16(p + q + k * 4 + 2) + gOpsOy;
+          vx[k] = xfX(bops16(p + q + k * 4), bops16(p + q + k * 4 + 2));
+          vy[k] = xfY(bops16(p + q + k * 4), bops16(p + q + k * 4 + 2));
         }
+        const bool aa = (fl & 4) != 0;                                               // aa (v2)
         if (fl & 1) canvasPolyFillPts(vx, vy, keep, cr, cg, cb);
         else {
           for (int k = 1; k < keep; k++)
-            canvasThickLine(vx[k-1], vy[k-1], vx[k], vy[k], t, cr, cg, cb);
-          if ((fl & 2) && keep > 2)
-            canvasThickLine(vx[keep-1], vy[keep-1], vx[0], vy[0], t, cr, cg, cb);
+            if (aa) canvasAALine(vx[k-1], vy[k-1], vx[k], vy[k], cr, cg, cb);
+            else    canvasThickLine(vx[k-1], vy[k-1], vx[k], vy[k], t, cr, cg, cb);
+          if ((fl & 2) && keep > 2) {
+            if (aa) canvasAALine(vx[keep-1], vy[keep-1], vx[0], vy[0], cr, cg, cb);
+            else    canvasThickLine(vx[keep-1], vy[keep-1], vx[0], vy[0], t, cr, cg, cb);
+          }
         }
         i += 6 + (size_t)n * 4; break; }
-      case 0x0E: { BOPS_NEED(8);
-        const int x = bops16(p+i) + gOpsOx, y = bops16(p+i+2) + gOpsOy;
-        const int w = bops16(p+i+4), h = bops16(p+i+6);
+      case 0x0E: { BOPS_NEED(8); BXY(0);
+        const int w = xfW(bops16(p+i+4)), h = xfH(bops16(p+i+6));
         if (w > 0 && h > 0) {
           gOpsClip[0] = x; gOpsClip[1] = y; gOpsClip[2] = x + w; gOpsClip[3] = y + h;
           gOpsClipOn = true;
         } else gOpsClipOn = false;
         opsApplyClip(); i += 8; break; }
       case 0x0F: { BOPS_NEED(4);
-        gOpsOx = bops16(p+i); gOpsOy = bops16(p+i+2); i += 4; break; }
-      case 0x10: { BOPS_NEED(9);
-        const int x = bops16(p+i) + gOpsOx, y = bops16(p+i+2) + gOpsOy;
+        // v1 semantics preserved: reset to a pure translation (like the JSON "origin").
+        xfReset(); gM[4] = bops16(p+i); gM[5] = bops16(p+i+2); i += 4; break; }
+      case 0x10: { BOPS_NEED(9); BXY(0);
         const uint8_t size = p[i+4], fl = p[i+5];
         const uint8_t cr = p[i+6], cg = p[i+7], cb = p[i+8];
         size_t q = i + 9;
@@ -2599,9 +2622,9 @@ static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* o
         i = q + slen; break; }
       case 0x11: { BOPS_NEED(7);
         const uint16_t ti = (uint16_t)((p[i] << 8) | p[i+1]);
-        const int x = bops16(p+i+2) + gOpsOx, y = bops16(p+i+4) + gOpsOy;
+        const int sx2 = xfX(bops16(p+i+2), bops16(p+i+4)), sy2 = xfY(bops16(p+i+2), bops16(p+i+4));
         const uint8_t fl = p[i+6];
-        canvasAtlasBlitEx(canvasAtlasBoundHandle(), ti, x, y,
+        canvasAtlasBlitEx(canvasAtlasBoundHandle(), ti, sx2, sy2,
                           fl & 1, fl & 2, (uint16_t)(((fl >> 2) & 3) * 90),
                           (uint8_t)(((fl >> 4) & 3) + 1));
         i += 7; break; }
@@ -2609,15 +2632,80 @@ static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* o
         panelScroll(bops16(p+i), bops16(p+i+2), p[i+4], p[i+5], p[i+6]); i += 7; break; }
       case 0x13: panelShow(); shown = true; continue;
       case 0x14: BOPS_NEED(1); gOpsBlend = (p[i] <= 4) ? p[i] : 0; i += 1; break;   // blend mode (v3.8)
-      case 0x15: BOPS_NEED(1); binAlpha = p[i]; i += 1; break;                       // batch alpha (v3.8)
+      case 0x15: BOPS_NEED(1); gBinAlpha = p[i]; i += 1; break;                      // batch alpha (v3.8)
+      /* ---- opsBin v2 (fw 3.12): transform stack, layers, macros, bezier, aa ---- */
+      case 0x16: if (gMSp < 8) memcpy(gMStack[gMSp++], gM, sizeof(gM)); break;       // SAVE
+      case 0x17: if (gMSp > 0) memcpy(gM, gMStack[--gMSp], sizeof(gM)); break;       // RESTORE
+      case 0x18: { BOPS_NEED(4);                                                     // TRANSLATE
+        xfTranslate((float)bops16(p+i), (float)bops16(p+i+2)); i += 4; break; }
+      case 0x19: { BOPS_NEED(4);                                                     // SCALE 8.8
+        const float sx = (float)(((uint16_t)p[i] << 8) | p[i+1]) / 256.0f;
+        const uint16_t syRaw = ((uint16_t)p[i+2] << 8) | p[i+3];
+        xfScale(sx > 0 ? sx : 1.0f, syRaw ? (float)syRaw / 256.0f : (sx > 0 ? sx : 1.0f));
+        i += 4; break; }
+      case 0x1A: { BOPS_NEED(2); xfRotate((float)bops16(p+i)); i += 2; break; }      // ROTATE
+      case 0x1B: panelLayerBegin(); break;                                           // LAYER
+      case 0x1C: { BOPS_NEED(6);                                                     // COMPOSITE
+        panelLayerComposite(bops16(p+i), bops16(p+i+2),
+                            p[i+4] <= 4 ? p[i+4] : 0, p[i+5]); i += 6; break; }
+      case 0x1D: { BOPS_NEED(3);                                                     // DEFINE
+        const uint8_t id = p[i];
+        const uint16_t blen = (uint16_t)((p[i+1] << 8) | p[i+2]);
+        BOPS_NEED(3 + (size_t)blen);
+        if (id < 8) { gBinMacroPtr[id] = p + i + 3; gBinMacroLen[id] = blen; }
+        i += 3 + (size_t)blen; break; }
+      case 0x1E: { BOPS_NEED(5);                                                     // CALL
+        const uint8_t id = p[i];
+        const int cx2 = bops16(p+i+1), cy2 = bops16(p+i+3);
+        i += 5;
+        if (id < 8 && gBinMacroPtr[id] && depth < 4) {
+          // Scoped replay, exactly like the JSON "call": snapshot everything a macro
+          // body could mutate, translate, recurse, restore.
+          float savedM[6]; memcpy(savedM, gM, sizeof(gM));
+          const int  savedSp = gMSp, savedBlend = gOpsBlend;
+          const uint8_t savedAlpha = gBinAlpha;
+          const bool savedClipOn = gOpsClipOn;
+          int savedClip[4]; memcpy(savedClip, gOpsClip, sizeof(gOpsClip));
+          xfTranslate((float)cx2, (float)cy2);
+          bool subShown = false, subOk = true;
+          applied += canvasOpsRunBin(gBinMacroPtr[id], gBinMacroLen[id],
+                                     &subShown, &subOk, depth + 1);
+          if (subShown) shown = true;
+          if (!subOk) { ok = false; }
+          memcpy(gM, savedM, sizeof(gM));  gMSp = savedSp;
+          gOpsBlend = savedBlend;  gBinAlpha = savedAlpha;
+          memcpy(gOpsClip, savedClip, sizeof(gOpsClip));  gOpsClipOn = savedClipOn;
+          opsApplyClip();
+        }
+        break; }
+      case 0x1F: { BOPS_NEED(6);                                                     // BEZIER
+        const uint8_t n = p[i], t = p[i+1] ? p[i+1] : 1, fl = p[i+2];
+        const uint8_t cr = p[i+3], cg = p[i+4], cb = p[i+5];
+        size_t q = i + 6;
+        BOPS_NEED(6 + (size_t)n * 4);
+        if (n < 3 || n > 4) { ok = false; break; }
+        int bx[4], by[4];
+        for (int k = 0; k < n; k++) {
+          bx[k] = xfX(bops16(p + q + k * 4), bops16(p + q + k * 4 + 2));
+          by[k] = xfY(bops16(p + q + k * 4), bops16(p + q + k * 4 + 2));
+        }
+        canvasBezier(bx, by, n, t, (fl & 1) != 0, cr, cg, cb);
+        i += 6 + (size_t)n * 4; break; }
+      case 0x20: { BOPS_NEED(11); BXY(0);                                            // AALINE
+        canvasAALine(x, y, xfX(bops16(p+i+4), bops16(p+i+6)), xfY(bops16(p+i+4), bops16(p+i+6)),
+                     p[i+8], p[i+9], p[i+10]); i += 11; break; }
       default: ok = false; break;
     }
     if (!ok) break;
     applied++;                                    // counts like the JSON path (state ops too)
   }
   #undef BOPS_NEED
-  gOpsOx = 0; gOpsOy = 0; gOpsClipOn = false; gOpsBlend = 0;
-  panelClearClip(); panelClearBlend();
+  #undef BXY
+  if (depth == 0) {
+    gOpsClipOn = false; gOpsBlend = 0; gBinAlpha = 255; xfReset();
+    memset(gBinMacroPtr, 0, sizeof(gBinMacroPtr));
+    panelClearClip(); panelClearBlend(); panelLayerDiscard();
+  }
   if (shownOut) *shownOut = shown;
   if (okOut) *okOut = ok;
   return applied;

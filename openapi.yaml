@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Matrix Portal Gateway API
-  version: "3.11"
+  version: "3.12"
   description: |
     REST API for the **Matrix Portal Gateway** firmware, running on a
     Waveshare ESP32-S3-RGB-Matrix driver board. It emulates a wall of split-flap modules on a
@@ -532,7 +532,7 @@ paths:
         "400": { description: Bad path }
         "409": { description: Already exists }
         "503": { description: No card mounted }
-        "507": { description: mkdir failed (parent missing?) }
+        "507": { description: "mkdir failed (parent missing?)" }
   /api/sd/put:
     put:
       tags: [Status]
@@ -890,7 +890,7 @@ paths:
       summary: Binary draw commands (v3.5)
       description: |
         The binary twin of `POST /api/canvas/ops` — a fixed-layout encoding
-        (`canvas.opsBin` capability, format version 1) that skips JSON parsing
+        (`canvas.opsBin` capability, format version 2 since fw 3.12) that skips JSON parsing
         entirely: ~6× smaller and 1.5–1.9× the frame rate on op-heavy scenes. Same
         semantics (auto-present unless the batch contains SHOW); a malformed batch is
         a `400` with nothing drawn presented. Game-rate clients should carry the same
@@ -907,8 +907,22 @@ paths:
         `0x0F` ORIGIN x y · `0x10` TEXT x y size flags rgb [outline rgb] [shadow rgb]
         len utf8 (flags bits0-1 align, bit2 aa, bit3/4 has-outline/shadow) · `0x11`
         SPRITE i x y flags (bit0/1 flip h/v, bits2-3 rot/90, bits4-5 scale−1) ·
-        `0x12` SCROLL dx dy rgb · `0x13` SHOW. Strict decode: an unknown opcode or a
-        truncated op fails the batch — feature-detect via `canvas.opsBin`.
+        `0x12` SCROLL dx dy rgb · `0x13` SHOW · `0x14` BLEND mode · `0x15` ALPHA a
+        (both fw 3.8).
+
+        **Format version 2 (fw 3.12)** closes the gap with the JSON surface — every
+        coordinate now runs through the same affine transform (v1 batches decode
+        identically; `ORIGIN` is a matrix reset + pure translate):
+        `0x16` SAVE · `0x17` RESTORE (stack depth 8) · `0x18` TRANSLATE x y ·
+        `0x19` SCALE sx sy (u16 8.8 fixed-point; sy 0 = uniform) · `0x1A` ROTATE deg
+        (s16, clockwise) · `0x1B` LAYER · `0x1C` COMPOSITE x y mode alpha ·
+        `0x1D` DEFINE id len(u16) blob (macro id 0–7; blob is embedded binary ops) ·
+        `0x1E` CALL id x y (scoped replay under a pushed translate, nestable to
+        depth 4) · `0x1F` BEZIER n t flags rgb n×(x y) (n 3|4; flags bit0 aa) ·
+        `0x20` AALINE x y x1 y1 rgb. Additive flag bits: CIRCLE flags bit1 = aa
+        outline, POLY flags bit2 = aa. Strict decode: an unknown opcode or a
+        truncated op fails the batch — feature-detect via `canvas.opsBin` (send
+        0x16+ only when it reads ≥ 2).
       requestBody:
         required: true
         content: { application/octet-stream: { schema: { type: string, format: binary } } }
@@ -2079,7 +2093,7 @@ paths:
                       rect:     { type: boolean, example: true, description: "`PUT /api/canvas/rect` partial updates" }
                       rects:    { type: boolean, example: true, description: "`PUT /api/canvas/rects` multi-rect deltas (v3.1)" }
                       stream:   { type: boolean, example: true, description: "`PUT /api/canvas/stream` persistent TLV draw channel (v3.2)" }
-                      opsBin:   { type: integer, example: 1, description: "Binary ops format version accepted by POST /api/canvas/opsb and stream record 0x06 (v3.5)" }
+                      opsBin:   { type: integer, example: 2, description: "Binary ops format level accepted by POST /api/canvas/opsb and stream record 0x06 — 1 = base set (v3.5), 2 adds transform/layers/macros/bezier/aa opcodes 0x16-0x20 (fw 3.12). Purely additive; send the v2 opcodes only when this reads >= 2" }
                       anim:     { type: boolean, example: true, description: "`PUT /api/canvas/anim` on-device animation" }
                       ticker:   { type: boolean, example: true, description: "`POST /api/canvas/ticker` scrolling text" }
                       readback: { type: boolean, example: true, description: "`GET /api/canvas/frame` screenshot readback" }
