@@ -869,7 +869,7 @@ size_t statusJson(char* outBuf, size_t outCap) {
     "\"heap\":%u,\"minheap\":%u,\"modules\":%d,"
     "\"stk\":{\"frames\":%u,\"web\":%u,\"net\":%u,\"httpd\":%u,\"rtc\":%u,\"disp\":%u},"
     "\"panel\":{\"ok\":%s,\"w\":%u,\"h\":%u,\"cols\":%u,\"rows\":%u,"
-    "\"cellW\":%u,\"cellH\":%u,\"depth\":%u,\"font\":\"%s\",\"vmods\":%d},"
+    "\"cellW\":%u,\"cellH\":%u,\"depth\":%u,\"fbPsram\":%s,\"refreshHz\":%u,\"font\":\"%s\",\"vmods\":%d},"
     "\"time\":\"%s\",\"ntpSynced\":%s,\"quiet\":%s,"
     "\"companion\":{\"url\":\"%s\",\"status\":\"%s\",\"age\":%ld},\"env\":%s,\"sd\":%s}",
     millis()/1000, txCount,
@@ -881,6 +881,7 @@ size_t statusJson(char* outBuf, size_t outCap) {
     stkFrm, stkWeb, stkNet, stkHtp, stkRtc, stkDsp,
     gPanel.ready?"true":"false", gPanel.panelW, gPanel.panelH,
     gPanel.cols, gPanel.rows, gPanel.cellW, gPanel.cellH, (unsigned)panelInfo().depth,
+    panelFbInPsram() ? "true" : "false", (unsigned)panelInfo().refreshHz,
     dispFontName(), vmCount,
     rtcBuf,
     ntpSynced?"true":"false",
@@ -923,6 +924,7 @@ static esp_err_t handleApiConfigGet(httpd_req_t* r) {
   doc["panelBitDepth"] = cfg.panelBitDepth;
   doc["panelBGR"]      = cfg.panelBGR;
   doc["panelBright"]   = cfg.panelBright;
+  doc["fbPsram"]       = cfg.fbPsram;
   doc["flapMs"]        = cfg.flapMs;
   doc["flapMax"]       = cfg.flapMax;
   doc["soundEnabled"]  = cfg.soundEnabled;   // master speaker enable (v3.6)
@@ -1015,6 +1017,9 @@ static esp_err_t handleApiConfigSettings(httpd_req_t* r) {
     cfg.panelBGR = doc["panelBGR"].as<bool>();
     panelSetColourOrder(cfg.panelBGR);
   }
+  // Framebuffer in PSRAM (v3.11): decided once at panelBegin, so like width/height/depth it needs
+  // a reboot to take effect.
+  if (doc["fbPsram"].is<bool>()) cfg.fbPsram = doc["fbPsram"].as<bool>();
   if (doc["panelBright"].is<int>())   { int v = doc["panelBright"];
     // Apply now, not just on the next wall repaint: an effect or raw canvas owns the panel while
     // taskDisplay stands down, so dispRender (the only other caller) would not push the new duty.

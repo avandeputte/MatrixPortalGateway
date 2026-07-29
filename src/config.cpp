@@ -18,6 +18,7 @@ void cfgSetDefaults() {
   cfg.panelBitDepth = DEFAULT_BIT_DEPTH;
   cfg.panelBGR      = DEFAULT_PANEL_BGR;
   cfg.panelBright   = DEFAULT_BRIGHTNESS;
+  cfg.fbPsram       = false;
   cfg.flapMs        = DEFAULT_FLAP_MS;
   cfg.flapMax       = DEFAULT_FLAP_MAX;
   cfg.soundEnabled  = true;
@@ -57,6 +58,7 @@ void loadConfig() {
   cfg.panelBitDepth =           prefs.getUChar("pDepth", DEFAULT_BIT_DEPTH);
   cfg.panelBGR      =           prefs.getBool ("pBGR",   DEFAULT_PANEL_BGR);
   cfg.panelBright   =           prefs.getUChar("pBright",DEFAULT_BRIGHTNESS);
+  cfg.fbPsram       =           prefs.getBool ("fbPsram",false);
   cfg.flapMs        = (uint16_t)prefs.getInt  ("flapMs", DEFAULT_FLAP_MS);
   cfg.flapMax       =           prefs.getUChar("flapMax",DEFAULT_FLAP_MAX);
   cfg.soundEnabled  =           prefs.getBool ("sndEn",  true);
@@ -112,6 +114,7 @@ void saveConfig() {
   prefs.putUChar ("pDepth",   cfg.panelBitDepth);
   prefs.putBool  ("pBGR",     cfg.panelBGR);
   prefs.putUChar ("pBright",  cfg.panelBright);
+  prefs.putBool  ("fbPsram",  cfg.fbPsram);
   prefs.putInt   ("flapMs",   cfg.flapMs);
   prefs.putUChar ("flapMax",  cfg.flapMax);
   prefs.putBool  ("sndEn",    cfg.soundEnabled);

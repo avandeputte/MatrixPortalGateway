@@ -1,5 +1,28 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.11.0 — 2026-07-28
+
+### Added — depth-4 color via a PSRAM framebuffer (experimental)
+
+A new **Framebuffer in PSRAM** toggle (Settings → LED Panel; off by default) moves the panel
+framebuffer from internal DMA SRAM into the board's octal PSRAM (80 MHz). That lifts the
+internal-RAM cap that forced 256×64 down to **depth 3 (8 levels/channel)** — with it on, the
+panel runs **depth 4 (16 levels/channel)** for visibly smoother gradients.
+
+Why it works on this board specifically:
+- **Octal PSRAM at 80 MHz** has ~16× the bandwidth the 5 MHz pixel clock needs; the earlier
+  "PSRAM too slow" note was inherited untested from the quad-PSRAM MatrixPortal.
+- **Cache coherency** is handled by flushing the finished frame (`esp_cache_msync`, C2M) at the
+  double-buffer swap in `panelShow`, plus a 64-byte GDMA PSRAM burst alignment.
+- **Refresh rate**: depth 4 doubles the words per frame, which at 5 MHz is only ~40 Hz and
+  flickers — so the PSRAM path also raises the pixel clock to **10 MHz (~80 Hz)**. The
+  MatrixPortal's radio broke at 10 MHz; this Waveshare board survives it (previously A/B'd).
+
+Verified on the 256×64 board: exactly 16 distinct grey levels (vs 8 at depth 3), pixel-exact
+solid colors, no flicker at 80 Hz, WiFi unaffected (60/60 requests, 18 ms median under load),
+and ~93 KB of internal RAM freed as a side effect. Reboot to apply; turn it off + reboot to
+fall straight back to the rock-solid depth-3 internal-SRAM path.
+
 ## v3.10.0 — 2026-07-28
 
 ### Added — microSD, an oscilloscope effect, and faster effects

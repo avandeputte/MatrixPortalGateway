@@ -122,7 +122,7 @@ void dispInit() {
   uint8_t depth = cfg.panelBitDepth;
   if (depth < 1 || depth > 6) depth = DEFAULT_BIT_DEPTH;
 
-  gPanel.ready = panelBegin(gPanel.panelW, gPanel.panelH, depth);
+  gPanel.ready = panelBegin(gPanel.panelW, gPanel.panelH, depth, cfg.fbPsram);
   panelSetColourOrder(cfg.panelBGR);   // the panel's own wiring, not something we can detect
   if (!gPanel.ready) {
     // Headless is a legitimate state: the web UI and all the virtual modules still
@@ -190,7 +190,7 @@ void dispResume() {
   // the configured depth to fit RAM; asking for the configured value again
   // could refuse and leave the wall dark).
   uint8_t d = panelInfo().depth ? panelInfo().depth : cfg.panelBitDepth;
-  if (panelBegin(gPanel.panelW, gPanel.panelH, d)) {
+  if (panelBegin(gPanel.panelW, gPanel.panelH, d, cfg.fbPsram)) {
     panelSetColourOrder(cfg.panelBGR);
     panelSetBrightness(cfg.panelBright);
     gPanel.ready = true;

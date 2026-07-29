@@ -25,8 +25,9 @@ struct PanelInfo {
 
 // Bring the panel up. Returns false and leaves panelInfo().ok clear on failure --
 // the gateway then runs headless, which is a legitimate state.
-bool panelBegin(uint16_t width, uint16_t height, uint8_t depth);
+bool panelBegin(uint16_t width, uint16_t height, uint8_t depth, bool fbPsram = false);
 const PanelInfo& panelInfo();
+bool panelFbInPsram();   // v3.11: true when the framebuffer is running from PSRAM
 
 // 0..255, applied as the OE duty cycle. Call it whenever cfg.panelBright moves.
 void panelSetBrightness(uint8_t b);

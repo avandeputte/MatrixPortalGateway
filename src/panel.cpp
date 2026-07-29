@@ -73,6 +73,7 @@
 #include <soc/lcd_cam_struct.h>
 #include <soc/gpio_sig_map.h>
 #include <esp_heap_caps.h>
+#include <esp_cache.h>         // esp_cache_msync: flush the CPU cache to PSRAM (fb-in-PSRAM, v3.11)
 
 // ---- tunables ---------------------------------------------------------------------
 /* PCLK. Must divide the 160 MHz PLL by an integer (see lcdInit).
@@ -135,6 +136,11 @@ static uint8_t  liveBuf = 0;            // buffer GDMA is walking
 static volatile uint8_t bright        = 255;   // written from taskWeb (settings) + taskDisplay
 static volatile uint8_t brightPending = 0;      // buffers still to receive the new OE duty
 static uint32_t frameUs = 0;            // one full pass over the chain
+// Pixel clock (v3.11): 5 MHz is the WiFi-coexistence default. fb-in-PSRAM runs at depth 4, which
+// doubles the words per frame -- at 5 MHz that is only ~40 Hz and flickers -- so the PSRAM path
+// bumps to 10 MHz (~80 Hz at depth 4). The MatrixPortal's radio broke at 10 MHz; the Waveshare
+// survives it (A/B'd), which is the whole reason this move is viable on THIS board.
+static uint32_t gLcdClkHz = LCD_CLK_HZ;
 
 static inline word_t* blockPtr(uint8_t buf, int row, int plane) {
   return fb[buf] + ((uint32_t)row * DEPTH + plane) * BLOCK;
@@ -210,8 +216,8 @@ static void lcdInit() {
   LCD_CAM.lcd_user.lcd_reset = 1;
   esp_rom_delay_us(100);
 
-  // 160 MHz PLL, integer prescale to LCD_CLK_HZ.
-  uint32_t div = 160000000u / LCD_CLK_HZ;
+  // 160 MHz PLL, integer prescale to the active pixel clock (5 MHz default, 10 MHz for PSRAM/depth 4).
+  uint32_t div = 160000000u / gLcdClkHz;
   if (div < 2) div = 2;
   LCD_CAM.lcd_clock.clk_en             = 1;
   LCD_CAM.lcd_clock.lcd_clk_sel        = 3;        // PLL160M
@@ -294,9 +300,16 @@ static void panelFreeAll() {
   descN = 0;
 }
 
-bool panelBegin(uint16_t width, uint16_t height, uint8_t depth) {
+// v3.11: when the framebuffer lives in PSRAM, the CPU draws through the cache but GDMA reads
+// physical PSRAM, so the finished frame must be flushed cache->memory before it goes live.
+static bool   gFbPsram  = false;
+static size_t gFbBytes  = 0;               // per-buffer size, rounded up to a cache line for msync
+
+bool panelBegin(uint16_t width, uint16_t height, uint8_t depth, bool fbPsram) {
   info = {false, width, height, depth, 0, 0};
   if (depth < 1 || depth > 8) depth = DEFAULT_BIT_DEPTH;
+  gFbPsram = fbPsram;
+  gLcdClkHz = fbPsram ? 10000000u : LCD_CLK_HZ;      // 10 MHz keeps depth-4 refresh ~80 Hz (v3.11)
 
   W = width; H = height;
   ROWS = (uint8_t)(height / 2);                       // row PAIRS
@@ -306,27 +319,24 @@ bool panelBegin(uint16_t width, uint16_t height, uint8_t depth) {
   BLOCK = (uint32_t)W + TAIL_WORDS;
   if (BLOCK & 1) BLOCK++;
 
-  // Internal DMA RAM the two framebuffers + two descriptor chains cost at a given bit depth. The
-  // framebuffer MUST be internal (PSRAM is far too slow to feed the panel), and dispInit() runs
-  // BEFORE WiFi.begin() -- so an over-deep panel would starve the WiFi/lwIP pool allocated moments
-  // later, and the symptom is not a panel fault but TCP connects failing and loop()'s heap floor
-  // rebooting the board. PANEL_RAM_BUDGET caps what we spend before WiFi exists; PANEL_RAM_RESERVE
-  // is what must stay free for WiFi afterwards.
-  auto wantFor = [&](uint8_t d) -> size_t {
-    size_t fb   = (size_t)ROWS * d * BLOCK * sizeof(word_t);
-    size_t desc = sizeof(dma_descriptor_t) * (size_t)ROWS * ((1u << d) - 1);
-    return fb * 2 + desc * 2;
-  };
-  // Rather than refuse an over-deep panel outright and run headless -- a silent blank screen, the
-  // exact trap a 256x64 @ depth 4 falls into (144 KB > budget) -- step the depth DOWN to the
-  // deepest that fits both the budget and the live free-RAM reserve. Fewer bitplanes is fewer
-  // brightness levels, but a lit panel beats a dark one. Give up only if even one plane won't fit.
+  // (superseded by the intWant/fbPsram block below, kept for context)
+  // Internal DMA RAM the panel costs at a given depth. The descriptor chains are ALWAYS internal
+  // (GDMA reads them without a cache path). The two framebuffers are internal by default, but with
+  // fbPsram they move to octal PSRAM (v3.11) -- which lifts the internal-RAM cap so depth can go to
+  // 4+ (the LSB pixel clock is 5 MHz, ~200 ns/word, ~16x under octal PSRAM's read rate, so the GDMA
+  // FIFO stays fed). dispInit() runs BEFORE WiFi.begin(), so an over-deep INTERNAL panel would
+  // starve the WiFi/lwIP pool; PANEL_RAM_BUDGET caps what we spend before WiFi, PANEL_RAM_RESERVE
+  // is what must stay free after. With fbPsram only the descriptors count against that budget.
+  auto fbFor   = [&](uint8_t d) -> size_t { return (size_t)ROWS * d * BLOCK * sizeof(word_t); };
+  auto descFor = [&](uint8_t d) -> size_t { return sizeof(dma_descriptor_t) * (size_t)ROWS * ((1u << d) - 1); };
+  auto intWant = [&](uint8_t d) -> size_t { return (gFbPsram ? 0 : fbFor(d) * 2) + descFor(d) * 2; };
+
   const size_t freeNow   = heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
   const uint8_t reqDepth = depth;
-  while (depth > 1 && (wantFor(depth) > PANEL_RAM_BUDGET ||
-                       wantFor(depth) + PANEL_RAM_RESERVE > freeNow))
+  while (depth > 1 && (intWant(depth) > PANEL_RAM_BUDGET ||
+                       intWant(depth) + PANEL_RAM_RESERVE > freeNow))
     depth--;
-  const size_t want = wantFor(depth);
+  const size_t want = intWant(depth);
   if (want > PANEL_RAM_BUDGET || want + PANEL_RAM_RESERVE > freeNow) {
     printf("[PANEL] %ux%u even at depth 1 needs %u B of internal DMA RAM "
            "(budget %u, free %u, reserve %u for WiFi) -- refusing\n",
@@ -334,24 +344,38 @@ bool panelBegin(uint16_t width, uint16_t height, uint8_t depth) {
            (unsigned)PANEL_RAM_BUDGET, (unsigned)freeNow, (unsigned)PANEL_RAM_RESERVE);
     return false;
   }
+  const size_t fbBytesRaw = fbFor(depth);
+  if (gFbPsram) {                                  // framebuffers go to PSRAM: verify they fit
+    const size_t freePs = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    if (fbBytesRaw * 2 + (64u * 1024u) > freePs) {
+      printf("[PANEL] fbPsram: %ux%u depth %u needs %u B of PSRAM (free %u) -- refusing\n",
+             (unsigned)W, (unsigned)H, (unsigned)depth, (unsigned)(fbBytesRaw * 2), (unsigned)freePs);
+      return false;
+    }
+  }
   if (depth != reqDepth)
     printf("[PANEL] %ux%u depth %u wants %u B of internal DMA RAM (budget %u, free %u) -- "
            "clamped to depth %u so the panel still lights\n",
-           (unsigned)W, (unsigned)H, (unsigned)reqDepth, (unsigned)wantFor(reqDepth),
+           (unsigned)W, (unsigned)H, (unsigned)reqDepth, (unsigned)intWant(reqDepth),
            (unsigned)PANEL_RAM_BUDGET, (unsigned)freeNow, (unsigned)depth);
   DEPTH = depth;
   info.depth = DEPTH;
-  const size_t fbBytes = (size_t)ROWS * DEPTH * BLOCK * sizeof(word_t);
+  const size_t fbBytes = fbBytesRaw;
+  gFbBytes = (fbBytes + 63u) & ~((size_t)63u);     // round up so esp_cache_msync stays line-aligned
 
   for (int b = 0; b < 2; b++) {
-    // MALLOC_CAP_DMA is internal by definition -- GDMA cannot read this board's quad
-    // PSRAM anywhere near fast enough, and the compiler will not warn you about it.
-    fb[b] = (word_t*)heap_caps_aligned_alloc(64, fbBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    // Default: MALLOC_CAP_DMA (internal, single-cycle for the pixel clock). fbPsram: octal PSRAM,
+    // 64-byte aligned for the cache line + DMA; the finished frame is flushed to memory in panelShow.
+    if (gFbPsram)
+      fb[b] = (word_t*)heap_caps_aligned_alloc(64, gFbBytes, MALLOC_CAP_SPIRAM);
+    else
+      fb[b] = (word_t*)heap_caps_aligned_alloc(64, fbBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     if (!fb[b]) {
-      printf("[PANEL] native: %u bytes of DMA RAM unavailable\n", (unsigned)fbBytes);
+      printf("[PANEL] native: %u bytes of %s unavailable\n",
+             (unsigned)(gFbPsram ? gFbBytes : fbBytes), gFbPsram ? "PSRAM" : "DMA RAM");
       panelFreeAll(); return false;
     }
-    memset(fb[b], 0, fbBytes);
+    memset(fb[b], 0, gFbPsram ? gFbBytes : fbBytes);
   }
 
   bright = 255;
@@ -379,22 +403,34 @@ bool panelBegin(uint16_t width, uint16_t height, uint8_t depth) {
   // (the engine must not write into descriptors we are about to re-point on a swap).
   gdma_strategy_config_t sc = {.owner_check = false, .auto_update_desc = false};
   gdma_apply_strategy(dma_chan, &sc);
+  // fb-in-PSRAM (v3.11): without this, GDMA reads the framebuffer from PSRAM in tiny bursts and
+  // occasionally misses the LCD_CAM FIFO refill deadline -> visible flicker. A 64-byte PSRAM burst
+  // block lets one access cover 32 pixels, giving the FIFO a cushion against PSRAM latency spikes.
+  if (gFbPsram) {
+    gdma_transfer_ability_t ta = { .sram_trans_align = 0, .psram_trans_align = 64 };
+    gdma_set_transfer_ability(dma_chan, &ta);
+  }
   gdma_get_channel_id(dma_chan, &dmaChanId);        // for the stall watchdog's register read
 
   liveBuf = 0; drawBuf = 1;
+  if (gFbPsram) {                                  // control bits + zeroed frames must reach PSRAM
+    esp_cache_msync(fb[0], gFbBytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    esp_cache_msync(fb[1], gFbBytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+  }
   gdma_start(dma_chan, (intptr_t)&desc[0][0]);
   esp_rom_delay_us(1);
   LCD_CAM.lcd_user.lcd_start = 1;
 
   // Words per frame -> refresh. No measurement needed: nothing can steal these clocks.
   uint32_t wordsPerFrame = (uint32_t)descN * BLOCK;
-  frameUs = (wordsPerFrame * 1000000ull) / LCD_CLK_HZ;
+  frameUs = (wordsPerFrame * 1000000ull) / gLcdClkHz;
   info.refreshHz = frameUs ? (1000000u / frameUs) : 0;
   info.ok = true;
   return true;
 }
 
 const PanelInfo& panelInfo() { return info; }
+bool panelFbInPsram() { return info.ok && gFbPsram; }   // v3.11 diagnostic
 
 void panelSetBrightness(uint8_t b) {
   if (b == bright) return;
@@ -943,6 +979,9 @@ void panelShow() {
   }
 
   const uint8_t next = drawBuf;
+  // fb-in-PSRAM (v3.11): the CPU drew `next` through the cache; flush it to physical PSRAM before
+  // GDMA starts reading it, or the engine would scan out stale pixels. One ~130 KB writeback/frame.
+  if (gFbPsram) esp_cache_msync(fb[next], gFbBytes, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
   desc[liveBuf][descN - 1].next = &desc[next][0];
   desc[next][descN - 1].next    = &desc[next][0];   // stay on `next` until the swap after
   liveBuf = next;

@@ -40,6 +40,8 @@ struct GwConfig {
   uint8_t       panelBitDepth; // bitplanes, 1..8 (RAM and refresh rate scale with it)
   bool          panelBGR;      // panel wired BGR, not RGB: swap red and blue on output
   uint8_t       panelBright;   // 1..255, multiplied into every colour before it reaches the panel
+  bool          fbPsram;       // v3.11 (experimental): framebuffer in octal PSRAM, not internal
+                               // SRAM -- lifts the internal-RAM depth cap so 256x64 can run depth 4+
   uint16_t      flapMs;        // ms per flap step -- the reel's speed
   uint8_t       flapMax;       // flips drawn for one change, 1..FLAP_ANIM_MAX
   bool          soundEnabled;  // master speaker enable (v3.6); false = silent
