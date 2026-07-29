@@ -1,5 +1,29 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.11.1 — 2026-07-29
+
+### Fixed — comprehensive-review sweep
+
+A five-reviewer audit of the whole firmware. Six bugs fixed:
+- **Oscilloscope died after 3 s** — the effect was missing from the audio-capture consumer
+  list, so capture self-stopped and the trace went flat. Now listed; verified live at 6.5 s.
+- **SD-browser XSS** — card filenames were rendered into the dashboard unescaped; a crafted
+  name could execute script in the gateway's origin. Filenames are now HTML/attribute-escaped.
+- **Animation play-by-name use-after-free** — the render task wasn't parked while the named
+  file reloaded the frame store (the raw upload path always did this).
+- **Atlas upload/delete race** — now blocked while a canvas stream is open (the pump could be
+  mid-blit from the very sheet being freed).
+- **A 60 fps animation could be saved but never loaded back** (fps round-trip truncation).
+- **Speaker shutdown race** — notes enqueued at the exact moment the synth idled out were
+  silently dropped.
+
+Plus hardening (CORS `DELETE`, recursive-SD-delete watchdog/stack guards, macro `call` state
+isolation, SSE empty-event guard, atlas/rename/urlDecode edge cases, a font cache that removes
+a per-text-op FATFS read), dead-code removal, and ~14 comment corrections.
+
+Certified: 2 h adversarial soak on the release binary — 63,192 steps, 0 reboots, 0 errors,
+0 SSE drops, 188/188 SD round-trips byte-identical, heap floor 139 K (drift −184 B).
+
 ## v3.11.0 — 2026-07-28
 
 ### Added — depth-4 color via a PSRAM framebuffer (experimental)
