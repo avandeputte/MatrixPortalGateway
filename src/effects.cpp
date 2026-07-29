@@ -178,7 +178,7 @@ static_assert(sizeof(DEFS) / sizeof(DEFS[0]) == (size_t)EFFECT_COUNT,
               "every EFFECT_TABLE entry needs an EffectDefRow in DEFS");
 
 const char* effectDefsJson() {
-  // Sized with headroom: nine effects currently emit ~1.7 KB. The build-time guard
+  // Sized with headroom: the eleven current effects emit ~2 KB. The build-time guard
   // below is loud but the JSON still goes out truncated -- keep the margin real.
   static char buf[3072];
   if (!buf[0]) {

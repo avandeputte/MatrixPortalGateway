@@ -120,13 +120,31 @@ static void synthTask(void* pv) {
 
     if (qStop) {
       taskENTER_CRITICAL(&sndMux);
-      qHead = qN = 0; qStop = false;
+      qHead = 0; qN = 0; qStop = false;   // no chained assignment through a volatile
       taskEXIT_CRITICAL(&sndMux);
       continue;
     }
     if (head >= n) {                                   // nothing to play
       if (!idleSince) idleSince = millis();
-      if (millis() - idleSince > 5000) break;
+      if (millis() - idleSince > 5000) {
+        // Shut down -- but a soundPlay() may land between the idle decision and the flag
+        // clear (it would enqueue, see gSynthRun still true, spawn nothing, and the notes
+        // would silently rot). Tear down FIRST, then atomically re-check the queue: new
+        // notes mean re-arm and keep going; an empty queue means clear the flag and exit,
+        // after which any soundPlay spawns a fresh task. (v3.11.1)
+        gpio_set_level(PA_ENABLE_PIN, 0);
+        i2s_channel_disable(audioTxChan());
+        bool exitNow;
+        taskENTER_CRITICAL(&sndMux);
+        exitNow = (qHead >= qN);
+        if (exitNow) gSynthRun = false;
+        taskEXIT_CRITICAL(&sndMux);
+        if (exitNow) break;
+        i2s_channel_enable(audioTxChan());             // late arrival: spin back up
+        gpio_set_level(PA_ENABLE_PIN, 1);
+        idleSince = 0;
+        continue;
+      }
       memset(blk, 0, sizeof(blk));                     // keep the DAC fed with silence
       size_t wr;
       i2s_channel_write(audioTxChan(), blk, sizeof(blk), &wr, pdMS_TO_TICKS(100));
@@ -134,8 +152,10 @@ static void synthTask(void* pv) {
     }
     idleSince = 0;
 
-    const uint16_t f  = qFreq[head];
-    const uint32_t ms = qMs[head];
+    uint16_t f; uint32_t ms;                           // read the note under the lock:
+    taskENTER_CRITICAL(&sndMux);                       // soundPlay may replace the queue
+    f = qFreq[head]; ms = qMs[head];                   // concurrently (torn-read guard)
+    taskEXIT_CRITICAL(&sndMux);
     const float amp   = 8000.0f * qVol / 100.0f;       // headroom under int16
     const uint32_t total = (uint32_t)SND_RATE * ms / 1000;
     const uint32_t ramp  = SND_RATE * 3 / 1000;        // 3 ms envelope
@@ -169,9 +189,7 @@ static void synthTask(void* pv) {
     taskEXIT_CRITICAL(&sndMux);
   }
 
-  gpio_set_level(PA_ENABLE_PIN, 0);
-  i2s_channel_disable(audioTxChan());
-  gSynthRun = false;
+  // Amp/TX/gSynthRun were already torn down inside the idle-exit branch above.
   printf("[SOUND] synth idle -- amp off (writes ok=%lu fail=%lu)\n",
          (unsigned long)wrOk, (unsigned long)wrFail);
   vTaskDelete(NULL);
@@ -188,7 +206,10 @@ bool soundPlay(const uint16_t* freq, const uint16_t* ms, int n, uint8_t vol) {
   taskEXIT_CRITICAL(&sndMux);
   if (!gSynthRun) {
     gSynthRun = true;
-    xTaskCreatePinnedToCore(synthTask, "synth", 3072, NULL, 2, NULL, 0);
+    if (xTaskCreatePinnedToCore(synthTask, "synth", 3072, NULL, 2, NULL, 0) != pdPASS) {
+      gSynthRun = false;                // creation failed: don't wedge sound until reboot
+      return false;
+    }
   }
   return true;
 }

@@ -7,7 +7,8 @@
 // tasks.cpp -- the long-lived FreeRTOS task loops.
 // taskFrames (core 0): sends scheduled batch frames when they fall due.
 // taskRTC  (core 0): refreshes the wall clock once a second.
-// taskWeb  (core 0): services the HTTP server.
+// taskWeb  (core 0): SSE pump + canvas-stream pump + deferred-OTA supervisor (httpd
+//                    serves requests on its own task since v3.0 -- see below).
 // taskNetwork (core 1): WiFi reconnect and config persistence.
 // taskDisplay (core 1, in display.cpp): steps the reels and repaints the panel.
 // Each feeds its watchdog timestamp; loop() in main.cpp reboots if one stalls.

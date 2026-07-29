@@ -37,12 +37,6 @@ static void sseDropLocked(int i) {
   sseSlot[i] = NULL;
 }
 
-void sseCloseAll() {
-  if (!sseMutex || xSemaphoreTake(sseMutex, pdMS_TO_TICKS(500)) != pdTRUE) return;
-  for (int i = 0; i < SSE_MAX_CLIENTS; i++) sseDropLocked(i);
-  xSemaphoreGive(sseMutex);
-}
-
 // GET /api/events (runs on the httpd task, via httpx dispatch)
 esp_err_t sseHandleRequest(httpd_req_t* r) {
   if (!sseBuf || !sseMutex) return httpxErr(r, 503, "events unavailable");
@@ -72,9 +66,12 @@ esp_err_t sseHandleRequest(httpd_req_t* r) {
 
   // First frame: a reconnect hint, then an immediate snapshot so the preview paints
   // without waiting for the wall to change.
-  int n = snprintf(sseBuf, SSE_BUF_CAP, "retry: 3000\n\nevent: display\ndata: ");
-  n += dispStateJson(sseBuf + n, SSE_BUF_CAP - n - 3);
-  n += snprintf(sseBuf + n, SSE_BUF_CAP - n, "\n\n");
+  int n = snprintf(sseBuf, SSE_BUF_CAP, "retry: 3000\n\n");
+  const int hdr = n + snprintf(sseBuf + n, SSE_BUF_CAP - n, "event: display\ndata: ");
+  const int body = dispStateJson(sseBuf + hdr, SSE_BUF_CAP - hdr - 3);
+  if (body > 0)                      // vmMutex busy -> 0: send just the retry hint, no
+    n = hdr + body + snprintf(sseBuf + hdr + body, SSE_BUF_CAP - hdr - body, "\n\n");
+  // empty-data event (it would throw in the client's JSON.parse)
 
   if (httpd_resp_send_chunk(r, sseBuf, n) != ESP_OK) {
     xSemaphoreGive(sseMutex);
@@ -101,8 +98,9 @@ static void ssePushLocked(int n) {
       DBG("[SSE] client dropped (slot %d)\n", i);
       sseDropLocked(i);
     } else {
-      // Tell httpd's LRU purge this socket is alive, or a quiet spell of pure pushes
-      // (which the purge cannot see) could get the stream reaped under load.
+      // Belt-and-braces: async-held fds are SKIPPED by httpd's LRU purge in this build
+      // (see the esp_http_server notes), so this refresh is not load-bearing -- kept
+      // in case a future httpd changes that behaviour.
       httpd_sess_update_lru_counter(sseSlot[i]->handle, httpd_req_to_sockfd(sseSlot[i]));
     }
   }
@@ -112,9 +110,14 @@ void sseBroadcastDisplay() {
   if (!sseMutex || !sseBuf || xSemaphoreTake(sseMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
   if (sseClientCount()) {
     int n = snprintf(sseBuf, SSE_BUF_CAP, "event: display\ndata: ");
-    n += dispStateJson(sseBuf + n, SSE_BUF_CAP - n - 3);
-    n += snprintf(sseBuf + n, SSE_BUF_CAP - n, "\n\n");
-    ssePushLocked(n);
+    const int body = dispStateJson(sseBuf + n, SSE_BUF_CAP - n - 3);
+    // vmMutex busy returns 0 -- an empty-data event would make client JSON.parse throw.
+    // Skip the push; the next wall change (or the 150 ms coalescer) resends soon enough.
+    if (body > 0) {
+      n += body;
+      n += snprintf(sseBuf + n, SSE_BUF_CAP - n, "\n\n");
+      ssePushLocked(n);
+    }
   }
   xSemaphoreGive(sseMutex);
 }

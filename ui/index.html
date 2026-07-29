@@ -219,8 +219,12 @@ function fsPlay(n){var r=document.getElementById("fsR");apiFlapCmd("/api/canvas/
 function fsBoot(n){var r=document.getElementById("fsR");apiFlapCmd("/api/config/settings",{bootAnim:n}).then(function(j){if(j.ok){_fsBoot=n;r.textContent=n?t("Boot animation set"):t("Boot animation cleared");fsLoad();}else{r.textContent=t("Error: ")+(j.error||"failed");}}).catch(function(e){r.textContent=t("Error: ")+e;});}
 function fsDel(p){if(!confirm(p==="/compset.gz"?t("This file holds the companion app's settings and playlists. Deleting it means the companion loses them. Delete anyway?"):t("Delete this file?")+"\n"+p))return;var r=document.getElementById("fsR");apiFlapCmd("/api/fs/delete",{path:p}).then(function(j){if(j.ok){r.textContent=t("Deleted")+" "+p;fsLoad();}else{r.textContent=t("Error: ")+(j.error||"failed");}}).catch(function(e){r.textContent=t("Error: ")+e;});}
 function fsUpload(){var inp=document.getElementById("fsFile");var f=inp.files[0];var r=document.getElementById("fsUpR");if(!f){r.textContent=t("Choose a file first");return;}r.textContent=t("Uploading...");var xhr=new XMLHttpRequest();xhr.onload=function(){var j=null;try{j=JSON.parse(xhr.responseText);}catch(e){}if(xhr.status===200&&j&&j.ok){r.textContent=t("Uploaded")+" "+(j.path||f.name)+" ("+fsFmtBytes(j.bytes||f.size)+")";inp.value="";fsLoad();}else{r.textContent=t("Error: ")+((j&&j.error)||xhr.status);}};xhr.onerror=function(){r.textContent=t("Upload failed (connection error).");};xhr.open("POST","/api/fs/upload?name="+encodeURIComponent(f.name));xhr.setRequestHeader("Content-Type","application/octet-stream");xhr.send(f);}
-/* microSD browser (v3.10): the /api/sd/* endpoints. sdCwd is the directory currently shown. */
+/* microSD browser (v3.10): the /api/sd/* endpoints. sdCwd is the directory currently shown.
+   Card filenames are untrusted (any client can PUT one, any card can carry one): sdEscH
+   escapes them for HTML text, sdEscA for the onclick JS-string-in-attribute context. */
 var sdCwd="/";
+function sdEscH(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
+function sdEscA(s){return sdEscH(String(s).replace(/\\/g,"\\\\").replace(/'/g,"\\'"));}
 function sdFmtMB(mb){mb=mb||0;if(mb<1024)return mb+t(" MB");return (mb/1024).toFixed(1)+t(" GB");}
 function sdJoin(dir,name){return dir==="/"?"/"+name:dir+"/"+name;}
 function sdParent(p){if(p==="/"||p==="")return "/";var i=p.lastIndexOf("/");return i<=0?"/":p.substring(0,i);}
@@ -236,10 +240,10 @@ function sdLoad(path){sdCwd=path||"/";var meta=document.getElementById("sdMeta")
  fetch("/api/sd/list?path="+encodeURIComponent(sdCwd)).then(function(r){return r.json();}).then(function(list){
   list.sort(function(a,b){if(a.dir!==b.dir)return a.dir?-1:1;return a.name<b.name?-1:1;});
   var html="";
-  if(sdCwd!=="/")html+='<tr><td colspan="3"><a href="#" onclick="sdLoad(\''+sdParent(sdCwd)+'\');return false" style="color:var(--brand);text-decoration:none">↑ ..</a></td></tr>';
-  for(var i=0;i<list.length;i++){var e=list[i],full=sdJoin(sdCwd,e.name);
-   if(e.dir){html+='<tr><td><a href="#" onclick="sdLoad(\''+full.replace(/'/g,"\\'")+'\');return false" style="color:var(--brand);text-decoration:none">📁 '+e.name+'</a></td><td>&mdash;</td><td style="white-space:nowrap"><button class="ylw" onclick="sdDelDir(\''+full.replace(/'/g,"\\'")+'\')">'+t("Delete")+'</button></td></tr>';}
-   else{html+='<tr><td>'+e.name+'</td><td>'+fsFmtBytes(e.size)+'</td><td style="white-space:nowrap"><button class="sec" onclick="sdDl(\''+full.replace(/'/g,"\\'")+'\')">'+t("Download")+'</button> <button class="ylw" onclick="sdDel(\''+full.replace(/'/g,"\\'")+'\')">'+t("Delete")+'</button></td></tr>';}}
+  if(sdCwd!=="/")html+='<tr><td colspan="3"><a href="#" onclick="sdLoad(\''+sdEscA(sdParent(sdCwd))+'\');return false" style="color:var(--brand);text-decoration:none">↑ ..</a></td></tr>';
+  for(var i=0;i<list.length;i++){var e=list[i],full=sdJoin(sdCwd,e.name),fa=sdEscA(full);
+   if(e.dir){html+='<tr><td><a href="#" onclick="sdLoad(\''+fa+'\');return false" style="color:var(--brand);text-decoration:none">📁 '+sdEscH(e.name)+'</a></td><td>&mdash;</td><td style="white-space:nowrap"><button class="ylw" onclick="sdDelDir(\''+fa+'\')">'+t("Delete")+'</button></td></tr>';}
+   else{html+='<tr><td>'+sdEscH(e.name)+'</td><td>'+fsFmtBytes(e.size)+'</td><td style="white-space:nowrap"><button class="sec" onclick="sdDl(\''+fa+'\')">'+t("Download")+'</button> <button class="ylw" onclick="sdDel(\''+fa+'\')">'+t("Delete")+'</button></td></tr>';}}
   if(!list.length&&sdCwd==="/")html='<tr><td colspan="3" style="color:var(--dim)">'+t("Card is empty")+'</td></tr>';
   document.getElementById("sdRows").innerHTML=html;
  }).catch(function(){document.getElementById("sdRows").innerHTML='<tr><td colspan="3" style="color:var(--hi)">'+t("Could not list the card")+'</td></tr>';});}

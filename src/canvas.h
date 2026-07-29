@@ -56,7 +56,8 @@ bool canvasAnimNameOk(const char* name);         // 1..24 chars of [a-z0-9_-]
 bool canvasAtlasNameOk(const char* name);                  // ^[a-z0-9._-]{1,32}$
 int  canvasAtlasBegin(const char* name, uint8_t fmt, uint16_t tileW, uint16_t tileH, uint16_t tiles);
 void canvasAtlasFeed(const uint8_t* data, size_t n);
-int  canvasAtlasCommit();                                  // publish: swap in, evict LRU over budget
+int  canvasAtlasCommit();
+void canvasAtlasAbort();                                   // free a half-fed staging buffer (aborted upload)                                  // publish: swap in, evict LRU over budget
 // Blit tile i of the bound sheet at (x,y) via panelPixel, skipping the transparent colour
 // (rgb565 0xF81F / rgb888 magenta). False when the handle is stale or i is out of range.
 int  canvasAtlasBind(const char* name);                    // handle, or -1 (lazy FS load inside)

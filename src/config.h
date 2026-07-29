@@ -37,7 +37,7 @@ struct GwConfig {
   // only take effect on reboot. panelBright, flapMs and flapMax are live.
   uint16_t      panelW;        // total chain width in px (32..256, multiple of 32)
   uint16_t      panelH;        // panel height in px (16 / 32 / 64)
-  uint8_t       panelBitDepth; // bitplanes, 1..8 (RAM and refresh rate scale with it)
+  uint8_t       panelBitDepth; // bitplanes, 1..6 (RAM and refresh rate scale with it)
   bool          panelBGR;      // panel wired BGR, not RGB: swap red and blue on output
   uint8_t       panelBright;   // 1..255, multiplied into every colour before it reaches the panel
   bool          fbPsram;       // v3.11 (experimental): framebuffer in octal PSRAM, not internal

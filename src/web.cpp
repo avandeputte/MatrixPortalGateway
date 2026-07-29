@@ -887,6 +887,10 @@ size_t statusJson(char* outBuf, size_t outCap) {
     ntpSynced?"true":"false",
     gQuietTime?"true":"false",
     cfg.companionUrl, gCompanionStatus, compAge, envf, sdf);
+  // Truncation would be INVALID JSON for every consumer (dashboard, SSE) -- make it loud,
+  // like the capabilities block does. ~166 B of margin today; this is the tripwire.
+  if (n >= outCap) printf("[WEB] statusJson TRUNCATED (%u >= %u) -- enlarge the buffer\n",
+                          (unsigned)n, (unsigned)outCap);
   return n < outCap ? n : outCap - 1;
 }
 
@@ -1652,7 +1656,8 @@ static esp_err_t handleApiSdList(httpd_req_t* r) {
   bool first = true;
   for (File e = dir.openNextFile(); e; e = dir.openNextFile()) {
     char row[320];
-    const char* nm = e.name();                       // basename on SD_MMC
+    const char* nm = e.name();   // usually a basename; may be a full path on some cores
+                                 // (see sdRemoveTree) -- row[320] holds either
     snprintf(row, sizeof(row), "%s{\"name\":\"%s\",\"dir\":%s,\"size\":%u}",
              first ? "" : ",", nm, e.isDirectory() ? "true" : "false", (unsigned)e.size());
     httpxChunkStr(r, row);
@@ -2016,24 +2021,6 @@ static void canvasOpGradientEx(int x, int y, int w, int h,
     }
 }
 
-static void canvasOpGradientRaw(int x, int y, int w, int h,
-                                uint8_t r0, uint8_t g0, uint8_t b0,
-                                uint8_t r1, uint8_t g1, uint8_t b1, bool vertical) {
-  if (w <= 0 || h <= 0) return;
-  const int n = vertical ? h : w, den = (n > 1) ? (n - 1) : 1;
-  for (int i = 0; i < n; i++) {
-    uint8_t r = (uint8_t)((int)r0 + ((int)r1 - (int)r0) * i / den);
-    uint8_t g = (uint8_t)((int)g0 + ((int)g1 - (int)g0) * i / den);
-    uint8_t b = (uint8_t)((int)b0 + ((int)b1 - (int)b0) * i / den);
-    if (vertical) panelHLine(x, y + i, w, r, g, b);
-    else          panelVLine(x + i, y, h, r, g, b);
-  }
-}
-static void canvasOpGradient(int x, int y, int w, int h, JsonVariantConst from, JsonVariantConst to, bool vertical) {
-  uint8_t r0 = 0, g0 = 0, b0 = 0, r1 = 0, g1 = 0, b1 = 0;
-  canvasColor(from, r0, g0, b0); canvasColor(to, r1, g1, b1);
-  canvasOpGradientRaw(x, y, w, h, r0, g0, b0, r1, g1, b1, vertical);
-}
 
 // A polyline: connect consecutive [x,y] points with straight lines.
 static void canvasOpPolyline(JsonVariantConst pts, uint8_t r, uint8_t g, uint8_t b) {
@@ -2115,6 +2102,10 @@ static esp_err_t handleApiAnimPlay(httpd_req_t* r) {
   { char cd[64]; snprintf(cd, sizeof(cd), "anim play '%.24s'", name); logCommand('R', cd); }
   char okBody[96];
   snprintf(okBody, sizeof(okBody), "{\"ok\":true,\"frames\":%u}", (unsigned)canvasAnimCount());
+  // Park the render task BEFORE the load rewrites the animation store (v3.11.1): while the
+  // file streams in, taskDisplay would otherwise still be inside canvasAnimRender() reading
+  // the very animBuf the load frees/reallocs -- the same reason the raw PUT stands down.
+  canvasStandDown();
   int rc = canvasAnimLoadPlay(name);
   if (rc == 0)
     snprintf(okBody, sizeof(okBody), "{\"ok\":true,\"frames\":%u}", (unsigned)canvasAnimCount());
@@ -2882,12 +2873,20 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut, int depth) {
       if (depth < 4) {
         for (int m = 0; m < gMacroN; m++) {
           if (strcmp(gMacroName[m], nm)) continue;
-          float saved[6]; memcpy(saved, gM, sizeof(gM));
+          // The replay is SCOPED: snapshot every piece of batch state a macro body could
+          // mutate -- transform + its save-stack depth, clip, blend -- so an unbalanced
+          // save, a clip or a blend inside the macro cannot leak to the caller (v3.11.1).
+          float savedM[6]; memcpy(savedM, gM, sizeof(gM));
+          const int  savedSp = gMSp, savedBlend = gOpsBlend;
+          const bool savedClipOn = gOpsClipOn;
+          int savedClip[4]; memcpy(savedClip, gOpsClip, sizeof(gOpsClip));
           xfTranslate((float)(op["x"] | 0), (float)(op["y"] | 0));
           bool subShown = false;
           applied += canvasOpsRun(gMacroOps[m], &subShown, depth + 1);
           if (subShown) shown = true;
-          memcpy(gM, saved, sizeof(gM));
+          memcpy(gM, savedM, sizeof(gM));  gMSp = savedSp;  gOpsBlend = savedBlend;
+          memcpy(gOpsClip, savedClip, sizeof(gOpsClip));  gOpsClipOn = savedClipOn;
+          opsApplyClip();
           break;
         }
       }
@@ -3323,6 +3322,9 @@ static esp_err_t atlasRawReply(httpd_req_t* r, int e) {
   return httpxErr(r, 503, "Out of memory");
 }
 static esp_err_t handleApiAtlasPut(httpd_req_t* r) {
+  // The stream pump (taskWeb) may be mid-blit from a resident sheet; an upload here can
+  // evict/realloc that very sheet (atlasEvictFor) -> use-after-free. Same guard as anim PUT.
+  if (csBusy(r)) return ESP_OK;
   if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) return atlasRawReply(r, 507);   // stressed: back off
   const String name = httpxPathTail(r, "/api/canvas/atlas/");
   if (!canvasAtlasNameOk(name.c_str())) return atlasRawReply(r, 400);
@@ -3334,7 +3336,7 @@ static esp_err_t handleApiAtlasPut(httpd_req_t* r) {
   size_t  recvd = 0;
   while (recvd < len) {
     int n = httpxRecv(r, (char*)httpxBuf, min(len - recvd, (size_t)sizeof(httpxBuf)));
-    if (n <= 0) return atlasRawReply(r, 400);
+    if (n <= 0) { if (begun) canvasAtlasAbort(); return atlasRawReply(r, 400); }
     recvd += (size_t)n;
     int i = 0;
     while (hdrN < 12 && i < n) hdr[hdrN++] = httpxBuf[i++];
@@ -3414,6 +3416,7 @@ static esp_err_t handleApiAtlasPost(httpd_req_t* r) {
   return httpxSend(r, 200, "application/json", "{\"ok\":true}");
 }
 static esp_err_t handleApiAtlasDelete(httpd_req_t* r) {
+  if (csBusy(r)) return ESP_OK;      // delete frees a resident sheet the stream pump may be blitting
   const String name = httpxPathTail(r, "/api/canvas/atlas/");
   if (canvasAtlasDelete(name.c_str()) != 0) return atlasRawReply(r, 404);
   { char cd[64]; snprintf(cd, sizeof(cd), "atlas '%.32s' deleted", name.c_str()); logCommand('R', cd); }

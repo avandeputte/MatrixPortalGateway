@@ -92,15 +92,16 @@
    data rate and the descriptor-fetch rate.
 
    If a long chain ghosts at the far end, lower this further (the far end sees the clock
-   last) -- do not raise it. Raising it buys refresh nobody can see and takes it out of
-   the radio. Refresh also scales with bit depth: cfg.panelBitDepth is the other lever.
+   last). Do not raise this DEFAULT: on the internal-SRAM path it buys refresh nobody can
+   see. (The fbPsram path deliberately runs 10 MHz -- see gLcdClkHz below -- because depth 4
+   doubles the words per frame and needs it for ~80 Hz.) Refresh also scales with bit
+   depth: cfg.panelBitDepth is the other lever.
 
    A/B'd at 10 MHz on the Waveshare board (2026-07-18): unlike the MatrixPortal,
    the radio SURVIVED -- instant association, 0% ping loss, normal HTTP latency.
-   The clock is not what blocks depth 4 on a 256x64 panel here; the 144.6 KB
-   double-buffered internal framebuffer is (it left 26 KB of heap and a 1.7 KB
-   min -- unshippable). If the driver ever grows single-buffering or PSRAM
-   bounce buffers, 10 MHz + depth 4 at ~80 Hz is on the table on this board. */
+   That result is what made v3.11's fbPsram mode viable: with the framebuffer in
+   octal PSRAM (the internal-RAM blocker gone) the PSRAM path runs 10 MHz and
+   256x64 @ depth 4 refreshes at ~80 Hz. */
 #define LCD_CLK_HZ      5000000u
 #define TAIL_WORDS      4           // blanked settle words after the latch: address hold
 #define MIN_ON_CLOCKS   1           // never fully dark while brightness > 0
@@ -298,6 +299,7 @@ static void panelFreeAll() {
     if (desc[b]) { heap_caps_free(desc[b]); desc[b] = NULL; }
   }
   descN = 0;
+  panelLayerDiscard();   // an OTA/teardown mid-ops-batch must not leak an open layer (v3.11.1)
 }
 
 // v3.11: when the framebuffer lives in PSRAM, the CPU draws through the cache but GDMA reads
@@ -319,11 +321,13 @@ bool panelBegin(uint16_t width, uint16_t height, uint8_t depth, bool fbPsram) {
   BLOCK = (uint32_t)W + TAIL_WORDS;
   if (BLOCK & 1) BLOCK++;
 
-  // (superseded by the intWant/fbPsram block below, kept for context)
+  // Why the depth gate exists: dispInit() runs BEFORE WiFi.begin(), so an over-deep
+  // INTERNAL panel would starve the WiFi/lwIP pool allocated moments later -- the
+  // symptom is TCP connects failing and loop()'s heap-floor reboot, not a panel fault.
   // Internal DMA RAM the panel costs at a given depth. The descriptor chains are ALWAYS internal
   // (GDMA reads them without a cache path). The two framebuffers are internal by default, but with
   // fbPsram they move to octal PSRAM (v3.11) -- which lifts the internal-RAM cap so depth can go to
-  // 4+ (the LSB pixel clock is 5 MHz, ~200 ns/word, ~16x under octal PSRAM's read rate, so the GDMA
+  // 4+ (the PSRAM path clocks pixels at 10 MHz, ~100 ns/word, still ~8x under octal PSRAM's read rate, so the GDMA
   // FIFO stays fed). dispInit() runs BEFORE WiFi.begin(), so an over-deep INTERNAL panel would
   // starve the WiFi/lwIP pool; PANEL_RAM_BUDGET caps what we spend before WiFi, PANEL_RAM_RESERVE
   // is what must stay free after. With fbPsram only the descriptors count against that budget.
@@ -444,8 +448,13 @@ void panelSetBrightness(uint8_t b) {
 // ---- drawing (back buffer) ----------------------------------------------------------
 static void panelWaitDrawable();    // defined with the tear-guard below
 
+static bool panelLayerOpen();       // defined with the layer state below
+
 void panelClear() {
   if (!info.ok) return;
+  // An OPEN LAYER must capture the clear like every other primitive (the "all draws
+  // redirect" contract in panel.h) -- route through the fill path, which honours layers.
+  if (panelLayerOpen()) { panelFillRect(0, 0, W, H, 0, 0, 0); return; }
   panelWaitDrawable();              // same draw-guard as every other framebuffer write
   const uint32_t bodyLen = W;
   for (int r = 0; r < ROWS; r++)
@@ -531,6 +540,7 @@ void panelClearBlend() { gBlendActive = false; gBlendMode = 0; gBlendAlpha = 255
 // one group blend+alpha -- i.e. group opacity, the thing per-op alpha can't express. One
 // layer at a time; the buffer lives in PSRAM only between begin and composite/discard.
 static uint8_t* gLayerBuf = nullptr;          // W*H*4 RGBA, or null when no layer is open
+static bool panelLayerOpen() { return gLayerBuf != nullptr; }
 
 bool panelLayerBegin() {
   if (gLayerBuf) { memset(gLayerBuf, 0, (size_t)W * H * 4); return true; }
@@ -562,6 +572,8 @@ void panelLayerComposite(int ox, int oy, uint8_t mode, uint8_t galpha) {
 // per-op alpha accumulate before the group is flattened). Returns true if a layer consumed it.
 static inline bool layerWrite(int x, int y, uint8_t r, uint8_t g, uint8_t b) {
   if (!gLayerBuf) return false;
+  // The panelPixel caller has already bounds/clip-checked; these repeats are deliberate
+  // defence-in-depth so any FUTURE direct caller cannot write outside the layer buffer.
   if (x < 0 || y < 0 || x >= W || y >= H) return true;
   if (x < clipX0 || y < clipY0 || x >= clipX1 || y >= clipY1) return true;
   uint8_t* px = &gLayerBuf[((size_t)y * W + x) * 4];
@@ -1041,9 +1053,11 @@ void panelResume() {
    observed twice in v3.0.1 under back-to-back swaps (since paced away in panelShow)
    and once more at a v3.5 OTA boot. Only human eyes ever caught it; a reboot always
    cured it. This makes the firmware its own witness: the channel's working-descriptor
-   register (outlink_dscr, via gdma_ll_tx_get_prefetched_desc_addr) must move between two samples 1.5 ms apart (the chain fetches a descriptor
-   every ~50 us at 5 MHz, and one full pass is ~14 ms, so two equal samples can never
-   be a coincidental full-loop alias). Frozen on two consecutive ticks = the output
+   register (outlink_dscr, via gdma_ll_tx_get_prefetched_desc_addr) must move between
+   two samples 1.5 ms apart. A descriptor lasts ~26-52 us and a full pass 6-25 ms
+   across the supported geometry/clock range (5 or 10 MHz), so a healthy chain always
+   moves within 1.5 ms and two equal samples can never be a coincidental full-loop
+   alias. Frozen on two consecutive ticks = the output
    stage is dead; the reboot's cure -- stop, reset the LCD FIFO, re-arm the chain,
    restart -- is applied in place, with the event logged loudly. */
 static void panelOutputRestart() {

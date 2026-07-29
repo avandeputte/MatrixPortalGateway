@@ -54,8 +54,12 @@ bool sdInfo(uint64_t& sizeMB, uint64_t& usedMB, const char*& type) {
   return true;
 }
 
-bool sdRemoveTree(const char* path) {
+static bool sdRemoveTreeDepth(const char* path, int depth);
+bool sdRemoveTree(const char* path) { return sdRemoveTreeDepth(path, 0); }
+
+static bool sdRemoveTreeDepth(const char* path, int depth) {
   if (!gSdReady || !path || !path[0]) return false;
+  if (depth > 16) return false;      // stack guard: one C frame per level on the httpd task
   String p(path);
   { File probe = SD_MMC.open(p);                 // file, or a directory to recurse into?
     if (!probe) return false;
@@ -64,8 +68,10 @@ bool sdRemoveTree(const char* path) {
     if (!isDir) return SD_MMC.remove(p);
   }
   // Directory: delete the FIRST remaining child each pass, re-opening the dir between passes,
-  // so only one handle is live at a time. Each pass makes progress, so this is O(entries).
+  // so only one handle is live at a time. Each pass makes progress (the dot-entry skip below
+  // is defensive only -- ESP-IDF's FATFS VFS never emits them), so this terminates.
   for (int guard = 0; guard < 200000; guard++) {
+    wdgWebMs = millis();             // a big tree wipe must not trip the web-stall watchdog
     File dir = SD_MMC.open(p);
     if (!dir) return false;
     File e = dir.openNextFile();
@@ -77,9 +83,9 @@ bool sdRemoveTree(const char* path) {
     // name() may be a basename or a full path depending on the core; normalise, skip . / ..
     int slash = name.lastIndexOf('/');
     if (slash >= 0) name = name.substring(slash + 1);
-    if (name == "." || name == "..") continue;    // never recurse into these (would loop)
+    if (name == "." || name == "..") continue;    // defensive: would be a non-progress pass
     String child = p.endsWith("/") ? p + name : p + "/" + name;
-    const bool ok = eDir ? sdRemoveTree(child.c_str()) : SD_MMC.remove(child);
+    const bool ok = eDir ? sdRemoveTreeDepth(child.c_str(), depth + 1) : SD_MMC.remove(child);
     if (!ok) return false;                         // couldn't clear a child: give up (no infinite loop)
   }
   return SD_MMC.rmdir(p);

@@ -74,9 +74,9 @@ static const char* reasonPhrase(int code) {
   }
 }
 
-// httpd_resp_set_status stores the POINTER, so the line must outlive the send. One
-// static per code in play is overkill; a small rotating pool covers the single httpd
-// task's one-request-at-a-time reality.
+// httpd_resp_set_status stores the POINTER, so the line must outlive the send. A single
+// static line suffices: httpd serves one request at a time, so the previous status has
+// always been sent before the next request rewrites it.
 void httpxStatus(httpd_req_t* r, int code) {
   static char line[32];
   snprintf(line, sizeof(line), "%d %s", code, reasonPhrase(code));
@@ -135,7 +135,7 @@ static void urlDecode(const char* in, size_t len, String& out) {
   for (size_t i = 0; i < len; i++) {
     char c = in[i];
     if (c == '+') { out += ' '; continue; }
-    if (c == '%' && i + 2 < len + 1 && isxdigit((unsigned char)in[i+1]) && isxdigit((unsigned char)in[i+2])) {
+    if (c == '%' && i + 2 < len && isxdigit((unsigned char)in[i+1]) && isxdigit((unsigned char)in[i+2])) {
       char h[3] = { in[i+1], in[i+2], 0 };
       out += (char)strtol(h, nullptr, 16);
       i += 2;
@@ -276,7 +276,7 @@ static esp_err_t dispatch(httpd_req_t* r) {
     if (r->method == HTTP_OPTIONS) {
       // CORS preflight for any API path: one wildcard answer instead of the ~25
       // per-route OPTIONS registrations the old server carried.
-      httpd_resp_set_hdr(r, "Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
+      httpd_resp_set_hdr(r, "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
       httpd_resp_set_hdr(r, "Access-Control-Allow-Headers", "Content-Type");
       httpxStatus(r, 204);
       rc = httpd_resp_send(r, "", 0);

@@ -153,8 +153,9 @@ static inline void stagePx(int x, int y, uint8_t& r, uint8_t& g, uint8_t& b) {
   b = (uint8_t)(( v        & 0x1F) << 3);
 }
 
-// Present the staged frame through the configured transition. Runs on taskWeb; each
-// tween step is paced by panelShow()'s one-frame yield, and the web watchdog is fed.
+// Present the staged frame through the configured transition. Runs on the httpd task
+// (v3.0 moved request handling off taskWeb); each tween step is paced by panelShow()'s
+// one-frame yield, and the web watchdog is fed.
 void canvasStagePresent() {
   const int W = gPanel.panelW, H = gPanel.panelH;
   const uint8_t type = gTransType;
@@ -255,8 +256,13 @@ int canvasAnimSave(const char* name) {
   animPath(name, path, sizeof(path));
   File f = FFat.open(tmp, "w");
   if (!f) return 507;                                     // out of FATFS space / fd
+  // fps is reconstructed from the stored interval, ROUNDED and clamped to the 1..60 range
+  // Begin accepts -- truncation wrote fps=62 for a 16 ms (60 fps) animation, which the
+  // loader then rejected: a 60 fps animation could be saved but never loaded (v3.11.1).
+  uint32_t fps = (1000u + animIntervalMs / 2) / (animIntervalMs ? animIntervalMs : 66);
+  if (fps < 1) fps = 1;  if (fps > 60) fps = 60;
   uint8_t hdr[14] = { 'M','P','G','A', 1, animFmt,
-                      (uint8_t)(1000u / (animIntervalMs ? animIntervalMs : 66)),
+                      (uint8_t)fps,
                       (uint8_t)(animLoop ? 1 : 0),
                       (uint8_t)(animW >> 8), (uint8_t)animW,
                       (uint8_t)(animH >> 8), (uint8_t)animH,
@@ -272,7 +278,7 @@ int canvasAnimSave(const char* name) {
   f.close();
   if (!ok) { FFat.remove(tmp); return 507; }
   FFat.remove(path);                                      // replace atomically-ish
-  FFat.rename(tmp, path);
+  if (!FFat.rename(tmp, path)) { FFat.remove(tmp); return 507; }   // a failed rename is NOT ok
   return 0;
 }
 
@@ -292,7 +298,7 @@ int canvasAnimLoadPlay(const char* name) {
   uint16_t fr = (hdr[12] << 8) | hdr[13];
   int rc = canvasAnimBegin(hdr[5], hdr[6], hdr[7] & 1, w, h, fr);
   if (rc) { f.close(); return rc; }
-  static uint8_t buf[8192];        // single caller (taskWeb / boot); off the stack
+  static uint8_t buf[8192];        // single caller (httpd task / boot -- never both); off the stack
   size_t got;
   while ((got = f.read(buf, sizeof(buf))) > 0) {
     canvasAnimFeed(buf, got);
@@ -359,7 +365,10 @@ void canvasAnimList(void (*sink)(const char*)) {
 // header + tiles) and lazy-loaded on bind. Uploads build into a NEW allocation and publish
 // at Commit, so a bound sheet is never observed half-written (the old single-sheet design
 // cleared atlasReady during an upload and every sprite silently no-opped meanwhile).
-// Everything here runs on the httpd task only -- no locking needed, including eviction.
+// Mutations (Begin/Feed/Commit/Save/Delete and eviction) run on the httpd task OR, for a
+// lazy-loading bind inside a canvas stream, on taskWeb -- but never concurrently: the
+// stream-channel guard (csBusy) blocks every httpd atlas route while a stream is open,
+// and the pump only runs while one is. That exclusion is the locking.
 
 struct AtlasSheet {
   char          name[ATLAS_NAME_MAX + 1];  // "" = free slot
@@ -465,6 +474,12 @@ void canvasAtlasFeed(const uint8_t* data, size_t n) {
   if (atlasStageOff + n > atlasStageTotal) n = atlasStageTotal - atlasStageOff;
   memcpy(atlasStage + atlasStageOff, data, n);
   atlasStageOff += n;
+}
+
+// Drop a half-fed staging buffer NOW (an aborted upload used to park up to 2 MB of PSRAM
+// until the next Begin happened to reclaim it).
+void canvasAtlasAbort() {
+  if (atlasStage) { free(atlasStage); atlasStage = nullptr; }
 }
 
 int canvasAtlasCommit() {
@@ -604,7 +619,7 @@ int canvasAtlasSave(const char* name) {
   f.close();
   if (!ok) { FFat.remove(tmp); return 507; }
   FFat.remove(path);
-  FFat.rename(tmp, path);
+  if (!FFat.rename(tmp, path)) { FFat.remove(tmp); return 507; }   // a failed rename is NOT ok
   atlasTab[i].persisted = true;
   return 0;
 }
@@ -925,6 +940,7 @@ static uint16_t* fontRows = nullptr;       // FONT1252_TOTAL*height rows, native
 static size_t    fontRowsCap = 0;          // uint16 entries allocated
 static Font1252  fontCustom = { 0, 0, 0, nullptr };
 static bool      fontLoaded = false;
+static char      fontSlotName[40] = "";    // which LIBRARY face occupies the slot ("" = custom upload)
 
 // Parse an MPFT blob into the slot. 0 on success, else the HTTP status for the reply.
 int canvasFontInstall(const uint8_t* blob, size_t len) {
@@ -933,10 +949,16 @@ int canvasFontInstall(const uint8_t* blob, size_t len) {
   if (!w || w > 16 || !h || a > h)                             return 400;
   if (len != 8 + (size_t)FONT1252_GLYPHS * h * 2)              return 400;
   const size_t entries = (size_t)FONT1252_TOTAL * h;
-  if (fontRowsCap < entries) {               // (re)allocate; growing frees the old table, so
-    fontLoaded = false;                      // nothing may still point at it --
-    if (tickFont == &fontCustom) tickFont = tickerFace();   // -- least of all a running ticker
-    if (fontRows) free(fontRows);
+  if (fontRowsCap < entries) {               // (re)allocate; growing replaces the old table
+    fontLoaded = false;
+    if (tickFont == &fontCustom) tickFont = tickerFace();   // stop new draws using the old rows
+    // DEFERRED free (v3.11.1): a presenting task inside the ticker overlay hook may have
+    // captured font->rows just before the re-point above; freeing immediately is a narrow
+    // use-after-free. Park the old table and free it on the NEXT growing install, by which
+    // time any such in-flight frame (milliseconds) is long finished.
+    static uint16_t* fontRowsOld = nullptr;
+    if (fontRowsOld) free(fontRowsOld);
+    fontRowsOld = fontRows;
     fontRows = (uint16_t*)ps_malloc(entries * 2);
     fontRowsCap = fontRows ? entries : 0;
     if (!fontRows) return 503;
@@ -948,6 +970,7 @@ int canvasFontInstall(const uint8_t* blob, size_t len) {
   fontCustom.width = w; fontCustom.height = h; fontCustom.ascent = a;
   fontCustom.rows  = fontRows;
   fontLoaded = true;
+  fontSlotName[0] = 0;                       // slot now holds this upload, not a library face
   return 0;
 }
 
@@ -990,7 +1013,7 @@ int canvasFontSave(const char* name) {
   f.close();
   if (!ok) { FFat.remove(tmp); return 507; }
   FFat.remove(path);                         // replace atomically-ish
-  FFat.rename(tmp, path);
+  if (!FFat.rename(tmp, path)) { FFat.remove(tmp); return 507; }   // a failed rename is NOT ok
   return 0;
 }
 
@@ -1065,6 +1088,11 @@ void canvasFontList(void (*sink)(const char*)) {
 const Font1252* canvasFontByName(const char* name) {
   if (!name || !*name) return nullptr;
   if (strcmp(name, "custom") == 0) return fontLoaded ? &fontCustom : nullptr;
-  if (canvasFontLoad(name) != 0)   return nullptr;   // a library face loads into the slot first
+  // One-entry cache (v3.11.1): text ops inside a batch resolve the SAME face per op, and each
+  // canvasFontLoad is a full FATFS read (up to 64 KB). fontSlotName tracks which library face
+  // occupies the slot; canvasFontInstall clears it when a custom upload overwrites the slot.
+  if (fontLoaded && fontSlotName[0] && strcmp(fontSlotName, name) == 0) return &fontCustom;
+  if (canvasFontLoad(name) != 0) { fontSlotName[0] = 0; return nullptr; }
+  strlcpy(fontSlotName, name, sizeof(fontSlotName));
   return &fontCustom;
 }
