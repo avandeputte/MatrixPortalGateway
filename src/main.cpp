@@ -26,7 +26,7 @@ RTC_NOINIT_ATTR static uint32_t sfPanicBoots;
 //   * sfFsInit() must precede vmInit(), which restores /vmods.dat.
 //   * vmInit() must precede dispInit(), which reads vmCount.
 //   * dispInit() runs before WiFi so the panel driver gets first claim on the
-//     internal SRAM its DMA framebuffer needs (quad PSRAM is far too slow).
+//     internal SRAM its default framebuffer needs (fbPsram moves it to PSRAM, v3.11).
 
 void setup() {
   // 1. Mutexes first -- must exist before any task touches shared data
@@ -48,7 +48,7 @@ void setup() {
   Serial.setTxTimeoutMs(0);
   { unsigned long t = millis(); while (!Serial && millis() - t < 3000) delay(10); }
   delay(200);
-  printf("\n[Boot] %s v%s (gateway API %s)\n", PRODUCT_NAME, FW_VERSION, API_VERSION);
+  printf("\n[Boot] %s v%s\n", PRODUCT_NAME, FW_VERSION);
   // Which app slot is actually running, and when it was built. A serial reflash writes ota_0 and
   // resets otadata, but an OTA leaves the selector on the other slot -- so this is the first thing
   // to check when a board seems to be running firmware you did not just flash.
@@ -123,9 +123,9 @@ void setup() {
   vmBuildReel();      // the shared reel: every CP1252 glyph, then the colours
   vmInit((int)gPanel.cols * (int)gPanel.rows);
 
-  // 6. Panel. Before WiFi: the DMA framebuffer must come out of internal SRAM
-  //    (this board's PSRAM is quad SPI and too slow to feed it), and the WiFi
-  //    stack is the other big claimant on that pool.
+  // 6. Panel. Before WiFi: the default (internal-SRAM) framebuffer must be claimed
+  //    before the WiFi stack, the other big claimant on that pool. (fbPsram moves the
+  //    framebuffer to octal PSRAM instead -- v3.11.)
   dispInit();
   dispMarkDirty();
 

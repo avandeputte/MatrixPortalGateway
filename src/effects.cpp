@@ -128,8 +128,8 @@ const char* effectName(uint8_t e) {
 // The advertised set as a JSON array -- one source of truth for GET /api/canvas + /api/capabilities.
 /* ---- self-describing effect defs (v3.4) --------------------------------------
    The param vocabulary: ONE definition per knob (key, type, range, default, label).
-   Its order is load-bearing for the legacy "effectParams" union, which derives from
-   it (skipping "speed", which predates the union and was never listed). */
+   Order is free -- effectDefs is the only consumer (the flat effectParams union was
+   removed in v3.12 with the legacy-client support). */
 struct EffectParamDef {
   const char* key; const char* type;
   int16_t minv, maxv, defv; bool hasDef;
@@ -210,23 +210,6 @@ const char* effectDefsJson() {
   return buf;
 }
 
-const char* effectParamsUnionJson() {
-  static char buf[96];
-  if (!buf[0]) {
-    int n = snprintf(buf, sizeof(buf), "[");
-    for (int v = 0; v < EPI_COUNT; v++) {
-      if (v == EPI_SPEED) continue;                        // legacy list never carried speed
-      bool used = false;
-      for (size_t e = 0; e < sizeof(DEFS) / sizeof(DEFS[0]) && !used; e++)
-        for (uint8_t k = 0; k < DEFS[e].np; k++)
-          if (DEFS[e].p[k] == v) { used = true; break; }
-      if (used) n += snprintf(buf + n, sizeof(buf) - n, "%s\"%s\"",
-                              buf[n - 1] == '[' ? "" : ",", EPV[v].key);
-    }
-    snprintf(buf + n, sizeof(buf) - n, "]");
-  }
-  return buf;
-}
 
 const char* effectListJson() {
   static char buf[160];

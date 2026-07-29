@@ -723,10 +723,10 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
 
   char head[320];
   snprintf(head, sizeof(head),
-           "{\"product\":\"%s\",\"fw\":\"%s\",\"api\":\"%s\","
+           "{\"product\":\"%s\",\"fw\":\"%s\","
            "\"openapi\":\"/openapi.yaml\","
            "\"grid\":{\"rows\":%d,\"cols\":%d},\"modules\":%d,\"maxFlaps\":%d,",
-           PRODUCT_NAME, FW_VERSION, API_VERSION, rows, cols, vmCount, SF_MAX_FLAPS);
+           PRODUCT_NAME, FW_VERSION, rows, cols, vmCount, SF_MAX_FLAPS);
   capPut(head);
 
   // The colour flaps are NOT characters. They are named, because on the index-addressed path
@@ -790,10 +790,10 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
              "\"blend\",\"text\",\"textbox\",\"image\",\"sprite\",\"scroll\",\"show\"],"
              "\"compositing\":{\"alpha\":true,\"blendModes\":[\"over\",\"add\",\"multiply\",\"screen\",\"max\"],\"aa\":true,"
              "\"transform\":true,\"layers\":true,\"macros\":true}},"
-             "\"effects\":%s,\"effectParams\":%s,",
+             "\"effects\":%s,",
              (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
              (unsigned)ATLAS_MAX_SHEETS, (unsigned)ATLAS_TOTAL_BUDGET,
-             (unsigned)ATLAS_MAX_SHEET_BYTES, effectListJson(), effectParamsUnionJson());
+             (unsigned)ATLAS_MAX_SHEET_BYTES, effectListJson());
     // A truncated canvas block would be INVALID JSON for every client; make it loud.
     if (strlen(cv) >= sizeof(cv) - 1) printf("[WEB] capabilities canvas block TRUNCATED -- enlarge cv[]\n");
     capPut(cv); }
@@ -801,7 +801,6 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
   // Self-describing effect defs (v3.4): every effect with exactly the params it
   // consumes -- clients gate on the "effectDefs" feature token and build their
   // effect UIs from this instead of hard-coding options. Additive: the flat
-  // "effects" + "effectParams" above are unchanged for older clients.
   capPut("\"effectDefs\":");
   capPut(effectDefsJson());
   capPut(",");
@@ -908,7 +907,7 @@ static esp_err_t handleApiConfigGet(httpd_req_t* r) {
   // companion parses MAJOR.MINOR out of it and enables its gateway-stored
   // settings on >= 3.1; this firmware implements that surface exactly, so it
   // must answer 3.1.0. "product" and "fwVersion" are what tell the two apart.
-  doc["version"]   = API_VERSION;
+  doc["version"]   = FW_VERSION;
   doc["product"]   = PRODUCT_NAME;
   doc["fwVersion"] = FW_VERSION;
   doc["wSSID"]    = cfg.wifiSSID;

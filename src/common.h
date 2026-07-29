@@ -82,12 +82,6 @@ static inline uint32_t boardId24() {          // 6 hex digits -- hostname suffix
   esp_efuse_mac_get_default(m);
   return ((uint32_t)m[3] << 16) | ((uint32_t)m[4] << 8) | (uint32_t)m[5];
 }
-static inline uint32_t boardId32() {          // 8 hex digits -- historical unique id (kept for reuse)
-  uint8_t m[6] = {0};
-  esp_efuse_mac_get_default(m);
-  return ((uint32_t)m[2] << 24) | ((uint32_t)m[3] << 16)
-       | ((uint32_t)m[4] << 8)  | (uint32_t)m[5];
-}
 
 /* ============================================================================
  *  BOARD / BUILD CONFIGURATION
@@ -145,19 +139,11 @@ static inline uint32_t boardId32() {          // 8 hex digits -- historical uniq
 #define RTC_YEAR_OFFSET   2000   // PCF85063 reg 6 is 0-99 = 2000-2099
 
 /* ---- Firmware identity ---- */
+// ONE honest version: FW_VERSION is reported as "version"/"fwVersion" by GET /api/config
+// and as "fw" in capabilities. Clients key product-specific behaviour on "product" and on
+// capability tokens, never on version heuristics (the old API_VERSION="3.1.0" masquerade
+// for the physical-gateway companion gate was removed in v3.12).
 #define FW_VERSION           "3.12.0"   // this product's version (UI + boot log)
-// The gateway REST surface this firmware implements, reported as "version"
-// by GET /api/config. The companion app gates its features on reading >= 3.1
-// there, and this firmware is API-compatible with Split-Flap Gateway 3.1, so it
-// must answer 3.1.0 -- not FW_VERSION. GET /api/config also returns "product"
-// and "fwVersion" so a client can tell the two apart.
-//
-// v1.1 adds GET /lang/<code> (the UI's translation dictionaries), but that is a
-// DASHBOARD concern, not part of the contract the companion negotiates -- so this
-// stays 3.1.0. Raising it would advertise split-flap 3.5 endpoints (calibration,
-// provisioning) that this product does not have and cannot have: its modules are
-// drawn, not driven.
-#define API_VERSION          "3.1.0"
 #define PRODUCT_NAME         "Matrix Portal Gateway"
 
 /* ---- Network / service defaults (overridable at runtime via Settings) ---- */

@@ -185,7 +185,7 @@ void dispBlank() {
 // Re-create the panel and repaint. Called only when an upload FAILS (a
 // successful one reboots into the new image and initialises normally).
 void dispResume() {
-  if (gPanel.ready) { panelResume(); dispMarkDirty(); return; }   // legacy path
+  if (gPanel.ready) { panelResume(); dispMarkDirty(); return; }   // panel was only stopped, not released
   // Re-init at the depth that was actually RUNNING (dispInit may have clamped
   // the configured depth to fit RAM; asking for the configured value again
   // could refuse and leave the wall dark).

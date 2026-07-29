@@ -7,8 +7,8 @@
 
 // Runtime configuration; the single instance is the global `cfg`. Defaults are
 // set in cfgSetDefaults(); loadConfig()/saveConfig() persist it to the
-// "splitflap" NVS namespace (config.cpp). The namespace and key names are
-// unchanged from the physical Split-Flap Gateway, so a settings backup moves between them.
+// "splitflap" NVS namespace (config.cpp). Key names are stable so upgrades keep
+// settings; they carry no cross-product portability promise.
 struct GwConfig {
   char          wifiSSID[64];
   char          wifiPass[64];

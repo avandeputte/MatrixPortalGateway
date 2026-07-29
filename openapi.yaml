@@ -12,11 +12,9 @@ info:
     is hardware-only, so every endpoint, schema and behaviour documented here is identical on
     both boards.
 
-    **The `version` above is the gateway API level (3.1), not the firmware's version.** That is
-    deliberate: the companion app gates its features on reading `>= 3.1` from `GET /api/config`,
-    so this firmware answers `3.1.0` there and reports its own firmware version (currently
-    `3.0.0`) in `fwVersion`, next to `product`. See ARCHITECTURE.md → "Firmware identity vs
-    API level".
+    **One honest version since v3.12**: `GET /api/config` reports the firmware's real version
+    in both `version` and `fwVersion` (the old fixed `3.1.0` "API level" masquerade is gone).
+    Clients key product-specific behaviour on `product` and on capability tokens.
 
     **Firmware 3.0 replaced the HTTP server** (ESP-IDF `esp_http_server`, natively) and with it:
     `GET /api/events`, a Server-Sent Events stream pushing the display state whenever the wall
@@ -890,7 +888,7 @@ paths:
       summary: Binary draw commands (v3.5)
       description: |
         The binary twin of `POST /api/canvas/ops` — a fixed-layout encoding
-        (`canvas.opsBin` capability, format version 2 since fw 3.12) that skips JSON parsing
+        (`canvas.opsBin` capability level, 2 since fw 3.12) that skips JSON parsing
         entirely: ~6× smaller and 1.5–1.9× the frame rate on op-heavy scenes. Same
         semantics (auto-present unless the batch contains SHOW); a malformed batch is
         a `400` with nothing drawn presented. Game-rate clients should carry the same
@@ -910,9 +908,9 @@ paths:
         `0x12` SCROLL dx dy rgb · `0x13` SHOW · `0x14` BLEND mode · `0x15` ALPHA a
         (both fw 3.8).
 
-        **Format version 2 (fw 3.12)** closes the gap with the JSON surface — every
-        coordinate now runs through the same affine transform (v1 batches decode
-        identically; `ORIGIN` is a matrix reset + pure translate):
+        **Level 2 (fw 3.12)** — the full surface: every coordinate runs through the
+        same affine transform as the JSON decoder (`ORIGIN` is a matrix reset + pure
+        translate):
         `0x16` SAVE · `0x17` RESTORE (stack depth 8) · `0x18` TRANSLATE x y ·
         `0x19` SCALE sx sy (u16 8.8 fixed-point; sy 0 = uniform) · `0x1A` ROTATE deg
         (s16, clockwise) · `0x1B` LAYER · `0x1C` COMPOSITE x y mode alpha ·
@@ -921,8 +919,8 @@ paths:
         depth 4) · `0x1F` BEZIER n t flags rgb n×(x y) (n 3|4; flags bit0 aa) ·
         `0x20` AALINE x y x1 y1 rgb. Additive flag bits: CIRCLE flags bit1 = aa
         outline, POLY flags bit2 = aa. Strict decode: an unknown opcode or a
-        truncated op fails the batch — feature-detect via `canvas.opsBin` (send
-        0x16+ only when it reads ≥ 2).
+        truncated op fails the batch — check `canvas.opsBin` when boards run
+        different firmware (send 0x16+ only when it reads ≥ 2).
       requestBody:
         required: true
         content: { application/octet-stream: { schema: { type: string, format: binary } } }
@@ -2030,7 +2028,6 @@ paths:
                 properties:
                   product:  { type: string, example: "Matrix Portal Gateway" }
                   fw:       { type: string, example: "3.3.0" }
-                  api:      { type: string, example: "3.1.0" }
                   grid:
                     type: object
                     properties:
@@ -2093,7 +2090,7 @@ paths:
                       rect:     { type: boolean, example: true, description: "`PUT /api/canvas/rect` partial updates" }
                       rects:    { type: boolean, example: true, description: "`PUT /api/canvas/rects` multi-rect deltas (v3.1)" }
                       stream:   { type: boolean, example: true, description: "`PUT /api/canvas/stream` persistent TLV draw channel (v3.2)" }
-                      opsBin:   { type: integer, example: 2, description: "Binary ops format level accepted by POST /api/canvas/opsb and stream record 0x06 — 1 = base set (v3.5), 2 adds transform/layers/macros/bezier/aa opcodes 0x16-0x20 (fw 3.12). Purely additive; send the v2 opcodes only when this reads >= 2" }
+                      opsBin:   { type: integer, example: 2, description: "Binary ops level accepted by POST /api/canvas/opsb and stream record 0x06 — 2 = opcodes 0x01-0x20 (fw 3.12). Check when boards run different firmware" }
                       anim:     { type: boolean, example: true, description: "`PUT /api/canvas/anim` on-device animation" }
                       ticker:   { type: boolean, example: true, description: "`POST /api/canvas/ticker` scrolling text" }
                       readback: { type: boolean, example: true, description: "`GET /api/canvas/frame` screenshot readback" }
@@ -2134,11 +2131,6 @@ paths:
                               max:     { type: integer, description: "int params only" }
                               default: { description: "Absent = omitting the param keeps the effect's own built-in look" }
                               label:   { type: string, example: Audio reactive }
-                  effectParams:
-                    type: array
-                    description: "Optional tuning keys `POST /api/canvas/effect` accepts alongside type/speed"
-                    items: { type: string }
-                    example: [hue, density]
                   effects:
                     type: array
                     description: >
@@ -2857,7 +2849,7 @@ components:
     Config:
       type: object
       properties:
-        version:      { type: string,  example: "3.1.0", description: "The gateway API level, NOT this firmware's version — the companion parses MAJOR.MINOR out of it and gates its features on >= 3.1. `product` and `fwVersion` are what tell the firmwares apart. Absent on pre-3.1 gateways" }
+        version:      { type: string,  example: "3.12.0", description: "This firmware's version (same value as fwVersion since v3.12). Key product behaviour on `product` and capability tokens, not version heuristics" }
         product:      { type: string,  example: "Matrix Portal Gateway" }
         fwVersion:    { type: string,  example: "2.1.0", description: "This firmware's own version" }
         wSSID:        { type: string,  example: "MyNetwork" }

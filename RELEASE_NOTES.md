@@ -2,6 +2,22 @@
 
 ## v3.12.0 — 2026-07-29
 
+### Removed — legacy-client support (breaking, by design)
+
+The project is incubating with the companion kept in lockstep, so compatibility shims
+for hypothetical old clients are gone:
+- **One honest version.** `GET /api/config` now reports the real firmware version in
+  `version` (the fixed `"3.1.0"` API-level masquerade is deleted, along with the `api`
+  field in capabilities). Clients key behaviour on `product` + capability tokens.
+- **`effectParams` is gone** from capabilities — `effectDefs` (fw 3.4) is the one
+  source of effect parameters, and the param vocabulary is no longer order-constrained
+  by the legacy flat list.
+- Dead `boardId32()` removed; the NVS cross-product settings-portability claim dropped
+  (key names unchanged, so settings survive the upgrade); stale "quad PSRAM too slow"
+  and "legacy path" comments corrected.
+- Companion must be updated in the same step (it reads `effectParams` and gates its
+  settings-blob feature on `version >= 3.1`).
+
 ### Added — binary ops format 2: full parity with the JSON surface
 
 The binary encoding (`POST /api/canvas/opsb` + stream record `0x06`) gains everything
