@@ -53,3 +53,34 @@ bool sdInfo(uint64_t& sizeMB, uint64_t& usedMB, const char*& type) {
   type   = gSdType;
   return true;
 }
+
+bool sdRemoveTree(const char* path) {
+  if (!gSdReady || !path || !path[0]) return false;
+  String p(path);
+  { File probe = SD_MMC.open(p);                 // file, or a directory to recurse into?
+    if (!probe) return false;
+    const bool isDir = probe.isDirectory();
+    probe.close();
+    if (!isDir) return SD_MMC.remove(p);
+  }
+  // Directory: delete the FIRST remaining child each pass, re-opening the dir between passes,
+  // so only one handle is live at a time. Each pass makes progress, so this is O(entries).
+  for (int guard = 0; guard < 200000; guard++) {
+    File dir = SD_MMC.open(p);
+    if (!dir) return false;
+    File e = dir.openNextFile();
+    if (!e) { dir.close(); break; }               // empty now
+    String name = e.name();
+    const bool eDir = e.isDirectory();
+    e.close();
+    dir.close();
+    // name() may be a basename or a full path depending on the core; normalise, skip . / ..
+    int slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.substring(slash + 1);
+    if (name == "." || name == "..") continue;    // never recurse into these (would loop)
+    String child = p.endsWith("/") ? p + name : p + "/" + name;
+    const bool ok = eDir ? sdRemoveTree(child.c_str()) : SD_MMC.remove(child);
+    if (!ok) return false;                         // couldn't clear a child: give up (no infinite loop)
+  }
+  return SD_MMC.rmdir(p);
+}

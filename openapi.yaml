@@ -521,6 +521,18 @@ paths:
         "400": { description: Bad path / is a directory }
         "404": { description: Not found }
         "503": { description: No card mounted }
+  /api/sd/mkdir:
+    put:
+      tags: [Status]
+      summary: Create a directory on the SD card (v3.10)
+      parameters:
+        - { name: path, in: query, required: true, schema: { type: string }, description: "card-absolute path; the parent directory must already exist" }
+      responses:
+        "200": { description: Created }
+        "400": { description: Bad path }
+        "409": { description: Already exists }
+        "503": { description: No card mounted }
+        "507": { description: mkdir failed (parent missing?) }
   /api/sd/put:
     put:
       tags: [Status]
@@ -539,14 +551,21 @@ paths:
   /api/sd/delete:
     delete:
       tags: [Status]
-      summary: Delete a file from the SD card (v3.10)
+      summary: Delete a file or folder from the SD card (v3.10)
+      description: |
+        Removes a file, an empty directory, or — with `recursive=1` — a directory and all its
+        contents. A non-empty directory without `recursive=1` returns 409. The card root (`/`)
+        cannot be deleted.
       parameters:
-        - { name: path, in: query, required: true, schema: { type: string }, description: "card-absolute path (files only)" }
+        - { name: path, in: query, required: true, schema: { type: string }, description: "card-absolute path" }
+        - { name: recursive, in: query, schema: { type: string, enum: ["1"] }, description: "set to 1 to delete a directory and everything under it" }
       responses:
         "200": { description: Deleted }
-        "400": { description: Bad path / is a directory }
+        "400": { description: Bad path / refusing to delete the card root }
         "404": { description: Not found }
+        "409": { description: Directory not empty (pass recursive=1) }
         "503": { description: No card mounted }
+        "507": { description: Delete failed }
   /api/sound:
     get:
       tags: [Status]
@@ -2113,29 +2132,6 @@ paths:
                       on the Split-Flap gateway. Start one with `POST /api/canvas/effect`.
                     items: { type: string }
                     example: [plasma, fire, matrix, fliporama, clock, life]
-                  effectDefs:
-                    type: array
-                    description: >
-                      fw 3.5 (`effectDefs` feature token): one entry per effect declaring
-                      exactly the params it consumes — clients build effect UIs from this
-                      instead of hard-coding options. Additive: `effects`/`effectParams`
-                      are unchanged for older clients.
-                    items:
-                      type: object
-                      properties:
-                        id:   { type: string, example: fire, description: "Wire name for POST /api/canvas/effect" }
-                        name: { type: string, example: Fire, description: "Display name, shown verbatim" }
-                        params:
-                          type: array
-                          items:
-                            type: object
-                            properties:
-                              key:     { type: string, example: audio }
-                              type:    { type: string, enum: [int, bool] }
-                              min:     { type: integer, description: "int params only" }
-                              max:     { type: integer, description: "int params only" }
-                              default: { description: "Absent = omitting the param keeps the effect's own built-in look" }
-                              label:   { type: string, example: Audio reactive }
                   features:
                     type: array
                     description: "Capability tokens a client checks instead of sniffing the firmware version. 'canvas', 'effects' and 'ticker' appear on the Matrix gateway only. 'brightness' (v2.2) says the panel brightness is live-settable via GET/POST /api/display/brightness (also persisted as panelBright in POST /api/config/settings, 1..255, applied on the next frame). Hardware-conditional tokens appear only when the peripheral is present: 'audio' (mics), 'sound' (speaker), 'environment' (SHTC3), 'sd' (mounted microSD card, v3.10)."

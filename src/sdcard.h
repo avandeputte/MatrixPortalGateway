@@ -16,3 +16,8 @@ void  sdInit();                 // mount the card (setup() only); no-op-safe if 
 bool  sdReady();                // card mounted and usable
 // Capacity snapshot (all MB). Returns false when no card is mounted.
 bool  sdInfo(uint64_t& sizeMB, uint64_t& usedMB, const char*& type);
+// Recursively delete a directory (its contents, then the directory itself). Deletes only
+// the first remaining child each pass so at most one directory handle is open at a time --
+// FATFS's open-file table is tiny, so a recursive walk that holds a handle per level would
+// exhaust it. Returns true only if the whole tree is gone. A file path also works.
+bool  sdRemoveTree(const char* path);

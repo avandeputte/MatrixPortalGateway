@@ -1660,6 +1660,16 @@ static esp_err_t handleApiSdList(httpd_req_t* r) {
   return httpxChunkEnd(r);
 }
 
+// PUT /api/sd/mkdir?path=/dir -- create a directory (parent must exist).
+static esp_err_t handleApiSdMkdir(httpd_req_t* r) {
+  if (!sdReady()) return httpxErr(r, 503, "No SD card");
+  String path = httpxArg(r, "path");
+  if (!sdPathOk(path) || path == "/") return httpxErr(r, 400, "Bad path");
+  if (SD_MMC.exists(path)) return httpxErr(r, 409, "Already exists");
+  if (!SD_MMC.mkdir(path)) return httpxErr(r, 507, "mkdir failed (does the parent exist?)");
+  return httpxSend(r, 200, "application/json", "{\"ok\":true}");
+}
+
 // GET /api/sd/get?path=/dir/file -- stream a file back as raw bytes.
 static esp_err_t handleApiSdGet(httpd_req_t* r) {
   if (!sdReady()) return httpxErr(r, 503, "No SD card");
@@ -1700,17 +1710,26 @@ static esp_err_t handleApiSdPut(httpd_req_t* r) {
   return httpxSend(r, 200, "application/json", out);
 }
 
-// DELETE /api/sd/delete?path=/dir/file -- remove a file (not directories).
+// DELETE /api/sd/delete?path=/dir/file[&recursive=1] -- remove a file, an empty directory,
+// or (with recursive=1) a directory and everything under it. The card root is protected.
 static esp_err_t handleApiSdDelete(httpd_req_t* r) {
   if (!sdReady()) return httpxErr(r, 503, "No SD card");
   String path = httpxArg(r, "path");
   if (!sdPathOk(path)) return httpxErr(r, 400, "Bad path");
+  if (path == "/") return httpxErr(r, 400, "Refusing to delete the card root");
   if (!SD_MMC.exists(path)) return httpxErr(r, 404, "Not found");
   File f = SD_MMC.open(path, "r");
   const bool isDir = f && f.isDirectory();
   if (f) f.close();
-  if (isDir) return httpxErr(r, 400, "Is a directory");
-  if (!SD_MMC.remove(path)) return httpxErr(r, 507, "Delete failed");
+  const bool recursive = httpxArg(r, "recursive") == "1";
+  if (!isDir) {
+    if (!SD_MMC.remove(path)) return httpxErr(r, 507, "Delete failed");
+  } else if (recursive) {
+    if (!sdRemoveTree(path.c_str())) return httpxErr(r, 507, "Recursive delete failed");
+  } else {
+    // rmdir only succeeds on an empty directory -- ask the client to opt into a recursive wipe.
+    if (!SD_MMC.rmdir(path)) return httpxErr(r, 409, "Directory not empty (pass recursive=1)");
+  }
   return httpxSend(r, 200, "application/json", "{\"ok\":true}");
 }
 
@@ -3786,6 +3805,7 @@ void webInit() {
   httpxOn("/api/sd",                 HTTP_GET,    handleApiSd);
   httpxOn("/api/sd/list",            HTTP_GET,    handleApiSdList);
   httpxOn("/api/sd/get",             HTTP_GET,    handleApiSdGet);
+  httpxOn("/api/sd/mkdir",           HTTP_PUT,    handleApiSdMkdir);
   httpxOn("/api/sd/put",             HTTP_PUT,    handleApiSdPut);
   httpxOn("/api/sd/delete",          HTTP_DELETE, handleApiSdDelete);
   httpxOn("/api/sound",              HTTP_GET,  handleApiSound);
