@@ -1,6 +1,8 @@
 #include "gateway.h"
 #include "sound.h"
 #include "audio.h"
+#include "sdcard.h"
+#include "SD_MMC.h"     // WAV playback from the card (v3.13)
 
 #include <Wire.h>
 #include <driver/gpio.h>
@@ -24,6 +26,11 @@ static uint16_t qFreq[SOUND_MAX_NOTES], qMs[SOUND_MAX_NOTES];
 static volatile int  qN = 0, qHead = 0;
 static volatile uint8_t qVol = 60;
 static volatile bool qStop = false;
+// WAV request (v3.13): one pending path, replaced atomically like the note queue. The
+// synth task is the ONLY writer to the I2S TX channel; WAV playback happens inside it.
+static char          wavPath[96] = "";
+static volatile bool wavReq = false;
+static volatile bool wavActive = false;
 
 static bool esw(uint8_t reg, uint8_t val) {
   Wire.beginTransmission(ES8311_ADDR);
@@ -96,13 +103,80 @@ void soundInit() {
 }
 
 bool soundAvailable() { return gSoundPresent; }
-bool soundPlaying()   { return gSynthRun && qHead < qN; }
+bool soundPlaying()   { return gSynthRun && (wavActive || qHead < qN); }
 
 /* ---- the synth task ----------------------------------------------------------------
    Renders 16-bit stereo sine at 16 kHz into the shared TX channel, one 128-frame
    block at a time. A 3 ms linear attack/release envelope on every note kills the
    clicks a hard sine edge makes on a small speaker. Self-stops (TX disabled, amp
    off) after ~5 s with nothing queued. */
+/* ---- WAV streaming (v3.13) --------------------------------------------------------
+   Strict format: RIFF/WAVE, PCM (fmt 1), 16-bit, 16 kHz (the duplex I2S clock is fixed
+   -- see audio.h), mono or stereo. Streams 2 KB at a time from the card, expands mono
+   to the stereo frame, scales by the request volume, and feeds the shared TX channel.
+   Aborted by qStop (soundStop / Quiet Time) or by a NEWER wav request. */
+static uint32_t rdU32(const uint8_t* p) { return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24); }
+static uint16_t rdU16(const uint8_t* p) { return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1]<<8)); }
+
+static void wavStream(const char* path, uint8_t vol) {
+  File f = SD_MMC.open(path, "r");
+  if (!f) { printf("[SOUND] wav: open failed %s\n", path); return; }
+  uint8_t h[12];
+  if (f.read(h, 12) != 12 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4)) {
+    printf("[SOUND] wav: not RIFF/WAVE: %s\n", path); f.close(); return;
+  }
+  uint16_t ch = 0, bits = 0; uint32_t rate = 0, dataLen = 0; bool haveFmt = false;
+  while (f.available() >= 8) {                       // walk the chunks to fmt + data
+    uint8_t ck[8];
+    if (f.read(ck, 8) != 8) break;
+    const uint32_t clen = rdU32(ck + 4);
+    if (!memcmp(ck, "fmt ", 4)) {
+      uint8_t fmt[16];
+      if (clen < 16 || f.read(fmt, 16) != 16) break;
+      if (rdU16(fmt) != 1) { printf("[SOUND] wav: not PCM\n"); f.close(); return; }
+      ch = rdU16(fmt + 2); rate = rdU32(fmt + 4); bits = rdU16(fmt + 14);
+      haveFmt = true;
+      if (clen > 16) f.seek(f.position() + (clen - 16));
+    } else if (!memcmp(ck, "data", 4)) {
+      dataLen = clen; break;                          // file position is now at the samples
+    } else f.seek(f.position() + clen + (clen & 1));
+  }
+  if (!haveFmt || !dataLen || bits != 16 || rate != 16000 || ch < 1 || ch > 2) {
+    printf("[SOUND] wav: need 16-bit 16 kHz mono/stereo PCM (got ch=%u rate=%lu bits=%u)\n",
+           ch, (unsigned long)rate, bits);
+    f.close(); return;
+  }
+  printf("[SOUND] wav: %s %s, %lu bytes\n", path, ch == 1 ? "mono" : "stereo",
+         (unsigned long)dataLen);
+  static uint8_t rd[2048];
+  static int16_t out[2048];                          // worst case: 1024 mono samples -> 2048
+  uint32_t left = dataLen;
+  wavActive = true;
+  while (left && !qStop && !wavReq) {                // a NEWER wav request aborts this one
+    const size_t want = left < sizeof(rd) ? left : sizeof(rd);
+    const size_t got = f.read(rd, want);
+    if (!got) break;
+    left -= got;
+    const int nsmp = (int)(got / 2);                 // 16-bit samples read
+    int nframes;
+    if (ch == 2) {
+      nframes = nsmp / 2;
+      for (int i = 0; i < nsmp; i++)
+        out[i] = (int16_t)((int32_t)((int16_t)rdU16(rd + i * 2)) * vol / 100);
+    } else {
+      nframes = nsmp;
+      for (int i = 0; i < nsmp; i++) {
+        const int16_t v = (int16_t)((int32_t)((int16_t)rdU16(rd + i * 2)) * vol / 100);
+        out[i * 2] = v; out[i * 2 + 1] = v;
+      }
+    }
+    size_t wr = 0;
+    i2s_channel_write(audioTxChan(), out, (size_t)nframes * 4, &wr, pdMS_TO_TICKS(400));
+  }
+  wavActive = false;
+  f.close();
+}
+
 static void synthTask(void* pv) {
   static int16_t blk[128 * 2];
   float phase = 0;
@@ -124,6 +198,15 @@ static void synthTask(void* pv) {
       taskEXIT_CRITICAL(&sndMux);
       continue;
     }
+    if (wavReq) {                                    // WAV playback request (v3.13)
+      char p[sizeof(wavPath)]; uint8_t v;
+      taskENTER_CRITICAL(&sndMux);
+      memcpy(p, wavPath, sizeof(p)); v = qVol; wavReq = false;
+      taskEXIT_CRITICAL(&sndMux);
+      wavStream(p, v);
+      idleSince = 0;
+      continue;
+    }
     if (head >= n) {                                   // nothing to play
       if (!idleSince) idleSince = millis();
       if (millis() - idleSince > 5000) {
@@ -136,7 +219,7 @@ static void synthTask(void* pv) {
         i2s_channel_disable(audioTxChan());
         bool exitNow;
         taskENTER_CRITICAL(&sndMux);
-        exitNow = (qHead >= qN);
+        exitNow = (qHead >= qN) && !wavReq;
         if (exitNow) gSynthRun = false;
         taskEXIT_CRITICAL(&sndMux);
         if (exitNow) break;
@@ -206,7 +289,8 @@ bool soundPlay(const uint16_t* freq, const uint16_t* ms, int n, uint8_t vol) {
   taskEXIT_CRITICAL(&sndMux);
   if (!gSynthRun) {
     gSynthRun = true;
-    if (xTaskCreatePinnedToCore(synthTask, "synth", 3072, NULL, 2, NULL, 0) != pdPASS) {
+    // 4 KB: the same task also streams WAVs (wavStream's File + chunk walk) -- v3.13
+    if (xTaskCreatePinnedToCore(synthTask, "synth", 4096, NULL, 2, NULL, 0) != pdPASS) {
       gSynthRun = false;                // creation failed: don't wedge sound until reboot
       return false;
     }
@@ -215,3 +299,26 @@ bool soundPlay(const uint16_t* freq, const uint16_t* ms, int n, uint8_t vol) {
 }
 
 void soundStop() { if (gSynthRun) qStop = true; }
+
+// Queue a WAV from the SD card (v3.13). Returns false when the speaker is absent, quiet
+// time is active, or the task cannot start. Format errors surface in the log -- the
+// file is parsed on the synth task, not here.
+bool soundPlayWav(const char* path, uint8_t vol) {
+  if (!gSoundPresent || !path || !path[0]) return false;
+  if (gQuietTime) return false;
+  if (!audioAcquireI2S()) return false;
+  taskENTER_CRITICAL(&sndMux);
+  qHead = 0; qN = 0;                       // a wav replaces any queued tones
+  strlcpy(wavPath, path, sizeof(wavPath));
+  qVol = vol > 100 ? 100 : vol;
+  wavReq = true;
+  taskEXIT_CRITICAL(&sndMux);
+  if (!gSynthRun) {
+    gSynthRun = true;
+    if (xTaskCreatePinnedToCore(synthTask, "synth", 4096, NULL, 2, NULL, 0) != pdPASS) {
+      gSynthRun = false;
+      return false;
+    }
+  }
+  return true;
+}

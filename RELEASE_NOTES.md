@@ -1,5 +1,30 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.13.0 — 2026-07-30
+
+### Added — the card earns its keep, plus a fourth audio visual
+
+- **SD animation streaming.** `POST /api/canvas/anim/play {"path":"/movies/x.mpg"}` plays
+  an MPGA straight from the microSD card, one 32 KB frame in memory at a time — the 8 MB
+  PSRAM cap is gone; length is bounded only by the card. Verified with a 19.7 MB /
+  600-frame movie looping with the heap untouched.
+- **WAV playback from SD.** `POST /api/sound {"wav":"/sounds/chime.wav","vol":80}` streams
+  real audio through the speaker (strict 16-bit 16 kHz mono/stereo PCM — the duplex I2S
+  clock is fixed). Runs on the same synth task that plays tones, so there is exactly one
+  writer to the TX channel; Quiet Time and the master enable/volume apply as ever.
+- **Spectrogram effect** (`spectro`). A scrolling frequency-vs-time waterfall of the mic:
+  newest column on the right, history marching left via the exact-round-trip panelScroll,
+  16 log bands interpolated over the panel height through the fire palette. `speed` sets
+  the scroll rate.
+- **Brightness schedule.** Settings → Brightness Schedule: auto-dim the panel in a daily
+  local-time window (e.g. evenings), with its own dim level. Edge-triggered, so a manual
+  brightness change inside the window sticks until the next boundary; **Quiet Time takes
+  precedence** (while quiet the panel is blanked and the schedule waits, re-applying the
+  right level the moment quiet ends).
+
+All four verified on the 256×64 board (waterfall + tone sweep, audible chime, 600-frame
+card stream with frames advancing, live dim/restore on schedule edges).
+
 ## v3.12.0 — 2026-07-29
 
 ### Removed — legacy-client support (breaking, by design)

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Matrix Portal Gateway API
-  version: "3.12"
+  version: "3.13"
   description: |
     REST API for the **Matrix Portal Gateway** firmware, running on a
     Waveshare ESP32-S3-RGB-Matrix driver board. It emulates a wall of split-flap modules on a
@@ -580,7 +580,13 @@ paths:
                   playing:   { type: boolean }
     post:
       tags: [Status]
-      summary: Play tones on the board's speaker (v3.6, `sound` feature token)
+      summary: Play tones or a WAV from the SD card (v3.6 / v3.13)
+      description: |
+        Tones: `{freq,ms,vol}` or `{notes:[[f,ms],…],vol}`; `{stop:true}` halts anything.
+        **WAV (v3.13):** `{"wav":"/sounds/x.wav","vol":80}` streams a file from the SD
+        card — strict 16-bit 16 kHz mono/stereo PCM (the duplex I2S clock is fixed).
+        Replaces queued tones; a newer request replaces it; Quiet Time silences it.
+        Format problems are logged on-device (the request 200s once the file exists).
       description: |
         On-device tone synthesis through the ES8311 DAC and power amp: one tone
         (`freq` 20–8000 Hz, `ms` ≤ 2000) or a `notes` sequence (`[[freq,ms],…]`,
@@ -1151,6 +1157,9 @@ paths:
       tags: [Canvas]
       summary: Load a library animation and play it (v2.1)
       description: |
+        **SD streaming (v3.13):** `{"path":"/movies/x.mpg"}` plays an MPGA straight from
+        the SD card, one frame in memory at a time — no PSRAM size cap, length bounded
+        only by the card. `{"name":…}` keeps playing from the FATFS library store.
         Loads `/anim/<name>.mpg` into the PSRAM store and starts playback — through the same
         path an HTTP upload takes, so playback, save and the `bootAnim` config field all behave
         identically on a library entry and a fresh upload. Takes the panel over like an upload
@@ -1820,7 +1829,7 @@ paths:
             schema:
               type: object
               properties:
-                type:    { type: string, enum: [plasma, fire, matrix, fliporama, clock, life, spectrum, soundwall, maze, ripple, scope, none] }
+                type:    { type: string, enum: [plasma, fire, matrix, fliporama, clock, life, spectrum, soundwall, maze, ripple, scope, spectro, none] }
                 speed:   { type: integer, minimum: 1, maximum: 10 }
                 hue:     { type: integer, minimum: 0, maximum: 255, description: "Base hue override (0–255 colour wheel). Omit to keep the effect's own palette." }
                 density: { type: integer, minimum: 1, maximum: 100, description: "Density override (1–100), e.g. streak count or seeding. Omit for the effect default." }
@@ -2461,6 +2470,11 @@ paths:
                 panelH:        { type: integer, enum: [16, 32, 64], example: 64, description: "Panel height in px. **Reboot to apply.**" }
                 panelBitDepth: { type: integer, minimum: 1, maximum: 6, example: 4, description: "Bitplanes. RAM and refresh rate scale with it. **Reboot to apply.** On 256x64, depth 4 needs `fbPsram:true` (it does not fit internal DMA RAM otherwise, and clamps to 3)." }
                 fbPsram:       { type: boolean, example: false, description: "v3.11 (experimental): put the panel framebuffer in octal PSRAM instead of internal SRAM, lifting the internal-RAM depth cap so 256x64 can run depth 4. Raises the pixel clock to 10 MHz (~80 Hz at depth 4). **Reboot to apply.** Off = the default internal-SRAM path." }
+                dimEnabled:    { type: boolean, description: "Brightness schedule (v3.13): auto-dim daily between dimStart and dimEnd. Quiet Time takes precedence." }
+                dimStart:      { type: string, example: "21:00", description: "Dim window start, user-local HH:MM (shares the quiet schedule's tz offset)" }
+                dimEnd:        { type: string, example: "07:00", description: "Dim window end (may wrap past midnight)" }
+                dimLevel:      { type: integer, minimum: 1, maximum: 255, description: "Panel brightness while dimmed" }
+                dimTzOffsetMin: { type: integer, description: "Browser minutes east of UTC; updates the shared schedule offset" }
                 panelBright:   { type: integer, minimum: 1, maximum: 255, example: 160, description: "Global panel brightness, 1..255. Applies on the next frame, no reboot. Also settable live via GET/POST /api/display/brightness (v2.2), which is the same persisted value." }
                 soundEnabled:  { type: boolean, description: "Master speaker enable (v3.6): false silences the speaker (POST /api/sound -> 403, and disabling mid-play stops the tone)." }
                 soundVolume:   { type: integer, minimum: 0, maximum: 100, description: "Master speaker volume 0..100 (v3.6): scales every POST /api/sound call." }

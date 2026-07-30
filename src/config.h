@@ -50,6 +50,13 @@ struct GwConfig {
                                // added to the raw reading to correct board self-heating
   uint8_t       transType;     // canvas full-frame transition (v3.7.2): 0 none 1 crossfade 2 wipe 3 slide
   uint16_t      transMs;       // transition duration, 100..2000 ms
+  // Brightness schedule (v3.13): auto-dim the panel in a daily window (e.g. evenings).
+  // Times are the user's LOCAL "HH:MM" and share quietTzOffsetMin with the quiet
+  // schedule (one browser, one offset). Quiet Time takes precedence (it blanks).
+  bool          dimEnabled;
+  char          dimStart[6];   // window start "HH:MM"
+  char          dimEnd[6];     // window end   "HH:MM" (may wrap past midnight)
+  uint8_t       dimLevel;      // 1..255 panel brightness while the window is active
 };
 
 // ---- owned globals (defined in globals.cpp) ----

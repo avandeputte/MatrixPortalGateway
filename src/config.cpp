@@ -26,6 +26,10 @@ void cfgSetDefaults() {
   cfg.tempOffsetC10 = 0;
   cfg.transType     = 0;
   cfg.transMs       = 400;
+  cfg.dimEnabled    = false;
+  strlcpy(cfg.dimStart, "21:00", sizeof(cfg.dimStart));
+  strlcpy(cfg.dimEnd,   "07:00", sizeof(cfg.dimEnd));
+  cfg.dimLevel      = 40;
   cfg.hostname[0] = 0;          // blank -> derived from the MAC
   cfg.serialDebug = false;
   gSerialDebug    = false;
@@ -65,6 +69,11 @@ void loadConfig() {
   cfg.soundVolume   =           prefs.getUChar("sndVol", 70);
   cfg.tempOffsetC10 = (int16_t)prefs.getShort("tOff",   0);
   cfg.transType     =           prefs.getUChar("trType", 0);
+  cfg.dimEnabled    =           prefs.getBool ("dimEn",  false);
+  strlcpy(cfg.dimStart,         prefs.getString("dimStart", "21:00").c_str(), sizeof(cfg.dimStart));
+  strlcpy(cfg.dimEnd,           prefs.getString("dimEnd",   "07:00").c_str(), sizeof(cfg.dimEnd));
+  cfg.dimLevel      =           prefs.getUChar("dimLvl", 40);
+  if (cfg.dimLevel < 1) cfg.dimLevel = 40;
   cfg.transMs       = (uint16_t)prefs.getShort("trMs",   400);
   if (cfg.panelBitDepth < 1 || cfg.panelBitDepth > 6) cfg.panelBitDepth = DEFAULT_BIT_DEPTH;
   if (cfg.panelBright < 1) cfg.panelBright = DEFAULT_BRIGHTNESS;
@@ -121,6 +130,10 @@ void saveConfig() {
   prefs.putUChar ("sndVol",   cfg.soundVolume);
   prefs.putShort ("tOff",     cfg.tempOffsetC10);
   prefs.putUChar ("trType",   cfg.transType);
+  prefs.putBool  ("dimEn",    cfg.dimEnabled);
+  prefs.putString("dimStart", cfg.dimStart);
+  prefs.putString("dimEnd",   cfg.dimEnd);
+  prefs.putUChar ("dimLvl",   cfg.dimLevel);
   prefs.putShort ("trMs",     cfg.transMs);
   prefs.putString("host",     cfg.hostname);
   prefs.end();

@@ -36,6 +36,7 @@ uint16_t canvasAnimCount();  // frames currently loaded (for the upload reply)
 #define ANIM_NAME_MAX 24
 int  canvasAnimSave(const char* name);           // write the CURRENT store to /anim/<name>.mpg
 int  canvasAnimLoadPlay(const char* name);       // load a named file into the store and play it
+int  canvasAnimPlaySd(const char* path);         // stream an MPGA straight from the SD card (v3.13)
 int  canvasAnimDelete(const char* name);
 void canvasAnimList(void (*sink)(const char*));  // stream a JSON array of {name,bytes,frames,...}
 bool canvasAnimNameOk(const char* name);         // 1..24 chars of [a-z0-9_-]

@@ -8,6 +8,8 @@
 #include "font1252.h"
 #include <string.h>
 #include <FFat.h>
+#include "SD_MMC.h"     // SD animation streaming (v3.13)
+#include "sdcard.h"
 #include <AnimatedGIF.h>   // GIF import (v2.1): decode an upload into the animation store
 #include <new>             // placement-new the decoder state into PSRAM
 
@@ -45,9 +47,26 @@ static size_t    animTotal = 0, animWriteOff = 0;
 static uint16_t  animIdx = 0;
 static uint32_t  animIntervalMs = 66, animLastMs = 0;
 
+// SD streaming (v3.13): instead of loading every frame into the PSRAM store, keep the
+// card file open and read ONE frame per tick into sdFrameBuf. Lifts the 8 MB cap --
+// playback length is bounded only by the card. A 256x64 rgb565 frame is 32 KB; the
+// card reads it in a few ms, well inside a 30 fps budget on taskDisplay. FatFs is
+// built re-entrant (FF_FS_REENTRANT), so /api/sd traffic can only briefly delay a
+// frame, never corrupt it.
+static File      sdAnim;                   // open = SD streaming active
+static uint8_t*  sdFrameBuf = nullptr;     // one frame, PSRAM
+static size_t    sdFrameCap = 0;
+static bool      sdAnimMode = false;
+
+static void sdAnimClose() {
+  if (sdAnim) sdAnim.close();
+  sdAnimMode = false;
+}
+
 uint16_t canvasAnimCount() { return animCount; }
 
 int canvasAnimBegin(uint8_t fmt, uint8_t fps, bool loop, uint16_t w, uint16_t h, uint16_t frames) {
+  sdAnimClose();                             // a PSRAM upload supersedes an SD stream (v3.13)
   if (fmt != 2 && fmt != 3)                  return 400;
   if (w != gPanel.panelW || h != gPanel.panelH) return 400;   // full-panel frames only
   if (frames < 1 || fps < 1 || fps > 60)     return 400;
@@ -81,9 +100,66 @@ int canvasAnimCommit() {
   return 0;
 }
 
-void canvasAnimStop() { gAnimActive = false; }   // buffer kept for the next upload
+void canvasAnimStop() { gAnimActive = false; sdAnimClose(); }   // buffer kept for the next upload
+
+// Start streaming an MPGA file from the SD card (v3.13). Same 14-byte header as the
+// PSRAM store; frames are read one at a time in canvasAnimRender. 0 on success, else
+// the HTTP status for the reply.
+int canvasAnimPlaySd(const char* path) {
+  sdAnimClose();
+  if (!sdReady()) return 503;
+  File f = SD_MMC.open(path, "r");
+  if (!f) return 404;
+  uint8_t hdr[14];
+  if (f.read(hdr, sizeof(hdr)) != sizeof(hdr) || memcmp(hdr, "MPGA", 4) || hdr[4] != 1) {
+    f.close(); return 400;
+  }
+  const uint8_t  fmt = hdr[5], fps = hdr[6];
+  const bool     loop = hdr[7] & 1;
+  const uint16_t w = (uint16_t)((hdr[8] << 8) | hdr[9]);
+  const uint16_t h = (uint16_t)((hdr[10] << 8) | hdr[11]);
+  const uint16_t frames = (uint16_t)((hdr[12] << 8) | hdr[13]);
+  if ((fmt != 2 && fmt != 3) || w != gPanel.panelW || h != gPanel.panelH ||
+      frames < 1 || fps < 1 || fps > 60) { f.close(); return 400; }
+  const size_t frameBytes = (size_t)w * h * fmt;
+  if (sdFrameCap < frameBytes) {
+    if (sdFrameBuf) free(sdFrameBuf);
+    sdFrameBuf = (uint8_t*)ps_malloc(frameBytes);
+    sdFrameCap = sdFrameBuf ? frameBytes : 0;
+    if (!sdFrameBuf) { f.close(); return 503; }
+  }
+  sdAnim = f;
+  sdAnimMode = true;
+  animW = w; animH = h; animCount = frames; animFmt = fmt; animLoop = loop;
+  animFrameBytes = frameBytes;
+  animIntervalMs = 1000u / fps;
+  animIdx = 0; animLastMs = 0;
+  claimPanel(gAnimActive);
+  return 0;
+}
 
 void canvasAnimRender() {
+  if (sdAnimMode) {                          // SD streaming path (v3.13)
+    if (!sdAnim || !sdFrameBuf) { gAnimActive = false; sdAnimClose(); dispMarkDirty(); return; }
+    uint32_t now = millis();
+    if (now - animLastMs < animIntervalMs) { vTaskDelay(pdMS_TO_TICKS(2)); return; }
+    animLastMs = now;
+    if (sdAnim.read(sdFrameBuf, animFrameBytes) != animFrameBytes) {
+      // Short read = EOF (or a card fault): loop or end cleanly.
+      if (animLoop && sdAnim.seek(14) && sdAnim.read(sdFrameBuf, animFrameBytes) == animFrameBytes) {
+        animIdx = 0;
+      } else { gAnimActive = false; sdAnimClose(); dispMarkDirty(); return; }
+    }
+    const int W = animW, H = animH;
+    if (animFmt == 3) {
+      for (int y = 0; y < H; y++) panelBlitRow888(0, y, W, sdFrameBuf + (size_t)y * W * 3);
+    } else {
+      for (int y = 0; y < H; y++) panelBlitRow565(0, y, W, sdFrameBuf + (size_t)y * W * 2);
+    }
+    panelShow();
+    if (++animIdx >= animCount && !animLoop) { gAnimActive = false; sdAnimClose(); dispMarkDirty(); }
+    return;
+  }
   if (!animBuf || !animCount) { gAnimActive = false; dispMarkDirty(); return; }
   uint32_t now = millis();
   if (now - animLastMs < animIntervalMs) { vTaskDelay(pdMS_TO_TICKS(2)); return; }

@@ -155,6 +155,7 @@ static const uint8_t P_SPECT[]   = { EPI_HUE };
 static const uint8_t P_MAZE[]    = { EPI_SPEED, EPI_HUE };
 static const uint8_t P_RIPPLE[]  = { EPI_SPEED, EPI_HUE };
 static const uint8_t P_SCOPE[]   = { EPI_HUE };
+static const uint8_t P_SPECTRO[] = { EPI_SPEED };
 static const uint8_t P_NONE_[1]  = { 0 };                  // zero-length arrays are not C++
 
 struct EffectDefRow { uint8_t id; const char* title; const uint8_t* p; uint8_t np; };
@@ -170,6 +171,7 @@ static const EffectDefRow DEFS[] = {
   { EFFECT_MAZE,      "Maze",        P_MAZE,   2 },
   { EFFECT_RIPPLE,    "Beat Ripples",P_RIPPLE, 2 },
   { EFFECT_SCOPE,     "Oscilloscope",P_SCOPE,  1 },
+  { EFFECT_SPECTRO,   "Spectrogram", P_SPECTRO,1 },
 };
 // Registering an effect in EFFECT_TABLE without a def row (or vice versa) must not
 // compile: the def list is how clients discover the effect's options. EFFECT_COUNT
@@ -806,6 +808,7 @@ void effectReset(uint8_t type) {
     case EFFECT_MAZE:      if (fxBuf) mzInit(); break;
     case EFFECT_RIPPLE:    memset(ripPool, 0, sizeof(ripPool)); audioMaybeStart(); break;
     case EFFECT_SCOPE:     audioMaybeStart(); break;
+    case EFFECT_SPECTRO:   panelClear(); audioMaybeStart(); break;
     default: break;
   }
 }
@@ -961,6 +964,36 @@ static void renderScope() {
   panelShow();
 }
 
+/* ---- spectrogram (v3.13): scrolling frequency-vs-time waterfall ---- */
+// Each column of pixels is one moment; the newest is drawn at the right edge and the
+// whole frame scrolls left via panelScroll (which round-trips the framebuffer exactly,
+// so the history never colour-drifts). The 16 log-spaced bands are linearly
+// interpolated down the panel height (low frequencies at the BOTTOM) and mapped
+// through the fire palette -- black floor, red-orange mids, white-hot peaks.
+// speed 1..10 sets the scroll rate (columns per second, roughly speed*8).
+static void renderSpectrogram() {
+  const int W = gPanel.panelW, H = gPanel.panelH;
+  // Gate the scroll to the configured speed: at ~70 fps a 1 px/frame scroll empties
+  // 256 columns in under 4 s. Advance every N ticks instead.
+  const int gate = 11 - (gEffectSpeed < 1 ? 1 : gEffectSpeed > 10 ? 10 : gEffectSpeed);
+  if ((int)(fxTick % (uint32_t)gate) != 0) { vTaskDelay(pdMS_TO_TICKS(3)); return; }
+  panelScroll(-1, 0, 0, 0, 0);                       // history marches left
+  const int x = W - 1;
+  for (int y = 0; y < H; y++) {
+    // Row -> fractional band index, low frequencies at the bottom row.
+    const float fb = (float)(H - 1 - y) * (AUDIO_BANDS - 1) / (float)(H - 1);
+    const int   b0 = (int)fb;
+    const float fr = fb - b0;
+    const float v0 = fxAud.bands[b0];
+    const float v1 = fxAud.bands[b0 + 1 < AUDIO_BANDS ? b0 + 1 : b0];
+    float v = v0 + (v1 - v0) * fr;
+    if (v < 0) v = 0; else if (v > 1) v = 1;
+    const uint8_t idx = (uint8_t)(v * 255.0f + 0.5f);
+    panelPixel(x, y, firePal[idx][0], firePal[idx][1], firePal[idx][2]);
+  }
+  panelShow();
+}
+
 /* ---- soundwall (v3.4): the flap wall itself is the visual ---- */
 // Runs on taskDisplay every display tick while gEffect == EFFECT_SOUNDWALL, with the
 // NORMAL wall renderer still active: this only pokes vmodule targets and lets the
@@ -1003,6 +1036,7 @@ void effectSoundwallTick() {
 void effectRender(uint8_t type) {
   if (!gPanel.ready) return;
   fxAudOn = (type == EFFECT_SPECTRUM) || (type == EFFECT_RIPPLE) || (type == EFFECT_SCOPE) ||
+            (type == EFFECT_SPECTRO) ||
             (gEffectAudioMod && audioAvailable());
   if (fxAudOn) audioRead(fxAud); else fxAud = AudioFrame{};
   fxFrame += gEffectSpeed;
@@ -1026,6 +1060,7 @@ void effectRender(uint8_t type) {
     case EFFECT_MAZE:      renderMaze();      break;
     case EFFECT_RIPPLE:    renderRipple();    break;
     case EFFECT_SCOPE:     renderScope();     break;
+    case EFFECT_SPECTRO:   renderSpectrogram(); break;
     // EFFECT_SOUNDWALL never reaches effectRender: taskDisplay routes it to
     // effectSoundwallTick() and keeps the wall renderer running.
     default: break;

@@ -928,6 +928,10 @@ static esp_err_t handleApiConfigGet(httpd_req_t* r) {
   doc["panelBGR"]      = cfg.panelBGR;
   doc["panelBright"]   = cfg.panelBright;
   doc["fbPsram"]       = cfg.fbPsram;
+  doc["dimEnabled"]    = cfg.dimEnabled;
+  doc["dimStart"]      = cfg.dimStart;
+  doc["dimEnd"]        = cfg.dimEnd;
+  doc["dimLevel"]      = cfg.dimLevel;
   doc["flapMs"]        = cfg.flapMs;
   doc["flapMax"]       = cfg.flapMax;
   doc["soundEnabled"]  = cfg.soundEnabled;   // master speaker enable (v3.6)
@@ -1023,6 +1027,14 @@ static esp_err_t handleApiConfigSettings(httpd_req_t* r) {
   // Framebuffer in PSRAM (v3.11): decided once at panelBegin, so like width/height/depth it needs
   // a reboot to take effect.
   if (doc["fbPsram"].is<bool>()) cfg.fbPsram = doc["fbPsram"].as<bool>();
+  // Brightness schedule (v3.13). dimTzOffsetMin shares cfg.quietTzOffsetMin -- one
+  // browser, one local-time offset for both schedules.
+  if (doc["dimEnabled"].is<bool>()) cfg.dimEnabled = doc["dimEnabled"].as<bool>();
+  if (doc["dimStart"].is<const char*>()) strlcpy(cfg.dimStart, doc["dimStart"], sizeof(cfg.dimStart));
+  if (doc["dimEnd"].is<const char*>())   strlcpy(cfg.dimEnd,   doc["dimEnd"],   sizeof(cfg.dimEnd));
+  if (doc["dimLevel"].is<int>()) { int v = doc["dimLevel"];
+    if (v >= 1 && v <= 255) cfg.dimLevel = (uint8_t)v; }
+  if (doc["dimTzOffsetMin"].is<int>()) cfg.quietTzOffsetMin = (int16_t)doc["dimTzOffsetMin"].as<int>();
   if (doc["panelBright"].is<int>())   { int v = doc["panelBright"];
     // Apply now, not just on the next wall repaint: an effect or raw canvas owns the panel while
     // taskDisplay stands down, so dispRender (the only other caller) would not push the new duty.
@@ -1556,6 +1568,8 @@ void canvasStreamPump() {
 //   {"notes":[[880,120],[0,40],[1320,160]],"vol":60}    a sequence (freq 0 = rest)
 //   {"stop":true}                                       stop now
 // Refused during Quiet Time, like everything audible/visible. GET reports state.
+static bool sdPathOk(const String& p);   // defined with the SD endpoints below
+
 static esp_err_t handleApiSound(httpd_req_t* r) {
   if (r->method == HTTP_GET) {
     char buf[96];
@@ -1574,6 +1588,20 @@ static esp_err_t handleApiSound(httpd_req_t* r) {
   }
   if (!cfg.soundEnabled) return httpxErr(r, 403, "Speaker disabled in settings");
   if (gQuietTime) return httpxErr(r, 409, "Quiet Time is active");
+  if (doc["wav"].is<const char*>()) {
+    // {"wav":"/sounds/x.wav","vol":80}: stream a WAV from the SD card (v3.13).
+    const String path = doc["wav"].as<const char*>();
+    if (!sdReady()) return httpxErr(r, 503, "No SD card");
+    if (!sdPathOk(path)) return httpxErr(r, 400, "Bad path");
+    if (!SD_MMC.exists(path)) return httpxErr(r, 404, "Not found");
+    int wv = doc["vol"] | 60;
+    if (wv < 0) wv = 0; else if (wv > 100) wv = 100;
+    wv = wv * cfg.soundVolume / 100;
+    if (!soundPlayWav(path.c_str(), (uint8_t)wv)) return httpxErr(r, 503, "Player not available");
+    char wb[128];
+    snprintf(wb, sizeof(wb), "{\"ok\":true,\"wav\":\"%.96s\"}", path.c_str());
+    return httpxSend(r, 200, "application/json", wb);
+  }
   uint16_t f[SOUND_MAX_NOTES], m[SOUND_MAX_NOTES];
   int n = 0;
   if (doc["notes"].is<JsonArrayConst>()) {
@@ -2097,6 +2125,22 @@ static esp_err_t handleApiAnimPlay(httpd_req_t* r) {
   if (gQuietTime)    { httpxErr(r, 409, "Quiet Time is active"); return ESP_OK; }
   JsonDocument doc;
   if (!httpxReadJson(r, doc)) return ESP_OK;
+  // {"path":"/movies/x.mpg"} (v3.13): stream straight from the SD card -- no PSRAM
+  // size cap, playback length bounded only by the card.
+  if (doc["path"].is<const char*>()) {
+    const String p = doc["path"].as<const char*>();
+    if (!sdPathOk(p)) return httpxErr(r, 400, "Bad path");
+    { char cd[80]; snprintf(cd, sizeof(cd), "anim stream '%.48s'", p.c_str()); logCommand('R', cd); }
+    canvasStandDown();
+    const int src = canvasAnimPlaySd(p.c_str());
+    if (src == 404) return httpxErr(r, 404, "Not found on the SD card");
+    if (src == 503) return httpxErr(r, 503, sdReady() ? "Out of memory" : "No SD card");
+    if (src)        return httpxErr(r, 400, "Not a playable MPGA (or wrong geometry)");
+    char ob[96];
+    snprintf(ob, sizeof(ob), "{\"ok\":true,\"streaming\":true,\"frames\":%u}",
+             (unsigned)canvasAnimCount());
+    return httpxSend(r, 200, "application/json", ob);
+  }
   const char* name = doc["name"] | "";
   { char cd[64]; snprintf(cd, sizeof(cd), "anim play '%.24s'", name); logCommand('R', cd); }
   char okBody[96];

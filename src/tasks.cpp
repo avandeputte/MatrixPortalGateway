@@ -1,6 +1,7 @@
 #include "gateway.h"
 #include "sse.h"   // taskWeb is the SSE push pump (v3.0)
 #include "sensor.h"   // SHTC3 temp/humidity, polled from taskRTC (v3.7)
+#include "panel.h"    // panelSetBrightness: the brightness schedule (v3.13)
 
 
 
@@ -60,6 +61,47 @@ bool quietSchedInWindow() {
   return dayOn && inWin;
 }
 
+/* ---- brightness schedule (v3.13) ---------------------------------------------------
+   Auto-dim in a daily local-time window. Same clock/offset mechanics as the quiet
+   schedule above. EDGE-triggered: brightness changes only on a window boundary (or on
+   the first evaluation), so a manual brightness set inside the window sticks until the
+   next boundary. Quiet Time wins: while quiet is on nothing is touched, and the state
+   resets so the right level is re-applied the moment quiet ends. */
+static bool dimSchedInWindow() {
+  if (!cfg.dimEnabled) return false;
+  time_t utc = (time_t)rtcEpochNow();
+  if (!utc) return false;
+  time_t local = utc + (time_t)cfg.quietTzOffsetMin * 60;
+  struct tm lt;
+  gmtime_r(&local, &lt);
+  int cur = lt.tm_hour * 60 + lt.tm_min;
+  int sh = 21, sm = 0, eh = 7, em = 0;
+  sscanf(cfg.dimStart, "%d:%d", &sh, &sm);
+  sscanf(cfg.dimEnd,   "%d:%d", &eh, &em);
+  int s = sh * 60 + sm, e = eh * 60 + em;
+  return (s <= e) ? (cur >= s && cur < e) : (cur >= s || cur < e);   // overnight ok
+}
+
+static void dimScheduleTick() {
+  static int prevWant = -1;                    // -1 = re-evaluate and (re)apply
+  if (gOtaInProgress) return;
+  if (gQuietTime) { prevWant = -1; return; }   // quiet blanks the panel; re-apply after
+  int want;
+  if (!cfg.dimEnabled) {
+    want = 0;
+  } else {
+    if (!rtcEpochNow()) return;                // no valid clock yet -- don't guess
+    want = dimSchedInWindow() ? 1 : 0;
+  }
+  if (want != prevWant) {
+    panelSetBrightness(want ? cfg.dimLevel : cfg.panelBright);
+    if (prevWant != -1)
+      DBG("[DIM] schedule: %s (brightness %u)\n", want ? "window start" : "window end",
+          (unsigned)(want ? cfg.dimLevel : cfg.panelBright));
+    prevWant = want;
+  }
+}
+
 static void quietScheduleTick() {
   static int prevWant = -1;
   if (gOtaInProgress) return;        // never touch quiet/resync mid-flash (OTA safety)
@@ -97,6 +139,7 @@ void taskRTC(void* pv) {
     if (lastSched == 0 || millis() - lastSched > 5000UL) {
       lastSched = millis();
       quietScheduleTick();     // evaluate the quiet window every 5s (prompt flip)
+      dimScheduleTick();       // brightness schedule rides the same cadence (v3.13)
     }
     // Environment sensor (v3.7): runtime I2C stays on THIS task (the bus has no lock);
     // temp/humidity move slowly, so every 10 s is ample. First read soon after boot.
