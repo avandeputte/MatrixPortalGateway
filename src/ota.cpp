@@ -1,4 +1,5 @@
 #include "gateway.h"
+#include "sdcard.h"        // sdLog: on-card event log (v3.13.2)
 
 
 
@@ -123,6 +124,7 @@ static void otaRestoreWifi() {
 esp_err_t handleOTAUpload(httpd_req_t* r) {
   const size_t len = (size_t)r->content_len;
   printf("[OTA] Web upload start: %u bytes\n", (unsigned)len);
+  sdLog("OTA start: %u bytes", (unsigned)len);
   if (!len) return httpxErr(r, 400, "Empty body");
   // Quiesce the gateway for the duration of the upload so the WiFi/TCP stack
   // has the contiguous heap the transfer needs.
@@ -152,6 +154,7 @@ esp_err_t handleOTAUpload(httpd_req_t* r) {
     otaRestoreWifi();
     dispResume();             // resume the panel refresh and repaint
     printf("[OTA] %s (%s) -- image discarded\n", what, Update.errorString());
+    sdLog("OTA FAILED: %s (%s)", what, Update.errorString());
     return httpxSend(r, 500, "text/plain",
                      "Update failed -- firmware not flashed. Device left unchanged.");
   };
@@ -187,6 +190,7 @@ esp_err_t handleOTAUpload(httpd_req_t* r) {
   }
   if (!Update.end(true)) return fail("Update.end failed");   // true = set the new image as bootable
   printf("[OTA] Web upload complete (%u bytes) -- verified, rebooting\n", (unsigned)recvd);
+  sdLog("OTA complete: %u bytes, rebooting", (unsigned)recvd);
   // gOtaInProgress stays set: we reboot momentarily; no need to resume the panel.
   esp_err_t rc = httpxSend(r, 200, "text/plain", "OK");
   // The DMA engine can stop now: the image is verified and the reboot is certain.

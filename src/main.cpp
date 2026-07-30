@@ -20,6 +20,7 @@ RTC_NOINIT_ATTR uint8_t  sfResetLog[8];       // esp_reset_reason_t values, newe
 RTC_NOINIT_ATTR uint32_t sfResetUpMin[8];     // minutes of uptime when each reset hit
 RTC_NOINIT_ATTR static uint32_t sfResetMagic; // 0x52534C47 = the ring is initialised
 static uint32_t sfBootMs = 0;                 // set in setup(); loop() stamps uptime
+static char     sfBootNote[128];              // boot line, written to the SD log after mount
 
 // main.cpp -- boot sequence and supervisor.
 // setup() brings the system up in dependency order (mutexes, config, clock,
@@ -102,6 +103,12 @@ void setup() {
     sfResetLog[0] = (uint8_t)rr;
     sfResetUpMin[0] = 0;                       // this boot's death-uptime; stamped by loop()
     sfBootMs = millis();
+    // The post-mortem line (v3.13.2): sdInit() has not run yet, so remember it and
+    // write it once the card is up -- see the sdLog call after sdInit() below.
+    snprintf(sfBootNote, sizeof(sfBootNote),
+             "BOOT %s v%s reset=%s prev-uptime=%lum panicBoots=%lu",
+             PRODUCT_NAME, FW_VERSION, rs, (unsigned long)sfResetUpMin[1],
+             (unsigned long)sfPanicBoots);
     if (sfPanicBoots >= PANIC_REFORMAT_THRESHOLD) {
       printf("[RECOVERY] %u crash reboots in a row -- reformatting FATFS to break the loop\n",
              (unsigned)sfPanicBoots);
@@ -137,6 +144,7 @@ void setup() {
   //    state (/vmods.dat). Nothing else on this board is sticky.
   sfFsInit(fatfsRecover);
   sdInit();           // microSD (v3.10): mount the TF card if one is fitted (setup() only)
+  sdLog("%s", sfBootNote);   // the post-mortem line: why THIS boot happened (v3.13.2)
   gTransType = cfg.transType; gTransMs = cfg.transMs;   // restore persisted transition (v3.7.2)
   vmBuildReel();      // the shared reel: every CP1252 glyph, then the colours
   vmInit((int)gPanel.cols * (int)gPanel.rows);
@@ -207,6 +215,14 @@ void loop() {
   // Stamp this boot's running time into the reset ring (v3.13.1): after a crash, the
   // NEXT boot reports how long this one lived. Cheap: one RTC-mem write per pass.
   sfResetUpMin[0] = (uint32_t)((millis() - sfBootMs) / 60000UL);
+  // Heap heartbeat to the SD log every 10 min (v3.13.2): a crashed board's log then
+  // shows its health right up to the end, without anything on USB.
+  { static uint32_t lastHb = 0;
+    if (millis() - lastHb > 600000UL) {
+      lastHb = millis();
+      sdLog("hb up=%lum heap=%u minheap=%u", (unsigned long)(millis() / 60000UL),
+            (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+    } }
   static unsigned long lastWdgCheck = 0;
   unsigned long now = millis();
   // Panic-recovery: once we have run healthy for a minute, this boot plainly was not a crash
@@ -271,6 +287,8 @@ void loop() {
       if (!okFrm || !okWeb || !okNet || !okDisp) {
         printf("[WDG] STALL: Frames=%d Web=%d Net=%d Disp=%d (heap=%u) -- rebooting\n",
                okFrm, okWeb, okNet, okDisp, (unsigned)ESP.getFreeHeap());
+        sdLog("WDG STALL Frames=%d Web=%d Net=%d Disp=%d heap=%u -- rebooting",
+              okFrm, okWeb, okNet, okDisp, (unsigned)ESP.getFreeHeap());
         delay(200);
         ESP.restart();
       }
@@ -285,6 +303,7 @@ void loop() {
     // keeps its original meaning: a leak has won, reboot before malloc chaos.
     if ((unsigned)ESP.getFreeHeap() < 20000 && !gOtaInProgress) {
       printf("[WDG] CRITICAL: heap=%u -- rebooting\n", (unsigned)ESP.getFreeHeap());
+      sdLog("WDG heap floor: heap=%u -- rebooting", (unsigned)ESP.getFreeHeap());
       delay(200);
       ESP.restart();
     }

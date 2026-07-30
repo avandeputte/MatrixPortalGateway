@@ -21,3 +21,8 @@ bool  sdInfo(uint64_t& sizeMB, uint64_t& usedMB, const char*& type);
 // FATFS's open-file table is tiny, so a recursive walk that holds a handle per level would
 // exhaust it. Returns true only if the whole tree is gone. A file path also works.
 bool  sdRemoveTree(const char* path);
+// Append one line to the on-card event log /logs/gateway.log (v3.13.2): timestamped,
+// mutex-serialized, rotated at 512 KB, silently dropped when no card is mounted.
+// For the events that explain a dead board: boot cause, watchdog reboots, GDMA
+// restarts, OTA, heap heartbeat. NOT a DBG firehose.
+void  sdLog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));

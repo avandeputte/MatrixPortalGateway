@@ -73,7 +73,8 @@
 #include <soc/lcd_cam_struct.h>
 #include <soc/gpio_sig_map.h>
 #include <esp_heap_caps.h>
-#include <esp_cache.h>         // esp_cache_msync: flush the CPU cache to PSRAM (fb-in-PSRAM, v3.11)
+#include <esp_cache.h>
+#include "sdcard.h"        // sdLog: on-card event log (v3.13.2)         // esp_cache_msync: flush the CPU cache to PSRAM (fb-in-PSRAM, v3.11)
 
 // ---- tunables ---------------------------------------------------------------------
 /* PCLK. Must divide the 160 MHz PLL by an integer (see lcdInit).
@@ -1081,6 +1082,7 @@ void panelHealthTick() {
     if (++stuck >= 2) {
       printf("[PANEL] output stage STALLED (desc frozen at 0x%08x) -- self-healing\n",
              (unsigned)a1);
+      sdLog("PANEL gdma stall (desc 0x%08x) -- self-healed", (unsigned)a1);
       panelOutputRestart();
       stuck = 0;
     }
