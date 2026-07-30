@@ -43,12 +43,11 @@ for hypothetical old clients are gone:
 - Companion must be updated in the same step (it reads `effectParams` and gates its
   settings-blob feature on `version >= 3.1`).
 
-### Added — binary ops format 2: full parity with the JSON surface
+### Added — the binary encoding carries the full ops surface
 
-The binary encoding (`POST /api/canvas/opsb` + stream record `0x06`) gains everything
-that was JSON-only, advertised as `canvas.opsBin: 2`. **Purely additive** — format-1
-batches decode byte-identically (`ORIGIN` keeps its exact old meaning as a matrix
-reset + pure translate); a client sends the new opcodes only when `opsBin ≥ 2`.
+The binary encoding (`POST /api/canvas/opsb` + stream record `0x06`, advertised as
+`canvas.opsBin`) now expresses everything the JSON decoder does — one format, one
+opcode table.
 
 - **Transform stack**: `0x16` SAVE / `0x17` RESTORE / `0x18` TRANSLATE / `0x19` SCALE
   (u16 8.8 fixed-point) / `0x1A` ROTATE. Every coordinate now runs through the same

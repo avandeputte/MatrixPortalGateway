@@ -894,7 +894,7 @@ paths:
       summary: Binary draw commands (v3.5)
       description: |
         The binary twin of `POST /api/canvas/ops` — a fixed-layout encoding
-        (`canvas.opsBin` capability level, 2 since fw 3.12) that skips JSON parsing
+        (`canvas.opsBin` capability) that skips JSON parsing
         entirely: ~6× smaller and 1.5–1.9× the frame rate on op-heavy scenes. Same
         semantics (auto-present unless the batch contains SHOW); a malformed batch is
         a `400` with nothing drawn presented. Game-rate clients should carry the same
@@ -914,9 +914,8 @@ paths:
         `0x12` SCROLL dx dy rgb · `0x13` SHOW · `0x14` BLEND mode · `0x15` ALPHA a
         (both fw 3.8).
 
-        **Level 2 (fw 3.12)** — the full surface: every coordinate runs through the
-        same affine transform as the JSON decoder (`ORIGIN` is a matrix reset + pure
-        translate):
+        Every coordinate runs through the same affine transform as the JSON decoder
+        (`ORIGIN` is a matrix reset + pure translate):
         `0x16` SAVE · `0x17` RESTORE (stack depth 8) · `0x18` TRANSLATE x y ·
         `0x19` SCALE sx sy (u16 8.8 fixed-point; sy 0 = uniform) · `0x1A` ROTATE deg
         (s16, clockwise) · `0x1B` LAYER · `0x1C` COMPOSITE x y mode alpha ·
@@ -925,8 +924,7 @@ paths:
         depth 4) · `0x1F` BEZIER n t flags rgb n×(x y) (n 3|4; flags bit0 aa) ·
         `0x20` AALINE x y x1 y1 rgb. Additive flag bits: CIRCLE flags bit1 = aa
         outline, POLY flags bit2 = aa. Strict decode: an unknown opcode or a
-        truncated op fails the batch — check `canvas.opsBin` when boards run
-        different firmware (send 0x16+ only when it reads ≥ 2).
+        truncated op fails the batch.
       requestBody:
         required: true
         content: { application/octet-stream: { schema: { type: string, format: binary } } }
@@ -2099,7 +2097,7 @@ paths:
                       rect:     { type: boolean, example: true, description: "`PUT /api/canvas/rect` partial updates" }
                       rects:    { type: boolean, example: true, description: "`PUT /api/canvas/rects` multi-rect deltas (v3.1)" }
                       stream:   { type: boolean, example: true, description: "`PUT /api/canvas/stream` persistent TLV draw channel (v3.2)" }
-                      opsBin:   { type: integer, example: 2, description: "Binary ops level accepted by POST /api/canvas/opsb and stream record 0x06 — 2 = opcodes 0x01-0x20 (fw 3.12). Check when boards run different firmware" }
+                      opsBin:   { type: boolean, example: true, description: "The binary ops encoding is supported (POST /api/canvas/opsb and stream record 0x06)" }
                       anim:     { type: boolean, example: true, description: "`PUT /api/canvas/anim` on-device animation" }
                       ticker:   { type: boolean, example: true, description: "`POST /api/canvas/ticker` scrolling text" }
                       readback: { type: boolean, example: true, description: "`GET /api/canvas/frame` screenshot readback" }

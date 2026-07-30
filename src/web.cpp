@@ -780,7 +780,7 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
                     // with headroom and verified below.
     snprintf(cv, sizeof(cv),
              "\"canvas\":{\"formats\":[\"rgb888\",\"rgb565\",\"qoi\"],\"width\":%u,\"height\":%u,"
-             "\"rect\":true,\"rects\":true,\"stream\":true,\"opsBin\":2,\"anim\":true,\"ticker\":true,\"readback\":true,"
+             "\"rect\":true,\"rects\":true,\"stream\":true,\"opsBin\":true,\"anim\":true,\"ticker\":true,\"readback\":true,"
              "\"atlas\":{\"named\":true,\"persist\":true,\"maxSheets\":%u,"
              "\"maxBytes\":%u,\"maxSheetBytes\":%u},"
              "\"ops\":[\"clear\",\"pixel\",\"hline\",\"vline\",\"line\",\"rect\",\"circle\",\"ellipse\","
@@ -2182,8 +2182,8 @@ static esp_err_t handleApiAnimList(httpd_req_t* r) {
 // POST /api/canvas/ops and the stream channel's ops record (v3.2). Caller must have
 // entered canvas mode (canvasEnter) first.
 /* ---- v3.5 ops helpers: thickness, arcs, filled polygons, textbox ------------------ */
-// Affine transform stack (v3.9; since opsBin v2 shared by BOTH the JSON and binary
-// decoders): a 2x3 matrix [a b c d e f] with
+// Affine transform stack, shared by BOTH the JSON and binary decoders:
+// a 2x3 matrix [a b c d e f] with
 // X = a*x + c*y + e, Y = b*x + d*y + f. save/restore push/pop; translate/scale/rotate
 // compose; origin resets to a pure translate (backward compatible). Point/line ops
 // transform every vertex (rotation works); box-anchored fills transform the anchor and
@@ -2477,13 +2477,13 @@ static int alignIdx(const char* a, const char* mid) {   // "left/top"=0, mid=1, 
 /* ---- binary ops (v3.5): the zero-parse path for game-rate clients -----------------
    A fixed-layout encoding of the ops surface: 4-6x smaller than JSON on the wire and
    ~zero decode cost (the JSON path spends 5-8 ms deserializing a rich frame). Carried
-   by stream record 0x06 and by POST /api/canvas/opsb; advertised as canvas.opsBin
-   (a format version, currently 1).
+   by stream record 0x06 and by POST /api/canvas/opsb; advertised as canvas.opsBin.
 
    All integers big-endian; coordinates SIGNED int16 (games draw off-panel; the panel
-   primitives clip). Each op: u8 opcode + fixed fields. STRICT decode: an unknown
-   opcode or a truncated op is fatal to the batch (binary cannot skip what it cannot
-   size) -- feature-detect via capabilities, don't probe.
+   primitives clip). Every coordinate runs through the same affine transform as the
+   JSON decoder (ORIGIN is a matrix reset + pure translate). Each op: u8 opcode +
+   fixed fields. STRICT decode: an unknown opcode or a truncated op is fatal to the
+   batch (binary cannot skip what it cannot size).
 
      0x01 CLEAR     rgb
      0x02 PIXEL     x y rgb
@@ -2507,10 +2507,7 @@ static int alignIdx(const char* a, const char* mid) {   // "left/top"=0, mid=1, 
                                                   bits2-3 rot/90, bits4-5 scale-1)
      0x12 SCROLL    dx dy rgb
      0x13 SHOW
-     0x14 BLEND     mode                         0x15 ALPHA a         (both v3.8)
-   -- opsBin v2 (fw 3.12): full parity with the JSON transform/layer/macro surface.
-      All coordinates now run through the SAME affine transform as JSON ops (ORIGIN is
-      a matrix reset + translate, so v1 batches behave identically):
+     0x14 BLEND     mode                         0x15 ALPHA a
      0x16 SAVE                                   0x17 RESTORE         (stack depth 8)
      0x18 TRANSLATE x y                          (s16 pixels)
      0x19 SCALE     sx sy                        (u16 8.8 fixed; sy 0 = uniform)
@@ -2521,11 +2518,10 @@ static int alignIdx(const char* a, const char* mid) {   // "left/top"=0, mid=1, 
                                                   nestable to depth 4, state-scoped)
      0x1F BEZIER    n t flags rgb n*(x y)        (n 3|4; flags bit0 = aa)
      0x20 AALINE    x y x1 y1 rgb                (1 px anti-aliased)
-      Additive flag bits: CIRCLE flags bit1 = aa outline; POLY flags bit2 = aa
-      outline/polyline.                                                             */
+   Flag bits: CIRCLE flags bit1 = aa outline; POLY flags bit2 = aa outline/polyline. */
 static inline int16_t bops16(const uint8_t* p) { return (int16_t)(((uint16_t)p[0] << 8) | p[1]); }
 
-// Binary macro slots (opsBin v2): borrowed pointers into the live request/stream buffer,
+// Binary macro slots: borrowed pointers into the live request/stream buffer,
 // valid for the whole synchronous run, like the JSON macro table. Batch-scoped.
 static const uint8_t* gBinMacroPtr[8] = {};
 static uint16_t       gBinMacroLen[8] = {};
@@ -2676,7 +2672,6 @@ static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* o
       case 0x13: panelShow(); shown = true; continue;
       case 0x14: BOPS_NEED(1); gOpsBlend = (p[i] <= 4) ? p[i] : 0; i += 1; break;   // blend mode (v3.8)
       case 0x15: BOPS_NEED(1); gBinAlpha = p[i]; i += 1; break;                      // batch alpha (v3.8)
-      /* ---- opsBin v2 (fw 3.12): transform stack, layers, macros, bezier, aa ---- */
       case 0x16: if (gMSp < 8) memcpy(gMStack[gMSp++], gM, sizeof(gM)); break;       // SAVE
       case 0x17: if (gMSp > 0) memcpy(gM, gMStack[--gMSp], sizeof(gM)); break;       // RESTORE
       case 0x18: { BOPS_NEED(4);                                                     // TRANSLATE
