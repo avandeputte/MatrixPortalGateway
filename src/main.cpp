@@ -12,6 +12,14 @@
 // Consecutive crash/watchdog reboots, kept in RTC memory: it survives a reboot but is garbage on
 // a cold power-up. Written in setup(), cleared in loop() once the board has run healthy for 60s.
 RTC_NOINIT_ATTR static uint32_t sfPanicBoots;
+// Reset-cause history (v3.13.1): the last 8 reset reasons + uptime-at-death, kept in RTC
+// memory so they survive warm reboots (a cold power-up zeroes them, which reads as
+// POWERON -- correct). Exposed in /api/status as "resets" so a crash self-reports even
+// with nothing attached to USB: the one that got away on 2026-07-30 taught us that.
+RTC_NOINIT_ATTR uint8_t  sfResetLog[8];       // esp_reset_reason_t values, newest first
+RTC_NOINIT_ATTR uint32_t sfResetUpMin[8];     // minutes of uptime when each reset hit
+RTC_NOINIT_ATTR static uint32_t sfResetMagic; // 0x52534C47 = the ring is initialised
+static uint32_t sfBootMs = 0;                 // set in setup(); loop() stamps uptime
 
 // main.cpp -- boot sequence and supervisor.
 // setup() brings the system up in dependency order (mutexes, config, clock,
@@ -84,6 +92,16 @@ void setup() {
     if (rr == ESP_RST_POWERON || rr == ESP_RST_BROWNOUT) sfPanicBoots = 0;   // cold boot: init RTC
     else if (crashReset)                                  sfPanicBoots++;
     else                                                  sfPanicBoots = 0;   // clean SW reset/OTA
+    // Reset-cause ring (v3.13.1): shift in this boot's cause. Cold boot re-inits.
+    if (rr == ESP_RST_POWERON || sfResetMagic != 0x52534C47) {
+      memset(sfResetLog, 0, sizeof(sfResetLog));
+      memset((void*)sfResetUpMin, 0, sizeof(sfResetUpMin));
+      sfResetMagic = 0x52534C47;
+    }
+    for (int i = 7; i > 0; i--) { sfResetLog[i] = sfResetLog[i-1]; sfResetUpMin[i] = sfResetUpMin[i-1]; }
+    sfResetLog[0] = (uint8_t)rr;
+    sfResetUpMin[0] = 0;                       // this boot's death-uptime; stamped by loop()
+    sfBootMs = millis();
     if (sfPanicBoots >= PANIC_REFORMAT_THRESHOLD) {
       printf("[RECOVERY] %u crash reboots in a row -- reformatting FATFS to break the loop\n",
              (unsigned)sfPanicBoots);
@@ -186,6 +204,9 @@ void setup() {
 }
 
 void loop() {
+  // Stamp this boot's running time into the reset ring (v3.13.1): after a crash, the
+  // NEXT boot reports how long this one lived. Cheap: one RTC-mem write per pass.
+  sfResetUpMin[0] = (uint32_t)((millis() - sfBootMs) / 60000UL);
   static unsigned long lastWdgCheck = 0;
   unsigned long now = millis();
   // Panic-recovery: once we have run healthy for a minute, this boot plainly was not a crash

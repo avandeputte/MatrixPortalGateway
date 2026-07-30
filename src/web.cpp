@@ -856,6 +856,16 @@ size_t statusJson(char* outBuf, size_t outCap) {
              tcal, rhc, (unsigned long)(eAge / 1000));
   }
   else snprintf(envf, sizeof(envf), "{\"ok\":false}");
+  // Reset-cause history (v3.13.1): why the last boots happened, from the RTC-memory
+  // ring in main.cpp. names: 1 POWERON 3 SW 4 PANIC 5 INT_WDT 6 TASK_WDT 7 WDT
+  // 8 DEEPSLEEP 9 BROWNOUT (esp_reset_reason_t values).
+  extern uint8_t  sfResetLog[8];
+  extern uint32_t sfResetUpMin[8];
+  char rst[128]; { int n = snprintf(rst, sizeof(rst), "[");
+    for (int i = 0; i < 8 && sfResetLog[i]; i++)
+      n += snprintf(rst + n, sizeof(rst) - n, "%s[%u,%lu]", i ? "," : "",
+                    (unsigned)sfResetLog[i], (unsigned long)sfResetUpMin[i]);
+    snprintf(rst + n, sizeof(rst) - n, "]"); }
   // microSD (v3.10): card presence + capacity, or {"ok":false} when no card is fitted.
   char sdf[96]; uint64_t sdSz, sdUsed; const char* sdType;
   if (sdInfo(sdSz, sdUsed, sdType))
@@ -870,7 +880,7 @@ size_t statusJson(char* outBuf, size_t outCap) {
     "\"panel\":{\"ok\":%s,\"w\":%u,\"h\":%u,\"cols\":%u,\"rows\":%u,"
     "\"cellW\":%u,\"cellH\":%u,\"depth\":%u,\"fbPsram\":%s,\"refreshHz\":%u,\"font\":\"%s\",\"vmods\":%d},"
     "\"time\":\"%s\",\"ntpSynced\":%s,\"quiet\":%s,"
-    "\"companion\":{\"url\":\"%s\",\"status\":\"%s\",\"age\":%ld},\"env\":%s,\"sd\":%s}",
+    "\"companion\":{\"url\":\"%s\",\"status\":\"%s\",\"age\":%ld},\"env\":%s,\"sd\":%s,\"resets\":%s}",
     millis()/1000, txCount,
     (WiFi.status()==WL_CONNECTED)?"true":"false",
     lip[0],lip[1],lip[2],lip[3],
@@ -885,7 +895,7 @@ size_t statusJson(char* outBuf, size_t outCap) {
     rtcBuf,
     ntpSynced?"true":"false",
     gQuietTime?"true":"false",
-    cfg.companionUrl, gCompanionStatus, compAge, envf, sdf);
+    cfg.companionUrl, gCompanionStatus, compAge, envf, sdf, rst);
   // Truncation would be INVALID JSON for every consumer (dashboard, SSE) -- make it loud,
   // like the capabilities block does. ~166 B of margin today; this is the tripwire.
   if (n >= outCap) printf("[WEB] statusJson TRUNCATED (%u >= %u) -- enlarge the buffer\n",
@@ -895,7 +905,7 @@ size_t statusJson(char* outBuf, size_t outCap) {
 
 // GET /api/status
 static esp_err_t handleApiStatus(httpd_req_t* r) {
-  char out[1000];
+  char out[1152];
   statusJson(out, sizeof(out));
   return httpxSend(r, 200, "application/json", out);
 }
