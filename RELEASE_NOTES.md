@@ -1,5 +1,30 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.13.2 — 2026-07-31
+
+### Added — a board that explains its own failures
+
+Born of an unexplained reboot that left no evidence (nothing on USB, volatile logs lost):
+- **Reset-cause ring** — `GET /api/status` now carries `resets`: the last 8 reboots as
+  `[cause, minutes-alive]` pairs, held in RTC memory so they survive warm reboots
+  (causes: 1 poweron, 3 sw, 4 panic, 5/6/7 watchdogs, 9 brownout, 11 USB).
+- **On-card event log** — `/logs/gateway.log` on the microSD records boot post-mortems
+  (reset cause, previous uptime, panic count), watchdog reboot reasons, GDMA self-heals,
+  OTA events, and a 10-minute heap heartbeat. Rotates at 512 KB. Read it from the Files
+  tab or `GET /api/sd/get` — no USB needed.
+
+### Fixed
+- **taskRTC stack 2048 → 3072.** The brightness-schedule tick pushed the firmware's
+  leanest task to a 496-byte minimum under soak — a credible cause of the unexplained
+  reboot. Post-fix minimum: 1392 bytes across an 8 h adversarial soak, zero alerts.
+- **SD downloads keep their filename** — `/api/sd/get` was missing the
+  `Content-Disposition` header, so browsers saved everything as "get".
+
+Certified: 8 h adversarial soak — 223,343 steps, 0 reboots, 0 soft errors, 0 SSE drops,
+658/658 SD round-trips, heap floor 127 K flat, +4 KB drift. (v3.13.1 was the interim
+reset-ring build, folded in here.)
+
+
 ## v3.13.0 — 2026-07-30
 
 ### Added — the card earns its keep, plus a fourth audio visual

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Matrix Portal Gateway API
-  version: "3.13"
+  version: "3.13.2"
   description: |
     REST API for the **Matrix Portal Gateway** firmware, running on a
     Waveshare ESP32-S3-RGB-Matrix driver board. It emulates a wall of split-flap modules on a
@@ -470,7 +470,10 @@ paths:
       tags: [Status]
       summary: microSD card presence + capacity (v3.10, `sd` token)
       description: |
-        The onboard TF card slot (SD_MMC 1-bit). Present only when a card is mounted at boot
+        The onboard TF card slot (SD_MMC 1-bit). The firmware also keeps its own event log
+        on the card at `/logs/gateway.log` (v3.13.2): boot post-mortems, watchdog reboot
+        reasons, OTA events and a 10-minute heap heartbeat — fetch it via `/api/sd/get`.
+        Present only when a card is mounted at boot
         (advertised as the `sd` capability token; the same info also rides `GET /api/status`
         under `sd`). Always answers 200; `present:false` when no card is fitted.
       responses:
@@ -2862,6 +2865,7 @@ components:
       type: object
       properties:
         version:      { type: string,  example: "3.12.0", description: "This firmware's version (same value as fwVersion since v3.12). Key product behaviour on `product` and capability tokens, not version heuristics" }
+        resets:       { type: array, description: "v3.13.2 (in /api/status): the last 8 reboots as [cause, minutesAlive] pairs, newest first, surviving warm reboots in RTC memory. Causes: 1 poweron, 3 sw, 4 panic, 5 int-wdt, 6 task-wdt, 7 wdt, 9 brownout, 11 usb", items: { type: array, items: { type: integer } } }
         product:      { type: string,  example: "Matrix Portal Gateway" }
         fwVersion:    { type: string,  example: "2.1.0", description: "This firmware's own version" }
         wSSID:        { type: string,  example: "MyNetwork" }
