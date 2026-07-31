@@ -200,7 +200,10 @@ void setup() {
   // 10. Tasks. Display sits on core 1 with the network stack, leaving core 0 for
   //    frames, the web server and the clock -- the same split the physical
   //    gateway uses, with the panel taking the slot the OTA task shares.
-  xTaskCreatePinnedToCore(taskRTC,     "RTC",     2048, NULL, 2, &hTaskRTC,   0);
+  // 3072 (was 2048, v3.13.2): the brightness schedule added sscanf+gmtime_r to this
+  // task's tick and the soak flagged a 496-byte minimum -- the thinnest margin of any
+  // task, and a plausible cause of the unexplained 2026-07-30 reboot. 1 KB well spent.
+  xTaskCreatePinnedToCore(taskRTC,     "RTC",     3072, NULL, 2, &hTaskRTC,   0);
   xTaskCreatePinnedToCore(taskFrames,  "Frames",  5120, NULL, 3, &hTaskFrames, 0);
   // v3.0: HTTP requests are served by esp_http_server's own task (httpx.h); taskWeb
   // is just the SSE pump + supervisor now, so its stack shrank from the handler-era 8 KB.
