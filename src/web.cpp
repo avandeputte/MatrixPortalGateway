@@ -1725,6 +1725,14 @@ static esp_err_t handleApiSdGet(httpd_req_t* r) {
   File f = SD_MMC.open(path, "r");
   if (!f) return httpxErr(r, 404, "Not found");
   if (f.isDirectory()) { f.close(); return httpxErr(r, 400, "Is a directory"); }
+  // Land the download under the file's own name, not the endpoint's ("get").
+  // FAT names cannot contain '"' or '\\', so plain quoting is safe. The buffer must
+  // outlive the header flush (first chunk) -- it does, it lives to function return.
+  const char* base = strrchr(path.c_str(), '/');
+  base = base ? base + 1 : path.c_str();
+  char cd[96];
+  snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", base);
+  httpd_resp_set_hdr(r, "Content-Disposition", cd);
   httpd_resp_set_hdr(r, "Cache-Control", "no-store");
   httpd_resp_set_type(r, "application/octet-stream");
   while (size_t got = f.read(httpxBuf, sizeof(httpxBuf))) {
