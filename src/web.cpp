@@ -9,6 +9,7 @@
 #include "sound.h"           // POST /api/sound + the sound capability token (v3.6)
 #include "sensor.h"          // env fields in status + the environment token (v3.7)
 #include "sdcard.h"          // microSD info + the sd token (v3.10)
+#include "timer.h"           // kitchen timer + alarms (v3.14)
 #include "SD_MMC.h"          // /api/sd/* file operations
 #include <fcntl.h>            // non-blocking mode for the canvas stream socket (v3.2)
 #include <lwip/sockets.h>    // setsockopt on the stream socket at close (v3.3)
@@ -811,7 +812,7 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
     snprintf(ft, sizeof(ft),
              "\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
              "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\","
-             "\"effectDefs\"%s%s%s%s]}",
+             "\"effectDefs\",\"timer\"%s%s%s%s]}",
              audioAvailable() ? ",\"audio\"" : "",
              soundAvailable() ? ",\"sound\"" : "",
              sensorAvailable() ? ",\"environment\"" : "",
@@ -1658,6 +1659,65 @@ static esp_err_t handleApiEnvironment(httpd_req_t* r) {
   return httpxSend(r, 200, "application/json", buf);
 }
 
+/* ---- kitchen timer + alarms (v3.14) ---------------------------------------------- */
+// GET /api/timer -- state; POST {"sec":N}|{"min":N} start, {"stop":true} cancel.
+static esp_err_t handleApiTimer(httpd_req_t* r) {
+  if (r->method == HTTP_GET) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"active\":%s,\"remaining\":%lu,\"alarmFiring\":%s}",
+             timerActive() ? "true" : "false", (unsigned long)timerRemaining(),
+             alarmFiring() ? "true" : "false");
+    return httpxSend(r, 200, "application/json", buf);
+  }
+  JsonDocument doc;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
+  if (doc["stop"] | false) {
+    timerCancel(); alarmDismiss();
+    logCommand('R', "timer stop");
+    return httpxSend(r, 200, "application/json", "{\"ok\":true,\"stopped\":true}");
+  }
+  uint32_t sec = doc["sec"] | 0;
+  if (!sec) sec = (uint32_t)(doc["min"] | 0) * 60u;
+  if (!timerStart(sec)) return httpxErr(r, 400, "sec/min must give 1 s .. 24 h");
+  { char cd[48]; snprintf(cd, sizeof(cd), "timer %lus", (unsigned long)sec); logCommand('R', cd); }
+  char buf[64];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"remaining\":%lu}", (unsigned long)timerRemaining());
+  return httpxSend(r, 200, "application/json", buf);
+}
+
+// GET /api/alarms -- the 4 slots; POST [{time,days,enabled} x <=4] replaces them.
+static esp_err_t handleApiAlarms(httpd_req_t* r) {
+  if (r->method == HTTP_GET) {
+    char buf[256]; int n = snprintf(buf, sizeof(buf), "[");
+    for (int i = 0; i < ALARM_SLOTS; i++)
+      n += snprintf(buf + n, sizeof(buf) - n, "%s{\"time\":\"%s\",\"days\":%u,\"enabled\":%s}",
+                    i ? "," : "", cfg.almTime[i], (unsigned)cfg.almDays[i],
+                    cfg.almEnabled[i] ? "true" : "false");
+    snprintf(buf + n, sizeof(buf) - n, "]");
+    return httpxSend(r, 200, "application/json", buf);
+  }
+  JsonDocument doc;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
+  if (!doc.is<JsonArray>()) return httpxErr(r, 400, "Body must be a JSON array of alarm slots");
+  int i = 0;
+  for (JsonVariantConst a : doc.as<JsonArrayConst>()) {
+    if (i >= ALARM_SLOTS) break;
+    const char* t = a["time"] | "07:00";
+    int h = -1, m = -1;
+    if (sscanf(t, "%d:%d", &h, &m) != 2 || h < 0 || h > 23 || m < 0 || m > 59)
+      return httpxErr(r, 400, "time must be HH:MM");
+    strlcpy(cfg.almTime[i], t, sizeof(cfg.almTime[i]));
+    cfg.almDays[i]    = (uint8_t)(a["days"] | 0x7F);
+    cfg.almEnabled[i] = a["enabled"] | false;
+    i++;
+  }
+  for (; i < ALARM_SLOTS; i++) cfg.almEnabled[i] = false;
+  if (doc[0]["tzOffsetMin"].is<int>()) cfg.quietTzOffsetMin = (int16_t)doc[0]["tzOffsetMin"].as<int>();
+  saveConfig();
+  logCommand('R', "alarms updated");
+  return httpxSend(r, 200, "application/json", "{\"ok\":true}");
+}
+
 /* ---- microSD (v3.10): browse / download / upload / delete the TF card -------------
    All paths are card-absolute (must start with "/"); ".." is rejected so a request can
    never escape the card root. Every endpoint 503s when no card is mounted. */
@@ -1725,6 +1785,10 @@ static esp_err_t handleApiSdGet(httpd_req_t* r) {
   File f = SD_MMC.open(path, "r");
   if (!f) return httpxErr(r, 404, "Not found");
   if (f.isDirectory()) { f.close(); return httpxErr(r, 400, "Is a directory"); }
+  // ?tail=N (v3.14): stream only the LAST N bytes -- the dashboard log viewer reads
+  // the end of a 512 KB log without pulling the whole file.
+  { const long tail = httpxArg(r, "tail").toInt();
+    if (tail > 0 && (size_t)tail < f.size()) f.seek(f.size() - (size_t)tail); }
   // Land the download under the file's own name, not the endpoint's ("get").
   // FAT names cannot contain '"' or '\\', so plain quoting is safe. The buffer must
   // outlive the header flush (first chunk) -- it does, it lives to function return.
@@ -3954,6 +4018,10 @@ void webInit() {
   httpxOn("/api/canvas/stream",      HTTP_GET,  handleApiCanvasStreamGet);
   httpxOn("/api/canvas/audio",       HTTP_GET,  handleApiCanvasAudio);
   httpxOn("/api/environment",        HTTP_GET,  handleApiEnvironment);
+  httpxOn("/api/timer",              HTTP_GET,    handleApiTimer);
+  httpxOn("/api/timer",              HTTP_POST,   handleApiTimer);
+  httpxOn("/api/alarms",             HTTP_GET,    handleApiAlarms);
+  httpxOn("/api/alarms",             HTTP_POST,   handleApiAlarms);
   httpxOn("/api/sd",                 HTTP_GET,    handleApiSd);
   httpxOn("/api/sd/list",            HTTP_GET,    handleApiSdList);
   httpxOn("/api/sd/get",             HTTP_GET,    handleApiSdGet);

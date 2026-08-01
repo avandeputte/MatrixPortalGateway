@@ -1,5 +1,21 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.14.0 — 2026-07-31
+
+### Added
+- **Kitchen timer + daily alarms.** `POST /api/timer {"sec":N|"min":N}` puts a full-screen
+  countdown on the panel (big anti-aliased digits, amber flash in the final 10 s), chimes
+  at zero, holds a flashing 00:00 for ~10 s, then returns the panel to whatever was
+  running. Four daily alarm slots (`GET/POST /api/alarms`, persisted, per-day bitmask)
+  ring for up to 90 s with a red flashing screen. **Alerts override Quiet Time by design**
+  (the speaker master enable still applies) and outrank every display mode, including a
+  live companion canvas. Dashboard card on the Display tab (quick 5/10/15-min buttons,
+  custom duration, alarm editor); `timer` capability token.
+- **Event Log card** on the Status tab: the tail of the on-card `/logs/gateway.log`
+  (boots + causes, watchdog reasons, OTA, heap heartbeats) with refresh + download —
+  powered by a new `tail=N` option on `GET /api/sd/get`.
+
+
 ## v3.13.2 — 2026-07-31
 
 ### Added — a board that explains its own failures

@@ -57,6 +57,11 @@ struct GwConfig {
   char          dimStart[6];   // window start "HH:MM"
   char          dimEnd[6];     // window end   "HH:MM" (may wrap past midnight)
   uint8_t       dimLevel;      // 1..255 panel brightness while the window is active
+  // Daily alarms (v3.14): up to 4 slots, user-local "HH:MM" sharing quietTzOffsetMin.
+  // Alarms override Quiet Time by design.
+  char          almTime[4][6];
+  uint8_t       almDays[4];    // day bitmask, bit0=Sun .. bit6=Sat
+  bool          almEnabled[4];
 };
 
 // ---- owned globals (defined in globals.cpp) ----

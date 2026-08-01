@@ -2,6 +2,7 @@
 #include "panel.h"
 #include "effects.h"
 #include "canvas.h"
+#include "timer.h"     // full-screen countdown/alarm renderer (v3.14)
 
 // display.cpp -- the HUB75 flap wall: geometry, the flap renderer, and the reel task.
 // All output goes through panel.h; this file never sees a pixel format, a bitplane or a
@@ -421,6 +422,15 @@ void taskDisplay(void* pv) {
     // the back buffer from under them, and never repaint the wall over their canvas. Raising
     // gDispParked AFTER the check -- reached only once any in-flight repaint above has returned
     // -- is the acknowledgement the take-over waits for before it draws its first frame.
+    // Timer/alarm alert (v3.14): OWNS the panel over EVERY other mode, including a
+    // canvas takeover -- checked BEFORE the canvas park so the countdown keeps
+    // rendering (and releasing) even while the companion pushes frames. The renderer
+    // re-evicts canvas mode each frame; a companion frame may flash between alert
+    // frames, and that is acceptable for an alert.
+    if (timerAlarmActive()) {
+      gDispParked = false;
+      if (timerAlarmRender()) { wdgDispMs = millis(); continue; }
+    }
     if (gCanvasMode) { gDispParked = true; vTaskDelay(pdMS_TO_TICKS(50)); continue; }
     gDispParked = false;                  // rendering again: the panel is ours until we next park
     // Pick up a pending effect start HERE, on the render task: effectReset() (which frees/reallocs

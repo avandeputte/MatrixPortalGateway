@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Matrix Portal Gateway API
-  version: "3.13.2"
+  version: "3.14"
   description: |
     REST API for the **Matrix Portal Gateway** firmware, running on a
     Waveshare ESP32-S3-RGB-Matrix driver board. It emulates a wall of split-flap modules on a
@@ -465,6 +465,41 @@ paths:
                   rawRH:     { type: number, description: "relative humidity % before compensation (v3.7)" }
                   offsetC:   { type: number, description: "the applied temperature offset, °C (v3.7)" }
                   ageMs:     { type: integer, description: "ms since the reading was taken" }
+  /api/timer:
+    get:
+      tags: [Status]
+      summary: Countdown timer state (v3.14, `timer` token)
+      responses:
+        "200": { description: "{active, remaining (s), alarmFiring}" }
+    post:
+      tags: [Status]
+      summary: Start or stop the countdown (v3.14)
+      description: |
+        `{"sec":N}` or `{"min":N}` (1 s .. 24 h) starts/replaces the countdown — rendered
+        full-screen on the panel over every other mode, chiming at zero (the chime
+        deliberately overrides Quiet Time; the speaker master enable still applies).
+        `{"stop":true}` cancels the timer and dismisses a ringing alarm.
+      responses:
+        "200": { description: ok }
+        "400": { description: bad duration }
+  /api/alarms:
+    get:
+      tags: [Status]
+      summary: The four daily alarm slots (v3.14)
+      responses:
+        "200": { description: "[{time:\"HH:MM\", days:bitmask(bit0=Sun), enabled}] x4" }
+    post:
+      tags: [Status]
+      summary: Replace the alarm slots (v3.14)
+      description: |
+        Body: up to 4 `{time,days,enabled}` slots (omitted slots are disabled). Times are
+        the user's local "HH:MM"; the first slot may carry `tzOffsetMin` (browser minutes
+        east of UTC, shared with the quiet/dim schedules). Alarms ring for up to 90 s
+        with a full-screen flash, **overriding Quiet Time by design**; dismiss via
+        `POST /api/timer {"stop":true}`. Persisted in NVS.
+      responses:
+        "200": { description: ok }
+        "400": { description: bad time }
   /api/sd:
     get:
       tags: [Status]
@@ -517,6 +552,7 @@ paths:
       summary: Download a file from the SD card (v3.10)
       parameters:
         - { name: path, in: query, required: true, schema: { type: string }, description: "card-absolute path" }
+        - { name: tail, in: query, schema: { type: integer }, description: "v3.14: stream only the last N bytes (the dashboard log viewer)" }
       responses:
         "200": { description: Raw file bytes, application/octet-stream }
         "400": { description: Bad path / is a directory }

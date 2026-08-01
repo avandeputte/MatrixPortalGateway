@@ -22,7 +22,9 @@ bool soundAvailable();            // codec found and configured
 bool soundPlaying();              // synth currently emitting
 // Queue a sequence of {freqHz, ms} notes (freq 0 = rest) at vol 0..100.
 // Replaces anything queued. Returns false if the codec is absent.
-bool soundPlay(const uint16_t* freq, const uint16_t* ms, int n, uint8_t vol);
+// force=true bypasses Quiet Time (timer/alarm alerts, v3.14) -- the settings master
+// enable is still respected by the caller.
+bool soundPlay(const uint16_t* freq, const uint16_t* ms, int n, uint8_t vol, bool force = false);
 // Play a WAV file from the SD card (v3.13): 16-bit 16 kHz mono/stereo PCM only (the
 // duplex I2S clock is fixed). Replaces queued tones; a newer call replaces it.
 bool soundPlayWav(const char* path, uint8_t vol);
