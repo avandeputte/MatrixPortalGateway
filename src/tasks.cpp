@@ -3,6 +3,8 @@
 #include "sensor.h"   // SHTC3 temp/humidity, polled from taskRTC (v3.7)
 #include "panel.h"    // panelSetBrightness: the brightness schedule (v3.13)
 #include "timer.h"    // alarmTick: daily alarms fire from taskRTC (v3.14)
+#include "audio.h"    // audioClapPoll + capture re-arm for clap detection (v3.15)
+#include "imu.h"      // QMI8658 tap engine poll -- I2C stays on taskRTC (v3.15)
 
 
 
@@ -134,10 +136,19 @@ static void quietScheduleTick() {
 }
 
 void taskRTC(void* pv) {
-  uint32_t lastSched = 0, lastEnv = 0;
+  // 100 ms base tick (was 1 s, v3.15): the IMU tap poll wants sub-second latency, and
+  // this task is where ALL runtime I2C must live (the bus has no lock). Everything
+  // else keeps its old cadence via the ms-timers below.
+  uint32_t lastSched = 0, lastEnv = 0, lastSec = 0;
   while (true) {
-    rtcRead();
-    alarmTick();               // daily alarms, ~1/s (v3.14; overrides quiet by design)
+    if (cfg.tapEnabled) imuTapTick();     // QMI8658 tap status, ~100 ms (v3.15)
+    if (lastSec == 0 || millis() - lastSec >= 1000UL) {
+      lastSec = millis();
+      rtcRead();
+      alarmTick();             // daily alarms, ~1/s (v3.14; overrides quiet by design)
+      // Clap detection is a standing mic consumer: (re)arm capture if it self-stopped.
+      if (cfg.clapEnabled && audioAvailable() && !audioCapturing()) audioMaybeStart();
+    }
     if (lastSched == 0 || millis() - lastSched > 5000UL) {
       lastSched = millis();
       quietScheduleTick();     // evaluate the quiet window every 5s (prompt flip)
@@ -149,7 +160,7 @@ void taskRTC(void* pv) {
       lastEnv = millis();
       sensorPoll();
     }
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 
@@ -172,6 +183,29 @@ void taskWeb(void* pv) {
     // (Long uploads stay healthy: the shim stamps wdgWebMs on every body chunk.)
     const unsigned long busy = httpxBusySince();
     if (!busy || now - busy < 110000UL) wdgWebMs = now;
+
+    // Gesture events (v3.15): the detectors publish, this pump delivers. A live
+    // timer/alarm CONSUMES the gesture as its stop/dismiss (clap the timer away,
+    // tap the alarm quiet); only otherwise does it reach the companion over SSE.
+    { uint8_t gc; uint32_t gs;
+      // Dismissal requires a DOUBLE gesture: a single clap-like transient -- a dish,
+      // a door, one keystroke thump -- must never kill a timer. Singles still reach
+      // the companion, which sets its own bar. For taps, the chip's own double-tap
+      // window is stricter than human rhythm, so two single-tap EVENTS within 1.5 s
+      // also count as a double (live-tested: real double-taps arrived as 2 singles).
+      static unsigned long lastTapEvMs = 0, lastClapEvMs = 0;
+      if (audioClapPoll(&gc, &gs)) {
+        // Same human-rhythm rule as taps (live data 2026-08-01: real double-claps
+        // arrived as two count=1 events): two clap events within 1.5 s = a double.
+        const bool dbl = (gc >= 2) || (millis() - lastClapEvMs < 1500);
+        lastClapEvMs = millis();
+        if (!dbl || !timerAlarmGestureDismiss()) sseBroadcastGesture("clap", gc, gs);
+      }
+      if (imuTapPoll(&gc, &gs)) {
+        const bool dbl = (gc >= 2) || (millis() - lastTapEvMs < 1500);
+        lastTapEvMs = millis();
+        if (!dbl || !timerAlarmGestureDismiss()) sseBroadcastGesture("tap", gc, gs);
+      } }
 
     // Self-heal a dead port-80 server (boot-time httpd_start failure): a ground-truth
     // check every 20s, acted on only when the server is genuinely down.

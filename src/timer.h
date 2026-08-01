@@ -30,5 +30,9 @@ bool alarmFiring();
 
 // ---- rendering (taskDisplay only) ----
 bool timerAlarmActive();   // an alert wants the panel (checked before the canvas park)
+// A physical gesture (clap/tap, v3.15) stops whatever alert is live: a ringing alarm is
+// dismissed, a counting or just-finished timer is cancelled. True if it consumed the
+// gesture (the event is then NOT forwarded to SSE -- the user meant "stop that").
+bool timerAlarmGestureDismiss();
 // True if the timer/alarm currently owns the panel; renders one frame when it does.
 bool timerAlarmRender();

@@ -42,6 +42,14 @@ bool audioAvailable();               // ES7210 found and configured
 void audioMaybeStart();              // a consumer exists: ensure capture is running
 void audioRead(AudioFrame& out);     // latest features (zeroed when not capturing)
 void audioReadScope(int8_t* out, int n);  // latest DC-removed mono waveform, auto-gain-scaled to ±127
+// Clap detection (v3.15, cfg.clapEnabled): a clap is a broadband transient -- RMS
+// spiking over the slow envelope WITH strong high-band content (a bass thump is the
+// beat detector's job, not ours). Claps inside one burst are counted; the event
+// finalises after ~450 ms of post-clap quiet. audioClapPoll returns true ONCE per
+// event with the count (1..5) and a monotonically increasing seq.
+bool audioClapPoll(uint8_t* countOut, uint32_t* seqOut);
+uint32_t audioClapTotal();           // clap events since boot (diagnostics)
+void audioClapDebug(float* maxRms, float* brightAtMax, float* floorAtMax);  // peak-hop tuning telemetry (reset on read)
 bool audioCapturing();               // I2S currently running (diagnostics)
 
 // The shared full-duplex I2S port (one wired clock set serves both codecs): sound.cpp

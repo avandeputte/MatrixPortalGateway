@@ -100,6 +100,14 @@ static portMUX_TYPE   gFrameMux = portMUX_INITIALIZER_UNLOCKED;
 // each hop under gFrameMux alongside gFrame. Separate from AudioFrame so the hot per-frame
 // audioRead() copy (spectrum/soundwall) stays lean -- only the scope effect pays for it.
 static int8_t         gScope[AUDIO_SCOPE] = {0};
+// Clap event, published under gFrameMux (v3.15).
+static volatile uint8_t  gClapPending = 0;      // finalised count awaiting pickup (0 = none)
+static volatile uint32_t gClapSeq = 0;
+static volatile uint32_t gClapTotal = 0;      // events since boot (diagnostics)
+// Tuning telemetry (v3.15 bring-up): the loudest hop since last read -- its rms, its
+// high-band fraction, and the floor at that moment. Lets us calibrate the thresholds
+// from REAL claps instead of guessing. Reset on read (/api/gestures?debug=1).
+static volatile float gDbgMaxRms = 0, gDbgBrightAtMax = 0, gDbgFloorAtMax = 0;
 static volatile bool  gBeatLatch = false;
 
 bool audioAvailable() { return gAudioPresent; }
@@ -111,6 +119,28 @@ void audioRead(AudioFrame& out) {
   out.beat = gBeatLatch;
   gBeatLatch = false;                     // beat is consume-once per reader cycle
   taskEXIT_CRITICAL(&gFrameMux);
+}
+
+uint32_t audioClapTotal() { return gClapTotal; }
+
+void audioClapDebug(float* maxRms, float* brightAtMax, float* floorAtMax) {
+  taskENTER_CRITICAL(&gFrameMux);
+  *maxRms = gDbgMaxRms; *brightAtMax = gDbgBrightAtMax; *floorAtMax = gDbgFloorAtMax;
+  gDbgMaxRms = 0;
+  taskEXIT_CRITICAL(&gFrameMux);
+}
+
+bool audioClapPoll(uint8_t* countOut, uint32_t* seqOut) {
+  bool has = false;
+  taskENTER_CRITICAL(&gFrameMux);
+  if (gClapPending) {
+    if (countOut) *countOut = gClapPending;
+    if (seqOut)   *seqOut   = gClapSeq;
+    gClapPending = 0;
+    has = true;
+  }
+  taskEXIT_CRITICAL(&gFrameMux);
+  return has;
 }
 
 void audioReadScope(int8_t* out, int n) {
@@ -244,6 +274,7 @@ static bool audioHasConsumer() {
   if (gEffect == EFFECT_SPECTRUM || gEffect == EFFECT_SOUNDWALL ||
       gEffect == EFFECT_RIPPLE  || gEffect == EFFECT_SCOPE ||
       gEffect == EFFECT_SPECTRO) return true;
+  if (cfg.clapEnabled) return true;             // clap detection is a standing consumer (v3.15)
   return gEffectAudioMod && gEffect != EFFECT_NONE;
 }
 
@@ -301,6 +332,47 @@ static void audioTask(void* pv) {
                       (millis() - lastBeatMs > 150);
     if (beat) lastBeatMs = millis();
     bassAvg = 0.984f * bassAvg + 0.016f * bass;
+
+    // Clap detector (v3.15). Runs on the RAW band magnitudes, before normalisation:
+    // attack (rms over the slow floor), broadband-high (upper bands carry the energy),
+    // refractory, then burst counting with a quiet-gap finaliser.
+    if (cfg.clapEnabled) {
+      static float clapFloor = 0.01f;
+      static unsigned long clapLastMs = 0, clapFirstMs = 0;
+      static uint8_t clapN = 0;
+      float lowSum = 0, totSum = 0;
+      for (int b2 = 0; b2 < AUDIO_BANDS; b2++) { totSum += bands[b2]; if (b2 < 3) lowSum += bands[b2]; }
+      const unsigned long cnow = millis();
+      if (rms > gDbgMaxRms) {                                      // tuning telemetry
+        gDbgMaxRms = rms;
+        gDbgBrightAtMax = totSum > 0 ? lowSum / totSum : 0;          // now reports the BASS fraction
+        gDbgFloorAtMax = clapFloor;
+      }
+      const bool attack = rms > 4.5f * clapFloor && rms > 0.035f;
+      // Spectral gate, CALIBRATED FROM REAL CLAPS (2026-08-01): a 1 m clap measured
+      // rms 0.22 with only 8% of its energy in the top bands -- through these mics a
+      // clap is mid-spread, NOT bright. What still separates it from a music thump is
+      // that it is not BASS-dominant: require the bottom three bands under half the
+      // total. (The old "high bands > 35%" gate rejected every real clap.)
+      const bool notBass = totSum > 0.0f && lowSum < 0.5f * totSum;
+      if (attack && notBass && cnow - clapLastMs > 120) {
+        if (clapN == 0) clapFirstMs = cnow;
+        if (clapN < 5) clapN++;
+        clapLastMs = cnow;
+      } else {
+        clapFloor = 0.99f * clapFloor + 0.01f * rms;         // track the room between attacks
+        if (clapFloor < 0.004f) clapFloor = 0.004f;
+      }
+      if (clapN && cnow - clapLastMs > 700) {                // burst over: publish (700 ms:
+                                                             // relaxed double-claps still merge)
+        taskENTER_CRITICAL(&gFrameMux);
+        gClapPending = clapN;
+        gClapSeq = gClapSeq + 1;
+        gClapTotal = gClapTotal + 1;                         // diagnostics (/api/gestures)
+        taskEXIT_CRITICAL(&gFrameMux);
+        clapN = 0; (void)clapFirstMs;
+      }
+    }
 
     // Slow auto-gain: envelopes rise fast, decay slow, so quiet rooms still visualise.
     if (rms > envMax) envMax = rms; else envMax *= 0.9995f;

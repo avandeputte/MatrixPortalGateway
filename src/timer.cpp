@@ -39,6 +39,12 @@ void timerCancel() {
   dispMarkDirty();                       // repaint whatever mode resumes underneath
 }
 
+bool timerAlarmGestureDismiss() {
+  if (alarmRinging) { alarmDismiss(); return true; }
+  if (timerEndMs || timerDoneMs) { timerCancel(); return true; }
+  return false;
+}
+
 void alarmDismiss() {
   alarmRinging = false;
   soundStop();

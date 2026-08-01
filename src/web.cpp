@@ -10,6 +10,7 @@
 #include "sensor.h"          // env fields in status + the environment token (v3.7)
 #include "sdcard.h"          // microSD info + the sd token (v3.10)
 #include "timer.h"           // kitchen timer + alarms (v3.14)
+#include "imu.h"             // tap detection state + the taps token (v3.15)
 #include "SD_MMC.h"          // /api/sd/* file operations
 #include <fcntl.h>            // non-blocking mode for the canvas stream socket (v3.2)
 #include <lwip/sockets.h>    // setsockopt on the stream socket at close (v3.3)
@@ -812,11 +813,13 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
     snprintf(ft, sizeof(ft),
              "\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
              "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\","
-             "\"effectDefs\",\"timer\",\"alarms\"%s%s%s%s]}",
+             "\"effectDefs\",\"timer\",\"alarms\"%s%s%s%s%s%s]}",
              audioAvailable() ? ",\"audio\"" : "",
              soundAvailable() ? ",\"sound\"" : "",
              sensorAvailable() ? ",\"environment\"" : "",
-             sdReady() ? ",\"sd\"" : "");
+             sdReady() ? ",\"sd\"" : "",
+             audioAvailable() ? ",\"claps\"" : "",
+             imuAvailable() ? ",\"taps\"" : "");
     capPut(ft); }
   capFlush();
   return httpxChunkEnd(r);
@@ -943,6 +946,8 @@ static esp_err_t handleApiConfigGet(httpd_req_t* r) {
   doc["dimStart"]      = cfg.dimStart;
   doc["dimEnd"]        = cfg.dimEnd;
   doc["dimLevel"]      = cfg.dimLevel;
+  doc["clapEnabled"]   = cfg.clapEnabled;
+  doc["tapEnabled"]    = cfg.tapEnabled;
   doc["flapMs"]        = cfg.flapMs;
   doc["flapMax"]       = cfg.flapMax;
   doc["soundEnabled"]  = cfg.soundEnabled;   // master speaker enable (v3.6)
@@ -1046,6 +1051,8 @@ static esp_err_t handleApiConfigSettings(httpd_req_t* r) {
   if (doc["dimLevel"].is<int>()) { int v = doc["dimLevel"];
     if (v >= 1 && v <= 255) cfg.dimLevel = (uint8_t)v; }
   if (doc["dimTzOffsetMin"].is<int>()) cfg.quietTzOffsetMin = (int16_t)doc["dimTzOffsetMin"].as<int>();
+  if (doc["clapEnabled"].is<bool>()) cfg.clapEnabled = doc["clapEnabled"].as<bool>();
+  if (doc["tapEnabled"].is<bool>())  cfg.tapEnabled  = doc["tapEnabled"].as<bool>();
   if (doc["panelBright"].is<int>())   { int v = doc["panelBright"];
     // Apply now, not just on the next wall repaint: an effect or raw canvas owns the panel while
     // taskDisplay stands down, so dispRender (the only other caller) would not push the new duty.
@@ -1663,6 +1670,24 @@ static esp_err_t handleApiEnvironment(httpd_req_t* r) {
   }
   else
     snprintf(buf, sizeof(buf), "{\"available\":%s}", sensorAvailable() ? "true" : "false");
+  return httpxSend(r, 200, "application/json", buf);
+}
+
+/* ---- gestures (v3.15): clap + tap state ------------------------------------------- */
+// GET /api/gestures -- hardware presence + enables. Events ride SSE ("clap"/"tap"
+// {count,seq}); this is the discovery/diagnostic view.
+static esp_err_t handleApiGestures(httpd_req_t* r) {
+  char buf[160];
+  float mr, br, fl;
+  audioClapDebug(&mr, &br, &fl);
+  snprintf(buf, sizeof(buf),
+           "{\"claps\":{\"available\":%s,\"enabled\":%s,\"total\":%lu,"
+           "\"peakRms\":%.4f,\"peakBright\":%.2f,\"peakFloor\":%.4f},"
+           "\"taps\":{\"available\":%s,\"enabled\":%s,\"total\":%lu}}",
+           audioAvailable() ? "true" : "false", cfg.clapEnabled ? "true" : "false",
+           (unsigned long)audioClapTotal(), mr, br, fl,
+           imuAvailable() ? "true" : "false",  cfg.tapEnabled ? "true" : "false",
+           (unsigned long)imuTapTotal());
   return httpxSend(r, 200, "application/json", buf);
 }
 
@@ -4025,6 +4050,7 @@ void webInit() {
   httpxOn("/api/canvas/stream",      HTTP_GET,  handleApiCanvasStreamGet);
   httpxOn("/api/canvas/audio",       HTTP_GET,  handleApiCanvasAudio);
   httpxOn("/api/environment",        HTTP_GET,  handleApiEnvironment);
+  httpxOn("/api/gestures",           HTTP_GET,    handleApiGestures);
   httpxOn("/api/timer",              HTTP_GET,    handleApiTimer);
   httpxOn("/api/timer",              HTTP_POST,   handleApiTimer);
   httpxOn("/api/alarms",             HTTP_GET,    handleApiAlarms);

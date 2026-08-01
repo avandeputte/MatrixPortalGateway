@@ -34,6 +34,8 @@ void cfgSetDefaults() {
     strlcpy(cfg.almTime[i], "07:00", sizeof(cfg.almTime[i]));
     cfg.almDays[i] = 0x7F; cfg.almEnabled[i] = false;
   }
+  cfg.clapEnabled = false;
+  cfg.tapEnabled  = false;
   cfg.hostname[0] = 0;          // blank -> derived from the MAC
   cfg.serialDebug = false;
   gSerialDebug    = false;
@@ -78,6 +80,8 @@ void loadConfig() {
   strlcpy(cfg.dimEnd,           prefs.getString("dimEnd",   "07:00").c_str(), sizeof(cfg.dimEnd));
   cfg.dimLevel      =           prefs.getUChar("dimLvl", 40);
   if (cfg.dimLevel < 1) cfg.dimLevel = 40;
+  cfg.clapEnabled = prefs.getBool("clapEn", false);
+  cfg.tapEnabled  = prefs.getBool("tapEn",  false);
   for (int i = 0; i < 4; i++) {
     char k[8];
     snprintf(k, sizeof(k), "almT%d", i);
@@ -145,6 +149,8 @@ void saveConfig() {
   prefs.putString("dimStart", cfg.dimStart);
   prefs.putString("dimEnd",   cfg.dimEnd);
   prefs.putUChar ("dimLvl",   cfg.dimLevel);
+  prefs.putBool  ("clapEn",   cfg.clapEnabled);
+  prefs.putBool  ("tapEn",    cfg.tapEnabled);
   for (int i = 0; i < 4; i++) {
     char k[8];
     snprintf(k, sizeof(k), "almT%d", i); prefs.putString(k, cfg.almTime[i]);
