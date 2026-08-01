@@ -68,6 +68,7 @@ const char* effectDefsJson();          // [{id,name,params:[{key,type,...}]}...]
 // centre, 2 right about x. y is the TOP of the glyphs. Returns the drawn width.
 int aaTextDraw(int x, int y, int size, const char* s, int align,
                uint8_t r, uint8_t g, uint8_t b);
+void aaTextMetrics(int size, int* ascOut, int* capOut);   // ascent + digit cap height
 
 void effectReset(uint8_t type);   // prepare per-effect state; called only on taskDisplay
 void effectRender(uint8_t type);  // render + present one frame; runs on taskDisplay

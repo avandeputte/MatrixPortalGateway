@@ -90,8 +90,14 @@ void alarmTick() {
 }
 
 /* ---- rendering (taskDisplay) ------------------------------------------------------ */
-static void centreText(int y, int size, const char* s, uint8_t r, uint8_t g, uint8_t b) {
-  aaTextDraw(gPanel.panelW / 2, y, size, s, 1, r, g, b);
+// Vertically centre on the DIGITS' real cap height: aaTextDraw offsets its y by the
+// face ascent, which overstates the ink box -- naive size/2 maths drew the countdown
+// low enough to clip (found on the wall, v3.14.0 bring-up).
+static void centreTextV(int centreY, int size, const char* s, uint8_t r, uint8_t g, uint8_t b) {
+  int asc = 0, cap = 0;
+  aaTextMetrics(size, &asc, &cap);
+  const int yTop = centreY - cap / 2;            // where the ink should start
+  aaTextDraw(gPanel.panelW / 2, yTop + cap - asc, size, s, 1, r, g, b);
 }
 
 bool timerAlarmActive() { return alarmRinging || timerEndMs != 0 || timerDoneMs != 0; }
@@ -107,9 +113,8 @@ bool timerAlarmRender() {
     panelClear();
     if (flash) panelFillRect(0, 0, W, 2, 255, 40, 40), panelFillRect(0, H - 2, W, 2, 255, 40, 40);
     const int big = H >= 64 ? 34 : 24;
-    centreText(H / 2 - big / 2 - (H >= 64 ? 8 : 4), big, alarmLabel,
-               255, flash ? 60 : 200, 40);
-    if (H >= 32) centreText(H - 12, 10, "ALARM", 255, 220, 220);
+    centreTextV(H >= 64 ? H / 2 - 8 : H / 2 - 5, big, alarmLabel, 255, flash ? 60 : 200, 40);
+    if (H >= 48) centreTextV(H - 9, 10, "ALARM", 255, 220, 220);
     panelShow();
     vTaskDelay(pdMS_TO_TICKS(100));
     return true;
@@ -120,7 +125,7 @@ bool timerAlarmRender() {
     const bool flash = (millis() / 400) & 1;
     panelClear();
     const int big = H >= 64 ? 34 : 24;
-    centreText(H / 2 - big / 2, big, "00:00", flash ? 255 : 120, flash ? 200 : 60, 0);
+    centreTextV(H / 2, big, "00:00", flash ? 255 : 120, flash ? 200 : 60, 0);
     panelShow();
     if ((millis() - timerDoneMs) % 2500u < 60u) alertChime();
     vTaskDelay(pdMS_TO_TICKS(80));
@@ -145,8 +150,8 @@ bool timerAlarmRender() {
   panelClear();
   const bool urgent = left <= 10;
   const int big = (H >= 64 ? 34 : 24);
-  centreText(H / 2 - big / 2, big, txt,
-             urgent ? 255 : 255, urgent ? ((millis() / 300) & 1 ? 60 : 200) : 244, urgent ? 40 : 224);
+  centreTextV(H / 2, big, txt,
+              255, urgent ? ((millis() / 300) & 1 ? 60 : 200) : 244, urgent ? 40 : 224);
   panelShow();
   vTaskDelay(pdMS_TO_TICKS(150));
   return true;

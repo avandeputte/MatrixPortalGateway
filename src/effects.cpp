@@ -326,6 +326,16 @@ static void aaText(int px, int by, const AAFont* f, const char* s, uint8_t r, ui
   for (; *s; s++) { aaGlyph(px, by, f, *s, r, g, b); px += aaAdvance(f, *s); }
 }
 
+// Real metrics for a face (v3.14): the ascent aaTextDraw offsets by, and the CAP
+// height of the digits (glyph '0'), which is what visual centring must use -- the
+// nominal size overstates the ink height (the clock effect learned this first).
+void aaTextMetrics(int size, int* ascOut, int* capOut) {
+  const AAFont* f = (size >= 30) ? &AAFONT_BIG : (size >= 18) ? &AAFONT_MED : &AAFONT_SMALL;
+  const AAGlyph* z = aaFind(f, '0');
+  if (ascOut) *ascOut = f->asc;
+  if (capOut) *capOut = z ? z->h : f->asc;
+}
+
 int aaTextDraw(int x, int y, int size, const char* str, int align,
                uint8_t r, uint8_t g, uint8_t b) {
   const AAFont* f = (size >= 30) ? &AAFONT_BIG : (size >= 18) ? &AAFONT_MED : &AAFONT_SMALL;

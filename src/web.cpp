@@ -1372,10 +1372,13 @@ static void canvasStandDown() {
 // so a companion's canvas apps cannot light the panel (the flap path is suppressed in
 // frames.cpp; effects/ticker/anim-play/sound already refuse -- this closes the
 // raw-canvas gap: frame/ops/rects/rect/qoi/stream/anim/gif/opsb). v3.7.1
+// Content gate for the raw canvas endpoints: Quiet Time blanks the wall, and a
+// timer/alarm alert (v3.14) owns it outright -- companion pushes would otherwise
+// flash through between alert frames (observed on the wall). 409 both.
 static bool quietBlocked(httpd_req_t* r) {
-  if (!gQuietTime) return false;
-  httpxErr(r, 409, "Quiet Time is active");
-  return true;
+  if (gQuietTime)        { httpxErr(r, 409, "Quiet Time is active"); return true; }
+  if (timerAlarmActive()) { httpxErr(r, 409, "Timer/alarm alert active"); return true; }
+  return false;
 }
 
 static void canvasEnter(bool clear) {
@@ -1480,6 +1483,10 @@ static void csClose(bool ok, const char* why) {
 // Execute one complete record (type cs.type, payload cs.buf/cs.need).
 // False = protocol error; the pump aborts the stream.
 static bool csExec() {
+  // While a timer/alarm owns the panel, CONSUME draw records without drawing --
+  // the stream stays healthy and playback resumes the moment the alert releases.
+  // (0x00 end and 0x04 atlas-bind still act; they don't touch the panel.)
+  if (timerAlarmActive() && cs.type != 0x00 && cs.type != 0x04) return true;
   switch (cs.type) {
     case 0x01: {                                  // full frame: u8 fmt + rows
       if (cs.need < 1) return false;
