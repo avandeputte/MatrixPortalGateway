@@ -1677,17 +1677,17 @@ static esp_err_t handleApiEnvironment(httpd_req_t* r) {
 // GET /api/gestures -- hardware presence + enables. Events ride SSE ("clap"/"tap"
 // {count,seq}); this is the discovery/diagnostic view.
 static esp_err_t handleApiGestures(httpd_req_t* r) {
-  char buf[160];
+  char buf[256];   // 160 truncated once peakMg joined -- clients got unparseable JSON
   float mr, br, fl;
   audioClapDebug(&mr, &br, &fl);
   snprintf(buf, sizeof(buf),
            "{\"claps\":{\"available\":%s,\"enabled\":%s,\"total\":%lu,"
            "\"peakRms\":%.4f,\"peakBright\":%.2f,\"peakFloor\":%.4f},"
-           "\"taps\":{\"available\":%s,\"enabled\":%s,\"total\":%lu}}",
+           "\"taps\":{\"available\":%s,\"enabled\":%s,\"total\":%lu,\"peakMg\":%ld}}",
            audioAvailable() ? "true" : "false", cfg.clapEnabled ? "true" : "false",
            (unsigned long)audioClapTotal(), mr, br, fl,
            imuAvailable() ? "true" : "false",  cfg.tapEnabled ? "true" : "false",
-           (unsigned long)imuTapTotal());
+           (unsigned long)imuTapTotal(), (long)imuAccelPeakMg());
   return httpxSend(r, 200, "application/json", buf);
 }
 

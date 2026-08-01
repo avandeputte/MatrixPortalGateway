@@ -1,5 +1,37 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.15.0 — 2026-08-02
+
+### Added — gestures: clap and tap detection
+
+- **Clap detection** (`claps` token, `clapEnabled` setting): a transient detector in the
+  mic DSP — attack over the room floor plus a *not-bass* spectral gate calibrated from
+  real claps (on these mics a clap is mid-spread, not bright; a music thump is bass-heavy).
+  Claps in a burst are counted (double-clap → count 2).
+- **Tap detection** (`taps` token, `tapEnabled` setting): the QMI8658's on-die tap engine
+  (accel 4 g @ 500 Hz), thresholds live-calibrated for comfortable knuckle-taps.
+- **Events over SSE**: `event: clap` / `event: tap` with `{count, seq}` — the companion
+  can bind single/double gestures to actions. `GET /api/gestures` carries state, lifetime
+  counters, and tuning telemetry.
+- **A double gesture dismisses a running timer or ringing alarm on-device** (clap the
+  timer away, tap the alarm quiet), audit-logged to the card; singles are the companion's
+  to interpret. Human-rhythm pairing: two events within 1 s count as a double.
+  Live-verified: comfortable double-tap dismisses in 2 s, double-clap in 8 s; a 4-minute
+  ambient control produced zero false dismissals.
+
+### Fixed — the RTC tells the truth now
+Four intertwined bugs: PCF85063 CAP_SEL mis-set (crystal counted ~2× real time — +1 day
+of drift per day), circular NTP discipline (`getLocalTime` accepted the chip's own seed
+as "synced", so the write-back echoed the chip's error back forever — now waits for real
+SNTP completion), write-back on the wrong I2C task (now on taskRTC with read-back verify
+and a logged crystal rate check), and timezone-skewed register conversion. Measured after:
+crystal at 119 s per 120 s real, write-back verified within 0 s, boot log stamps correct.
+
+Also: taskRTC stack 3072 → 4096 (a mid-fix build blew its stack canary and boot-looped;
+the panic-recovery FATFS reformat wiped uploaded animations/fonts/atlases — re-upload if
+missed), gesture/SD-log plumbing hardened, `/api/gestures` JSON truncation fixed.
+
+
 ## v3.14.0 — 2026-07-31
 
 ### Added

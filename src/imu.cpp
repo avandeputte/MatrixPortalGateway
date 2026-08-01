@@ -1,6 +1,7 @@
 #include "gateway.h"
 #include "imu.h"
 #include <Wire.h>
+#include <math.h>    // sqrtf/fabsf: accel-magnitude telemetry
 
 // imu.cpp -- see imu.h. Register map and the CTRL9 command/CAL-page protocol follow
 // the QMI8658A datasheet, cross-checked against lewisxhe/SensorLib (MIT).
@@ -23,6 +24,7 @@
 #define REG_STATUS_INT    0x2D      // bit7 = CTRL9 command done
 #define REG_STATUS1       0x2F      // bit1 = tap event (read clears)
 #define REG_TAP_STATUS    0x59      // bits1:0 -- 1 single, 2 double
+#define REG_AX_L          0x35      // accel XYZ, 6 bytes little-endian
 #define REG_RESET         0x60      // write 0xB0
 #define REG_RST_RESULT    0x4D      // == 0x80 when the reset finished
 #define CMD_CONFIGURE_TAP 0x0C
@@ -35,6 +37,10 @@ static portMUX_TYPE imuMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint8_t  gTapPending = 0;
 static volatile uint32_t gTapSeq = 0;
 static volatile uint32_t gTapTotal = 0;       // events since boot (diagnostics)
+// Tuning telemetry (like the clap detector's): the strongest accel deviation from 1 g
+// seen since last read, in milli-g. Shows what a physical knock MEASURES even when the
+// tap engine ignores it -- misses become numbers instead of silence. Reset on read.
+static volatile int32_t  gAccelPeakMg = 0;
 
 static bool qw(uint8_t reg, uint8_t val) {
   Wire.beginTransmission(qmiAddr);
@@ -85,10 +91,12 @@ void imuInit() {
   // Phase 2 (CAL4_H=0x02): alpha 0.0625, gamma 0.25 (u1.7 fixed), PeakMagThr 0.8 g²,
   // UDMThr 0.4 g² (u16 in units of 0.001·g², g=9.81 -- the lib's exact encoding).
   const double g2res = 0.001 * 9.81 * 9.81;
-  // 1.5/0.6 g^2 (was 0.8/0.4): desk vibration -- typing, footsteps -- crossed the
-  // looser thresholds; a deliberate knuckle-tap on the enclosure clears these easily.
-  const uint16_t peakThr = (uint16_t)(1.5 * 9.81 * 9.81 / g2res);
-  const uint16_t udmThr  = (uint16_t)(0.6 * 9.81 * 9.81 / g2res);
+  // 0.7/0.4 g^2: comfortable-tap territory (live-tested 2026-08-01: 1.5 needed a
+  // real whack -- a dismissal took repeated attempts). Desk-vibration singles that
+  // slip through cost only an SSE event now; DISMISSAL requires a pair within 1.5 s,
+  // which typing noise essentially never produces.
+  const uint16_t peakThr = (uint16_t)(0.7 * 9.81 * 9.81 / g2res);
+  const uint16_t udmThr  = (uint16_t)(0.4 * 9.81 * 9.81 / g2res);
   ok &= qw(REG_CAL1_L, (uint8_t)(0.0625 * 128));  // alpha
   ok &= qw(REG_CAL1_H, (uint8_t)(0.25 * 128));    // gamma
   ok &= qw(REG_CAL2_L, (uint8_t)(peakThr & 0xFF)); ok &= qw(REG_CAL2_H, (uint8_t)(peakThr >> 8));
@@ -107,8 +115,27 @@ void imuInit() {
 bool imuAvailable() { return gImuReady; }
 
 // taskRTC, ~100 ms: reading STATUS1 clears the event; TAP_STATUS then says which kind.
+static int qr6(uint8_t reg, uint8_t* out) {     // burst-read 6 bytes (accel XYZ)
+  Wire.beginTransmission(qmiAddr);
+  Wire.write(reg);
+  if (Wire.endTransmission(true) != 0) return -1;
+  if (Wire.requestFrom(qmiAddr, (uint8_t)6) != 6) return -1;
+  for (int i = 0; i < 6; i++) out[i] = Wire.read();
+  return 0;
+}
+
 void imuTapTick() {
   if (!gImuReady) return;
+  // Telemetry: |a| deviation from rest, in mg (4 g range -> 8192 LSB/g).
+  { uint8_t a[6];
+    if (qr6(REG_AX_L, a) == 0) {
+      const int16_t ax = (int16_t)(a[0] | (a[1] << 8));
+      const int16_t ay = (int16_t)(a[2] | (a[3] << 8));
+      const int16_t az = (int16_t)(a[4] | (a[5] << 8));
+      const float g2 = ((float)ax * ax + (float)ay * ay + (float)az * az) / (8192.0f * 8192.0f);
+      const int32_t devMg = (int32_t)(fabsf(sqrtf(g2) - 1.0f) * 1000.0f);
+      if (devMg > gAccelPeakMg) gAccelPeakMg = devMg;
+    } }
   const int s1 = qr(REG_STATUS1);
   if (s1 < 0 || !(s1 & 0x02)) return;             // bit1 = tap happened since last read
   const int ts = qr(REG_TAP_STATUS);
@@ -122,6 +149,14 @@ void imuTapTick() {
 }
 
 uint32_t imuTapTotal() { return gTapTotal; }
+
+int32_t imuAccelPeakMg() {
+  taskENTER_CRITICAL(&imuMux);
+  const int32_t v = gAccelPeakMg;
+  gAccelPeakMg = 0;
+  taskEXIT_CRITICAL(&imuMux);
+  return v;
+}
 
 bool imuTapPoll(uint8_t* countOut, uint32_t* seqOut) {
   bool has = false;

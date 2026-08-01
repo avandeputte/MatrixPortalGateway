@@ -5,6 +5,7 @@
 #include "timer.h"    // alarmTick: daily alarms fire from taskRTC (v3.14)
 #include "audio.h"    // audioClapPoll + capture re-arm for clap detection (v3.15)
 #include "imu.h"      // QMI8658 tap engine poll -- I2C stays on taskRTC (v3.15)
+#include "sdcard.h"   // sdLog: gesture-dismissal audit trail (v3.15)
 
 
 
@@ -195,17 +196,21 @@ void taskWeb(void* pv) {
       // window is stricter than human rhythm, so two single-tap EVENTS within 1.5 s
       // also count as a double (live-tested: real double-taps arrived as 2 singles).
       static unsigned long lastTapEvMs = 0, lastClapEvMs = 0;
+      // Pair window 1.0 s (was 1.5): deliberate doubles land ~0.3-0.6 s apart, but desk
+      // activity (typing bursts) could pair two accidental singles inside 1.5 s -- the
+      // 2026-08-01 false dismissal. Every dismissal is SD-logged with its channel so a
+      // surprise dismissal is diagnosable from the log, not from guesswork.
       if (audioClapPoll(&gc, &gs)) {
-        // Same human-rhythm rule as taps (live data 2026-08-01: real double-claps
-        // arrived as two count=1 events): two clap events within 1.5 s = a double.
-        const bool dbl = (gc >= 2) || (millis() - lastClapEvMs < 1500);
+        const bool dbl = (gc >= 2) || (millis() - lastClapEvMs < 1000);
         lastClapEvMs = millis();
-        if (!dbl || !timerAlarmGestureDismiss()) sseBroadcastGesture("clap", gc, gs);
+        if (dbl && timerAlarmGestureDismiss()) sdLog("gesture dismiss: clap x%u", (unsigned)(gc >= 2 ? gc : 2));
+        else sseBroadcastGesture("clap", gc, gs);
       }
       if (imuTapPoll(&gc, &gs)) {
-        const bool dbl = (gc >= 2) || (millis() - lastTapEvMs < 1500);
+        const bool dbl = (gc >= 2) || (millis() - lastTapEvMs < 1000);
         lastTapEvMs = millis();
-        if (!dbl || !timerAlarmGestureDismiss()) sseBroadcastGesture("tap", gc, gs);
+        if (dbl && timerAlarmGestureDismiss()) sdLog("gesture dismiss: tap x%u", (unsigned)(gc >= 2 ? gc : 2));
+        else sseBroadcastGesture("tap", gc, gs);
       } }
 
     // Self-heal a dead port-80 server (boot-time httpd_start failure): a ground-truth

@@ -17,3 +17,4 @@ bool imuAvailable();                             // QMI8658 found and tap engine
 void imuTapTick();                               // poll the tap status (taskRTC only)
 bool imuTapPoll(uint8_t* countOut, uint32_t* seqOut);   // one event per tap, any task
 uint32_t imuTapTotal();                          // tap events since boot (diagnostics)
+int32_t  imuAccelPeakMg();                       // peak |a|-1g deviation since last read, mg
