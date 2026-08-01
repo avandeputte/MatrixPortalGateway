@@ -2186,7 +2186,7 @@ paths:
                     example: [plasma, fire, matrix, fliporama, clock, life]
                   features:
                     type: array
-                    description: "Capability tokens a client checks instead of sniffing the firmware version. 'canvas', 'effects' and 'ticker' appear on the Matrix gateway only. 'brightness' (v2.2) says the panel brightness is live-settable via GET/POST /api/display/brightness (also persisted as panelBright in POST /api/config/settings, 1..255, applied on the next frame). Hardware-conditional tokens appear only when the peripheral is present: 'audio' (mics), 'sound' (speaker), 'environment' (SHTC3), 'sd' (mounted microSD card, v3.10)."
+                    description: "Capability tokens a client checks instead of sniffing the firmware version. 'canvas', 'effects' and 'ticker' appear on the Matrix gateway only. 'brightness' (v2.2) says the panel brightness is live-settable via GET/POST /api/display/brightness (also persisted as panelBright in POST /api/config/settings, 1..255, applied on the next frame). 'timer' and 'alarms' (v3.14) advertise the countdown timer and the daily alarm slots. Hardware-conditional tokens appear only when the peripheral is present: 'audio' (mics), 'sound' (speaker), 'environment' (SHTC3), 'sd' (mounted microSD card, v3.10)."
                     items: { type: string }
                     example: ["cells","colors","index","lowercase","pictographs","quiet","ota","canvas","effects","ticker","brightness","events"]
 

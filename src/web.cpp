@@ -812,7 +812,7 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
     snprintf(ft, sizeof(ft),
              "\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
              "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\","
-             "\"effectDefs\",\"timer\"%s%s%s%s]}",
+             "\"effectDefs\",\"timer\",\"alarms\"%s%s%s%s]}",
              audioAvailable() ? ",\"audio\"" : "",
              soundAvailable() ? ",\"sound\"" : "",
              sensorAvailable() ? ",\"environment\"" : "",
