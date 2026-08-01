@@ -205,7 +205,7 @@ void setup() {
   // 3072 (was 2048, v3.13.2): the brightness schedule added sscanf+gmtime_r to this
   // task's tick and the soak flagged a 496-byte minimum -- the thinnest margin of any
   // task, and a plausible cause of the unexplained 2026-07-30 reboot. 1 KB well spent.
-  xTaskCreatePinnedToCore(taskRTC,     "RTC",     3072, NULL, 2, &hTaskRTC,   0);
+  xTaskCreatePinnedToCore(taskRTC,     "RTC",     4096, NULL, 2, &hTaskRTC,   0);
   xTaskCreatePinnedToCore(taskFrames,  "Frames",  5120, NULL, 3, &hTaskFrames, 0);
   // v3.0: HTTP requests are served by esp_http_server's own task (httpx.h); taskWeb
   // is just the SSE pump + supervisor now, so its stack shrank from the handler-era 8 KB.
@@ -220,6 +220,9 @@ void loop() {
   // Stamp this boot's running time into the reset ring (v3.13.1): after a crash, the
   // NEXT boot reports how long this one lived. Cheap: one RTC-mem write per pass.
   sfResetUpMin[0] = (uint32_t)((millis() - sfBootMs) / 60000UL);
+  // RTC chip-service diagnostics (v3.15): the service runs on stack-lean taskRTC, so
+  // it mails its log lines here -- this task has the stack for FatFs.
+  { char rl[96]; if (rtcChipLogTake(rl, sizeof(rl))) sdLog("%s", rl); }
   // Heap heartbeat to the SD log every 10 min (v3.13.2): a crashed board's log then
   // shows its health right up to the end, without anything on USB.
   { static uint32_t lastHb = 0;

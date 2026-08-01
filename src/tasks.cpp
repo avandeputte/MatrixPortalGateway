@@ -145,6 +145,7 @@ void taskRTC(void* pv) {
     if (lastSec == 0 || millis() - lastSec >= 1000UL) {
       lastSec = millis();
       rtcRead();
+      rtcChipService();        // queued RTC-chip writeback + verify (I2C on THIS task, v3.15)
       alarmTick();             // daily alarms, ~1/s (v3.14; overrides quiet by design)
       // Clap detection is a standing mic consumer: (re)arm capture if it self-stopped.
       if (cfg.clapEnabled && audioAvailable() && !audioCapturing()) audioMaybeStart();

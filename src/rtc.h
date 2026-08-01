@@ -25,6 +25,9 @@ extern char gPosixTZ[64];
 void rtcHwInit();
 void rtcRead();
 bool rtcNTPSync();
+void rtcRequestChipWriteback();   // queue a chip write (any task)
+void rtcChipService();            // perform queued write + verify + rate check (taskRTC only)
+bool rtcChipLogTake(char* out, size_t cap);   // drain the service's log line (loop() flushes to SD)
 void rtcFormatTime(char* out, size_t outLen);
 unsigned long rtcEpochNow();
 bool rtcLocalNow(struct tm* out);   // broken-down local time; false if clock unset or TZ lock busy
