@@ -1,6 +1,6 @@
 # Matrix Portal Gateway — Release Notes
 
-## v3.15.0 — 2026-08-02
+## v3.15.0 — 2026-08-01
 
 ### Added — gestures: clap and tap detection
 
