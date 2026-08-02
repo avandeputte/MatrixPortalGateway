@@ -1,5 +1,24 @@
 # Matrix Portal Gateway — Release Notes
 
+## v3.16.0 — 2026-08-01
+
+### Added — the card guards the flash
+
+- **FATFS backup to microSD** (`/api/backup`, `backupEnabled` setting, Files-tab card):
+  the internal storage — animations, fonts, atlases, the companion blob — is mirrored
+  incrementally to `/backup/fatfs` on the card (nightly at 03:30, shortly after boot if
+  no mirror exists, or on demand). Deletions prune the mirror, so a restore can't
+  resurrect ghosts. **If FATFS is ever reformatted, the mirror is restored automatically
+  on the next boot** — the crash-recovery reformat (3 panic boots in a row) goes from
+  "all uploads lost" to a log line. Born of experience: exactly that wipe happened once.
+- **Settings export/import** (`GET /api/config/export`, `POST /api/config/import`,
+  Settings-tab card): every setting — panel geometry, schedules, alarms, gestures — as
+  one JSON file, WiFi password deliberately excluded. Import applies whichever keys the
+  file contains and says whether a reboot is needed. The nightly backup writes the same
+  export to the card (`/backup/config.json`), so card + firmware binary now rebuild a
+  board completely.
+
+
 ## v3.15.0 — 2026-08-01
 
 ### Added — gestures: clap and tap detection

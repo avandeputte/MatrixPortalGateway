@@ -64,6 +64,7 @@ struct GwConfig {
   bool          almEnabled[4];
   bool          clapEnabled;   // clap detection (v3.15): keeps the mic capturing; SSE "clap" events
   bool          tapEnabled;    // IMU tap detection (v3.15): QMI8658 tap engine; SSE "tap" events
+  bool          backupEnabled; // v3.16: nightly FATFS->SD mirror at 03:30 local (backup.h)
 };
 
 // ---- owned globals (defined in globals.cpp) ----
@@ -81,5 +82,13 @@ bool cfgValidHostname(const char* h);
 void cfgSetDefaults();
 void loadConfig();
 void saveConfig();
+
+// Settings export/import (v3.16): the full configuration as JSON -- every field
+// except the WiFi password (the import flow runs over the network, so the device
+// already holds working credentials; keeping the secret out lets the export be
+// stored and shared freely). Import applies only the keys present, with the same
+// clamps loadConfig() uses, saves, and reports whether a boot-read field changed.
+void cfgExportJson(JsonDocument& doc);
+bool cfgImportJson(const JsonDocument& doc, int& applied, bool& rebootNeeded);
 
 #endif // MPGW_CONFIG_H

@@ -8,7 +8,8 @@
 #include "audio.h"           // capabilities audio token + effect "audio" param (v3.4)
 #include "sound.h"           // POST /api/sound + the sound capability token (v3.6)
 #include "sensor.h"          // env fields in status + the environment token (v3.7)
-#include "sdcard.h"          // microSD info + the sd token (v3.10)
+#include "sdcard.h"
+#include "backup.h"          // microSD info + the sd token (v3.10)
 #include "timer.h"           // kitchen timer + alarms (v3.14)
 #include "imu.h"             // tap detection state + the taps token (v3.15)
 #include "SD_MMC.h"          // /api/sd/* file operations
@@ -948,6 +949,7 @@ static esp_err_t handleApiConfigGet(httpd_req_t* r) {
   doc["dimLevel"]      = cfg.dimLevel;
   doc["clapEnabled"]   = cfg.clapEnabled;
   doc["tapEnabled"]    = cfg.tapEnabled;
+  doc["backupEnabled"] = cfg.backupEnabled;
   doc["flapMs"]        = cfg.flapMs;
   doc["flapMax"]       = cfg.flapMax;
   doc["soundEnabled"]  = cfg.soundEnabled;   // master speaker enable (v3.6)
@@ -1053,6 +1055,7 @@ static esp_err_t handleApiConfigSettings(httpd_req_t* r) {
   if (doc["dimTzOffsetMin"].is<int>()) cfg.quietTzOffsetMin = (int16_t)doc["dimTzOffsetMin"].as<int>();
   if (doc["clapEnabled"].is<bool>()) cfg.clapEnabled = doc["clapEnabled"].as<bool>();
   if (doc["tapEnabled"].is<bool>())  cfg.tapEnabled  = doc["tapEnabled"].as<bool>();
+  if (doc["backupEnabled"].is<bool>()) cfg.backupEnabled = doc["backupEnabled"].as<bool>();
   if (doc["panelBright"].is<int>())   { int v = doc["panelBright"];
     // Apply now, not just on the next wall repaint: an effect or raw canvas owns the panel while
     // taskDisplay stands down, so dispRender (the only other caller) would not push the new duty.
@@ -1688,6 +1691,56 @@ static esp_err_t handleApiGestures(httpd_req_t* r) {
            (unsigned long)audioClapTotal(), mr, br, fl,
            imuAvailable() ? "true" : "false",  cfg.tapEnabled ? "true" : "false",
            (unsigned long)imuTapTotal(), (long)imuAccelPeakMg());
+  return httpxSend(r, 200, "application/json", buf);
+}
+
+/* ---- FATFS backup + settings export/import (v3.16) ------------------------------- */
+// GET /api/backup -- status of the FATFS->SD mirror; POST -- run a pass now (the
+// loop() task picks the flag up within a second; watch GET.running for completion).
+static esp_err_t handleApiBackup(httpd_req_t* r) {
+  if (r->method == HTTP_POST) {
+    if (!sdReady()) return httpxErr(r, 503, "no card mounted");
+    backupRequest();
+    return httpxSend(r, 200, "application/json", "{\"ok\":true,\"started\":true}");
+  }
+  const BackupStatus& b = backupStatus();
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+           "{\"available\":%s,\"enabled\":%s,\"running\":%s,\"everRan\":%s,\"lastOk\":%s,"
+           "\"lastEpoch\":%lu,\"lastMs\":%lu,\"copied\":%lu,\"pruned\":%lu,"
+           "\"unchanged\":%lu,\"bytes\":%llu}",
+           sdReady() ? "true" : "false", cfg.backupEnabled ? "true" : "false",
+           b.running ? "true" : "false", b.everRan ? "true" : "false",
+           b.lastOk ? "true" : "false", (unsigned long)b.lastEpoch,
+           (unsigned long)b.lastMs, (unsigned long)b.copied, (unsigned long)b.pruned,
+           (unsigned long)b.skipped, (unsigned long long)b.bytes);
+  return httpxSend(r, 200, "application/json", buf);
+}
+
+// GET /api/config/export -- the full settings as downloadable JSON (no WiFi password).
+static esp_err_t handleApiConfigExport(httpd_req_t* r) {
+  JsonDocument doc;
+  cfgExportJson(doc);
+  String out;
+  serializeJsonPretty(doc, out);
+  char cd[80];
+  snprintf(cd, sizeof(cd), "attachment; filename=\"%s-config.json\"", cfgHostname());
+  httpd_resp_set_hdr(r, "Content-Disposition", cd);
+  return httpxSend(r, 200, "application/json", out.c_str(), out.length());
+}
+
+// POST /api/config/import -- apply an exported settings file. Only the keys present
+// are applied (same clamps as NVS load); saves and reports if a reboot is needed.
+static esp_err_t handleApiConfigImport(httpd_req_t* r) {
+  JsonDocument doc;
+  if (!httpxReadJson(r, doc)) return ESP_OK;
+  int applied = 0; bool rebootNeeded = false;
+  if (!cfgImportJson(doc, applied, rebootNeeded))
+    return httpxErr(r, 400, "no recognized settings keys in body");
+  logCommand('R', "config import");
+  char buf[80];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"applied\":%d,\"rebootNeeded\":%s}",
+           applied, rebootNeeded ? "true" : "false");
   return httpxSend(r, 200, "application/json", buf);
 }
 
@@ -4051,6 +4104,10 @@ void webInit() {
   httpxOn("/api/canvas/audio",       HTTP_GET,  handleApiCanvasAudio);
   httpxOn("/api/environment",        HTTP_GET,  handleApiEnvironment);
   httpxOn("/api/gestures",           HTTP_GET,    handleApiGestures);
+  httpxOn("/api/backup",             HTTP_GET,    handleApiBackup);
+  httpxOn("/api/backup",             HTTP_POST,   handleApiBackup);
+  httpxOn("/api/config/export",      HTTP_GET,    handleApiConfigExport);
+  httpxOn("/api/config/import",      HTTP_POST,   handleApiConfigImport);
   httpxOn("/api/timer",              HTTP_GET,    handleApiTimer);
   httpxOn("/api/timer",              HTTP_POST,   handleApiTimer);
   httpxOn("/api/alarms",             HTTP_GET,    handleApiAlarms);

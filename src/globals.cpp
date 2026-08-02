@@ -108,6 +108,7 @@ SemaphoreHandle_t msgMutex = NULL;
 ---------------------------------------------------------- */
 volatile unsigned long txCount = 0;
 bool sfFsReady = false;   // set true once FFat is mounted
+bool sfFsFormatted = false;   // FATFS was (re)formatted THIS boot (v3.16: triggers backup restore)
 
 /* ----------------------------------------------------------
    The emulated modules

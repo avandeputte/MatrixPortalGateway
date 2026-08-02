@@ -36,6 +36,7 @@ void cfgSetDefaults() {
   }
   cfg.clapEnabled = false;
   cfg.tapEnabled  = false;
+  cfg.backupEnabled = true;
   cfg.hostname[0] = 0;          // blank -> derived from the MAC
   cfg.serialDebug = false;
   gSerialDebug    = false;
@@ -82,6 +83,7 @@ void loadConfig() {
   if (cfg.dimLevel < 1) cfg.dimLevel = 40;
   cfg.clapEnabled = prefs.getBool("clapEn", false);
   cfg.tapEnabled  = prefs.getBool("tapEn",  false);
+  cfg.backupEnabled = prefs.getBool("bakEn", true);
   for (int i = 0; i < 4; i++) {
     char k[8];
     snprintf(k, sizeof(k), "almT%d", i);
@@ -151,6 +153,7 @@ void saveConfig() {
   prefs.putUChar ("dimLvl",   cfg.dimLevel);
   prefs.putBool  ("clapEn",   cfg.clapEnabled);
   prefs.putBool  ("tapEn",    cfg.tapEnabled);
+  prefs.putBool  ("bakEn",    cfg.backupEnabled);
   for (int i = 0; i < 4; i++) {
     char k[8];
     snprintf(k, sizeof(k), "almT%d", i); prefs.putString(k, cfg.almTime[i]);
@@ -160,6 +163,137 @@ void saveConfig() {
   prefs.putShort ("trMs",     cfg.transMs);
   prefs.putString("host",     cfg.hostname);
   prefs.end();
+}
+
+// ---- settings export/import (v3.16) ---------------------------------------
+
+static bool okHHMM(const char* s) {
+  int h = -1, m = -1;
+  return s && sscanf(s, "%d:%d", &h, &m) == 2 && h >= 0 && h <= 23 && m >= 0 && m <= 59;
+}
+
+void cfgExportJson(JsonDocument& doc) {
+  doc["product"]   = PRODUCT_NAME;
+  doc["fwVersion"] = FW_VERSION;
+  doc["exported"]  = (uint32_t)time(nullptr);
+  doc["wifiSSID"]  = cfg.wifiSSID;          // no wifiPass -- see config.h
+  doc["posixTZ"]   = cfg.posixTZ;
+  doc["ntpServer"] = cfg.ntpServer;
+  doc["serialDebug"] = cfg.serialDebug;
+  doc["hostname"]  = cfg.hostname;
+  doc["gridRows"]  = cfg.gridRows;
+  doc["gridCols"]  = cfg.gridCols;
+  doc["bootAnim"]  = cfg.bootAnim;
+  doc["quietSchedEnabled"] = cfg.quietSchedEnabled;
+  doc["quietStart"] = cfg.quietStart;
+  doc["quietEnd"]   = cfg.quietEnd;
+  doc["quietDays"]  = cfg.quietDays;
+  doc["quietTzOffsetMin"] = cfg.quietTzOffsetMin;
+  doc["panelW"]        = cfg.panelW;
+  doc["panelH"]        = cfg.panelH;
+  doc["panelBitDepth"] = cfg.panelBitDepth;
+  doc["panelBGR"]      = cfg.panelBGR;
+  doc["panelBright"]   = cfg.panelBright;
+  doc["fbPsram"]       = cfg.fbPsram;
+  doc["flapMs"]        = cfg.flapMs;
+  doc["flapMax"]       = cfg.flapMax;
+  doc["soundEnabled"]  = cfg.soundEnabled;
+  doc["soundVolume"]   = cfg.soundVolume;
+  doc["tempOffsetC10"] = cfg.tempOffsetC10;
+  doc["transType"]     = cfg.transType;
+  doc["transMs"]       = cfg.transMs;
+  doc["dimEnabled"] = cfg.dimEnabled;
+  doc["dimStart"]   = cfg.dimStart;
+  doc["dimEnd"]     = cfg.dimEnd;
+  doc["dimLevel"]   = cfg.dimLevel;
+  JsonArray al = doc["alarms"].to<JsonArray>();
+  for (int i = 0; i < 4; i++) {
+    JsonObject a = al.add<JsonObject>();
+    a["time"] = cfg.almTime[i]; a["days"] = cfg.almDays[i]; a["enabled"] = cfg.almEnabled[i];
+  }
+  doc["clapEnabled"]   = cfg.clapEnabled;
+  doc["tapEnabled"]    = cfg.tapEnabled;
+  doc["backupEnabled"] = cfg.backupEnabled;
+}
+
+// Every key optional; strings length-clamped by strlcpy, numerics by the same
+// rules loadConfig() enforces. Malformed values are skipped, not fatal: the rest
+// of the file still applies (and `applied` tells the caller how much did).
+bool cfgImportJson(const JsonDocument& doc, int& applied, bool& rebootNeeded) {
+  applied = 0;
+  const uint16_t oW = cfg.panelW, oH = cfg.panelH;
+  const uint8_t  oD = cfg.panelBitDepth, oR = cfg.gridRows, oC = cfg.gridCols;
+  const bool     oP = cfg.fbPsram;
+  char oHost[HOSTNAME_MAX]; strlcpy(oHost, cfg.hostname, sizeof(oHost));
+
+  #define IMP_STR(key, field) if (doc[key].is<const char*>()) { strlcpy(field, doc[key].as<const char*>(), sizeof(field)); applied++; }
+  #define IMP_BOOL(key, field) if (doc[key].is<bool>()) { field = doc[key].as<bool>(); applied++; }
+  #define IMP_NUM(key, field, lo, hi) if (doc[key].is<int>()) { long v = doc[key].as<long>(); if (v >= (lo) && v <= (hi)) { field = v; applied++; } }
+  #define IMP_HHMM(key, field) if (doc[key].is<const char*>() && okHHMM(doc[key].as<const char*>())) { strlcpy(field, doc[key].as<const char*>(), sizeof(field)); applied++; }
+
+  IMP_STR ("wifiSSID",  cfg.wifiSSID);
+  IMP_STR ("posixTZ",   cfg.posixTZ);
+  IMP_STR ("ntpServer", cfg.ntpServer);
+  IMP_BOOL("serialDebug", cfg.serialDebug);
+  if (doc["hostname"].is<const char*>()) {
+    const char* h = doc["hostname"].as<const char*>();
+    if (!h[0] || cfgValidHostname(h)) { strlcpy(cfg.hostname, h, sizeof(cfg.hostname)); applied++; }
+  }
+  IMP_NUM ("gridRows", cfg.gridRows, 1, 64);
+  IMP_NUM ("gridCols", cfg.gridCols, 1, 64);
+  IMP_STR ("bootAnim", cfg.bootAnim);
+  IMP_BOOL("quietSchedEnabled", cfg.quietSchedEnabled);
+  IMP_HHMM("quietStart", cfg.quietStart);
+  IMP_HHMM("quietEnd",   cfg.quietEnd);
+  IMP_NUM ("quietDays", cfg.quietDays, 0, 0x7F);
+  IMP_NUM ("quietTzOffsetMin", cfg.quietTzOffsetMin, -14*60, 14*60);
+  IMP_NUM ("panelW", cfg.panelW, 32, 256);
+  IMP_NUM ("panelH", cfg.panelH, 16, 64);
+  IMP_NUM ("panelBitDepth", cfg.panelBitDepth, 1, 6);
+  IMP_BOOL("panelBGR", cfg.panelBGR);
+  IMP_NUM ("panelBright", cfg.panelBright, 1, 255);
+  IMP_BOOL("fbPsram", cfg.fbPsram);
+  IMP_NUM ("flapMs", cfg.flapMs, 2, 500);
+  IMP_NUM ("flapMax", cfg.flapMax, 1, FLAP_ANIM_MAX);
+  IMP_BOOL("soundEnabled", cfg.soundEnabled);
+  IMP_NUM ("soundVolume", cfg.soundVolume, 0, 100);
+  IMP_NUM ("tempOffsetC10", cfg.tempOffsetC10, -300, 300);
+  IMP_NUM ("transType", cfg.transType, 0, 3);
+  IMP_NUM ("transMs", cfg.transMs, 100, 2000);
+  IMP_BOOL("dimEnabled", cfg.dimEnabled);
+  IMP_HHMM("dimStart", cfg.dimStart);
+  IMP_HHMM("dimEnd",   cfg.dimEnd);
+  IMP_NUM ("dimLevel", cfg.dimLevel, 1, 255);
+  if (doc["alarms"].is<JsonArrayConst>()) {
+    int i = 0;
+    for (JsonVariantConst a : doc["alarms"].as<JsonArrayConst>()) {
+      if (i >= 4) break;
+      if (a["time"].is<const char*>() && okHHMM(a["time"].as<const char*>()))
+        strlcpy(cfg.almTime[i], a["time"].as<const char*>(), sizeof(cfg.almTime[i]));
+      cfg.almDays[i]    = (uint8_t)((a["days"] | (int)cfg.almDays[i]) & 0x7F);
+      cfg.almEnabled[i] = a["enabled"] | cfg.almEnabled[i];
+      i++;
+    }
+    if (i) applied++;
+  }
+  IMP_BOOL("clapEnabled", cfg.clapEnabled);
+  IMP_BOOL("tapEnabled",  cfg.tapEnabled);
+  IMP_BOOL("backupEnabled", cfg.backupEnabled);
+
+  #undef IMP_STR
+  #undef IMP_BOOL
+  #undef IMP_NUM
+  #undef IMP_HHMM
+
+  if (!applied) return false;
+  gSerialDebug = cfg.serialDebug;
+  strlcpy(gPosixTZ, cfg.posixTZ, sizeof(gPosixTZ));
+  cfgApplyTZ();
+  saveConfig();
+  rebootNeeded = (oW != cfg.panelW || oH != cfg.panelH || oD != cfg.panelBitDepth ||
+                  oP != cfg.fbPsram || oR != cfg.gridRows || oC != cfg.gridCols ||
+                  strcmp(oHost, cfg.hostname) != 0);
+  return true;
 }
 
 // ---- identity -------------------------------------------------------------

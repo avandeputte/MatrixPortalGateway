@@ -12,6 +12,7 @@
 // FATFS mounted? Set by sfFsInit(). The filesystem now holds only the
 // companion's settings blob (/compset.gz).
 extern bool sfFsReady;
+extern bool sfFsFormatted;   // FATFS was (re)formatted this boot -- see backupRestoreIfNeeded()
 
 void sfFsInit(bool forceFormat = false);
 

@@ -148,6 +148,7 @@ void sfFsInit(bool forceFormat) {
   if (forceFormat) {
     printf("[RECOVERY] reformatting FATFS -- discarding possibly-corrupt state\n");
     FFat.format();
+    sfFsFormatted = true;
   }
   // Try to mount WITHOUT auto-format first (fast path on every normal boot).
   if (FFat.begin(false)) {
@@ -162,6 +163,7 @@ void sfFsInit(bool forceFormat) {
   printf("[MOD] FATFS not formatted -- formatting now (one-time, may take a while)...\n");
   if (FFat.begin(true)) {       // true = format if mount fails
     sfFsReady = true;
+    sfFsFormatted = true;
     printf("[MOD] FATFS formatted and mounted (%lu KB free)\n",
            (unsigned long)(FFat.freeBytes() / 1024));
   } else {

@@ -3,6 +3,7 @@
 #include "sound.h"
 #include "sensor.h"
 #include "sdcard.h"
+#include "backup.h"
 #include "imu.h"
 #include "canvas.h"   // canvasAnimLoadPlay: the boot animation
 #include <esp_ota_ops.h>   // esp_ota_get_running_partition(): which slot are we actually running?
@@ -147,6 +148,10 @@ void setup() {
   sfFsInit(fatfsRecover);
   sdInit();           // microSD (v3.10): mount the TF card if one is fitted (setup() only)
   sdLog("%s", sfBootNote);   // the post-mortem line: why THIS boot happened (v3.13.2)
+  // Self-restore (v3.16): a freshly formatted FATFS -- panic-recovery or first
+  // boot -- gets the card's mirror copied back BEFORE anything reads assets
+  // (boot animation below, atlas/vmods later). Data loss becomes a log line.
+  backupRestoreIfNeeded(sfFsFormatted);
   gTransType = cfg.transType; gTransMs = cfg.transMs;   // restore persisted transition (v3.7.2)
   vmBuildReel();      // the shared reel: every CP1252 glyph, then the colours
   vmInit((int)gPanel.cols * (int)gPanel.rows);
@@ -223,6 +228,9 @@ void loop() {
   // RTC chip-service diagnostics (v3.15): the service runs on stack-lean taskRTC, so
   // it mails its log lines here -- this task has the stack for FatFs.
   { char rl[96]; if (rtcChipLogTake(rl, sizeof(rl))) sdLog("%s", rl); }
+  // FATFS->SD backup (v3.16): manual trigger, nightly pass, first-run pass. Runs
+  // here because this task has FatFs stack headroom and no latency budget.
+  backupTick();
   // Heap heartbeat to the SD log every 10 min (v3.13.2): a crashed board's log then
   // shows its health right up to the end, without anything on USB.
   { static uint32_t lastHb = 0;

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Matrix Portal Gateway API
-  version: "3.15"
+  version: "3.16"
   description: |
     REST API for the **Matrix Portal Gateway** firmware, running on a
     Waveshare ESP32-S3-RGB-Matrix driver board. It emulates a wall of split-flap modules on a
@@ -465,6 +465,49 @@ paths:
                   rawRH:     { type: number, description: "relative humidity % before compensation (v3.7)" }
                   offsetC:   { type: number, description: "the applied temperature offset, °C (v3.7)" }
                   ageMs:     { type: integer, description: "ms since the reading was taken" }
+  /api/backup:
+    get:
+      tags: [System]
+      summary: FATFS backup status (v3.16)
+      description: |
+        The gateway mirrors its internal FATFS storage (animations, fonts, atlases,
+        the companion blob) to `/backup/fatfs` on the microSD card, with the full
+        settings export beside it as `/backup/config.json`. Passes are incremental
+        (size/mtime) and prune files deleted from the source. Runs nightly at 03:30
+        local (`backupEnabled` setting), once shortly after boot when the card has no
+        mirror yet, and on demand via POST. **If FATFS is ever reformatted** — the
+        crash-recovery path does this after 3 panic boots in a row — **the mirror is
+        restored automatically on the next boot.**
+      responses:
+        "200": { description: "{available,enabled,running,everRan,lastOk,lastEpoch,lastMs,copied,pruned,unchanged,bytes}" }
+    post:
+      tags: [System]
+      summary: Run a backup pass now
+      description: Sets a flag the housekeeping task picks up within a second; poll GET `running` for completion. `503` with no card.
+      responses:
+        "200": { description: "{ok,started}" }
+  /api/config/export:
+    get:
+      tags: [System]
+      summary: Download the full settings as JSON (v3.16)
+      description: |
+        Every configuration field as one JSON document (`Content-Disposition` names it
+        `<hostname>-config.json`). The WiFi password is deliberately excluded — import
+        runs over the network, so the receiving device already holds working credentials,
+        and its absence makes the file safe to store anywhere.
+      responses:
+        "200": { description: "application/json settings document" }
+  /api/config/import:
+    post:
+      tags: [System]
+      summary: Apply an exported settings file (v3.16)
+      description: |
+        Applies whichever known keys the body contains (unknown keys ignored, malformed
+        values skipped), with the same clamps NVS load enforces, then saves.
+        `rebootNeeded:true` means a boot-read field changed (panel geometry, grid,
+        hostname, fbPsram). `400` when no recognized key is present.
+      responses:
+        "200": { description: "{ok,applied,rebootNeeded}" }
   /api/gestures:
     get:
       tags: [Status]
