@@ -476,7 +476,9 @@ paths:
         stream (`GET /api/events`) as `event: clap` / `event: tap` with `{count, seq}` —
         count 2 = a double (clap bursts are counted; two single events within 1 s also
         pair). **A double gesture dismisses a running timer or ringing alarm on-device**
-        (logged to the on-card event log) and is not forwarded to SSE. This endpoint also
+        (logged to the on-card event log) and is not forwarded to SSE. Any gesture not consumed by a dismissal flashes a
+        4×4 acknowledgment square in the panel's top-right corner (~220 ms, cyan =
+        clap, amber = tap). This endpoint also
         carries tuning telemetry (peak mic RMS + spectral fraction, peak accel deviation
         in milli-g, reset on read) and lifetime event counters.
       responses:

@@ -204,14 +204,15 @@ void taskWeb(void* pv) {
         const bool dbl = (gc >= 2) || (millis() - lastClapEvMs < 1000);
         lastClapEvMs = millis();
         if (dbl && timerAlarmGestureDismiss()) sdLog("gesture dismiss: clap x%u", (unsigned)(gc >= 2 ? gc : 2));
-        else sseBroadcastGesture("clap", gc, gs);
+        else { sseBroadcastGesture("clap", gc, gs); panelGestureBlip(0, 200, 255); }   // cyan = clap
       }
       if (imuTapPoll(&gc, &gs)) {
         const bool dbl = (gc >= 2) || (millis() - lastTapEvMs < 1000);
         lastTapEvMs = millis();
         if (dbl && timerAlarmGestureDismiss()) sdLog("gesture dismiss: tap x%u", (unsigned)(gc >= 2 ? gc : 2));
-        else sseBroadcastGesture("tap", gc, gs);
+        else { sseBroadcastGesture("tap", gc, gs); panelGestureBlip(255, 140, 0); }    // amber = tap
       } }
+    panelBlipService();
 
     // Self-heal a dead port-80 server (boot-time httpd_start failure): a ground-truth
     // check every 20s, acted on only when the server is genuinely down.

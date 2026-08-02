@@ -965,12 +965,68 @@ void panelScroll(int dx, int dy, uint8_t fr, uint8_t fg, uint8_t fb) {
 static void (*sOverlay)(void) = nullptr;
 void panelSetOverlay(void (*fn)(void)) { sOverlay = fn; }
 
+// ---- Gesture ack blip (v3.15): a 4x4 corner flash acknowledging a clap/tap that no
+// alert consumed. Composited here rather than in any presenter: panelShow() stamps it
+// onto whatever frame is going out (saving the pixels underneath first), and
+// panelBlipService() -- pumped from taskWeb -- presents it when the panel is otherwise
+// static and clears it at expiry by restoring the saved pixels over a clone of the
+// live frame. The save always holds the under-blip content of the most recently
+// presented frame, so the restore is right whether the presenter kept streaming or
+// went quiet. Stamp and service can race across tasks; the worst case is one frame
+// with a stale 4x4 corner, corrected by the next present.
+static const int      BLIP_SZ = 4;
+static const uint32_t BLIP_MS = 220;
+static volatile uint32_t blipUntil = 0;   // millis() deadline; 0 = idle
+static uint8_t  blipRGB[3];
+static bool     liveHasBlip = false;      // the frame on screen has the blip burned in
+static uint8_t  blipSave[BLIP_SZ * BLIP_SZ * 3];
+
+void panelGestureBlip(uint8_t r, uint8_t g, uint8_t b) {
+  blipRGB[0] = r; blipRGB[1] = g; blipRGB[2] = b;
+  blipUntil = millis() + BLIP_MS;
+}
+
+static void blipStamp() {                 // panelShow only: drawBuf holds the final frame
+  const int x0 = W - BLIP_SZ - 1, y0 = 1;
+  size_t o = 0;
+  for (int y = y0; y < y0 + BLIP_SZ; y++)
+    for (int x = x0; x < x0 + BLIP_SZ; x++) {
+      readPixelRGB(drawBuf, x, y, blipSave[o], blipSave[o + 1], blipSave[o + 2]);
+      o += 3;
+    }
+  panelFillRect(x0, y0, BLIP_SZ, BLIP_SZ, blipRGB[0], blipRGB[1], blipRGB[2]);
+}
+
+void panelBlipService() {
+  if (!info.ok || !blipUntil) return;
+  const bool expired = (int32_t)(millis() - blipUntil) >= 0;
+  if (!expired && !liveHasBlip) {
+    panelCloneToBack();                   // no presenter has shown it yet: do it ourselves
+    panelShow();                          // stamps the blip (deadline is live)
+  } else if (expired) {
+    if (liveHasBlip) {                    // static panel: put back what was underneath
+      panelCloneToBack();
+      const int x0 = W - BLIP_SZ - 1, y0 = 1;
+      size_t o = 0;
+      for (int y = y0; y < y0 + BLIP_SZ; y++)
+        for (int x = x0; x < x0 + BLIP_SZ; x++) {
+          panelPixel(x, y, blipSave[o], blipSave[o + 1], blipSave[o + 2]);
+          o += 3;
+        }
+      blipUntil = 0;                      // before the show, so it isn't re-stamped
+      panelShow();
+    } else blipUntil = 0;                 // a presenter already painted over it
+  }
+}
+
 static uint32_t lastSwapUs = 0;   // when the previous swap relinked the chain
 
 void panelShow() {
   if (sOverlay) sOverlay();   // draw the overlay into the outgoing frame (v2.1)
   if (!info.ok) return;
   if (brightPending) { writeControlBits(drawBuf); brightPending = (uint8_t)(brightPending - 1); }
+  if (blipUntil && (int32_t)(millis() - blipUntil) < 0) { blipStamp(); liveHasBlip = true; }
+  else liveHasBlip = false;
 
   // HARDWARE INVARIANT (v3.1, learned the hard way): never relink the descriptor
   // chain twice within one scan pass. GDMA is traversing those descriptors as we

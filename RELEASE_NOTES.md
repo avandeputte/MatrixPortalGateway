@@ -18,6 +18,10 @@
   to interpret. Human-rhythm pairing: two events within 1 s count as a double.
   Live-verified: comfortable double-tap dismisses in 2 s, double-clap in 8 s; a 4-minute
   ambient control produced zero false dismissals.
+- **Ack blip**: any gesture that isn't consumed by a dismissal flashes a 4×4 square in
+  the panel's top-right corner for ~220 ms — cyan for clap, amber for tap — composited
+  over whatever is showing (wall, canvas, effects), then the pixels underneath return.
+  Visual proof the board heard you, before the companion has done anything with the event.
 
 ### Fixed — the RTC tells the truth now
 Four intertwined bugs: PCF85063 CAP_SEL mis-set (crystal counted ~2× real time — +1 day

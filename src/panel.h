@@ -98,6 +98,13 @@ void panelReadback(uint8_t* out, bool rgb565);
 // use panelPixel/panelFillRect etc. and must NOT call panelShow. NULL disables.
 void panelSetOverlay(void (*fn)(void));
 
+// Gesture ack blip (v3.15): flash a 4x4 square in the top-right corner for ~220 ms,
+// composited over whatever any presenter is showing -- visual proof a clap/tap
+// registered when no alert was there to dismiss. panelBlipService() must be pumped
+// regularly (taskWeb); it presents the blip on a static panel and cleans up after.
+void panelGestureBlip(uint8_t r, uint8_t g, uint8_t b);
+void panelBlipService();
+
 // Halt output (dark panel). Used during OTA flash writes -- not because the GDMA
 // refresh needs the CPU (it does not), but for the panel-current and memory-bandwidth headroom
 // while the upload runs. panelResume() undoes it.
