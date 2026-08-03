@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Matrix Portal Gateway API
-  version: "3.16"
+  version: "3.17"
   description: |
     REST API for the **Matrix Portal Gateway** firmware, running on a
     Waveshare ESP32-S3-RGB-Matrix driver board. It emulates a wall of split-flap modules on a
@@ -2171,6 +2171,9 @@ paths:
                         source:  { type: string, enum: [reported, assumed, builtin] }
                         chars:   { type: string, description: "The reel verbatim, in flap-index order" }
                         modules: { type: string, description: "Compressed id list", example: "0-44,50" }
+                  surface:
+                    type: object
+                    description: "What the wall is drawn on (v3.17, family-wide): {kind: led-matrix | lcd, w, h, colorBits (total bits per pixel), refreshHz}. Stated directly -- same philosophy as motion -- so a client renders for the actual display instead of parsing the product name. The physical SplitFlap Gateway omits the key: no pixels to describe."
                   motion:
                     type: object
                     description: >
