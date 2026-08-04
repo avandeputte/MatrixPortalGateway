@@ -214,9 +214,12 @@ void setup() {
   // task, and a plausible cause of the unexplained 2026-07-30 reboot. 1 KB well spent.
   xTaskCreatePinnedToCore(taskRTC,     "RTC",     4096, NULL, 2, &hTaskRTC,   0);
   xTaskCreatePinnedToCore(taskFrames,  "Frames",  5120, NULL, 3, &hTaskFrames, 0);
-  // v3.0: HTTP requests are served by esp_http_server's own task (httpx.h); taskWeb
-  // is just the SSE pump + supervisor now, so its stack shrank from the handler-era 8 KB.
-  xTaskCreatePinnedToCore(taskWeb,     "Web",     4096, NULL, 2, &hTaskWeb,   0);
+  // v3.0: HTTP requests are served by esp_http_server's own task (httpx.h). taskWeb is the
+  // SSE pump + supervisor AND the canvas STREAM pump -- which executes the full canvas ops
+  // path, including the deep stb_truetype gtext rasterizer (v3.18). 4 KB overflowed there and
+  // tripped a stack-protection panic when a client streamed gtext; 12 KB matches (with margin)
+  // the 10 KB the one-shot ops path already gets on the httpd worker (httpx.cpp).
+  xTaskCreatePinnedToCore(taskWeb,     "Web",     12288, NULL, 2, &hTaskWeb,   0);
   xTaskCreatePinnedToCore(taskNetwork, "Network", 6144, NULL, 1, &hTaskNet,   1);
   xTaskCreatePinnedToCore(taskDisplay, "Display", 4096, NULL, 2, &hTaskDisp,  1);
 
