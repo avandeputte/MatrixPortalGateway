@@ -47,6 +47,11 @@ void panelFillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b);
 // path for frame-shaped draws. 565 is big-endian, as every wire format here is.
 void panelBlitRow888(int x, int y, int n, const uint8_t* rgb);
 void panelBlitRow565(int x, int y, int n, const uint8_t* be565);
+// v0.2 scalable text: composite a solid colour across n pixels of one row using cov[i] as
+// per-pixel coverage. On HUB75 the gtext op forces hard 1-bit coverage (0/255) -- depth-4
+// dither speckles grey edges -- but this still folds into the batch blend mode/alpha and
+// routes through panelPixel, so quantisation + clip + open layers all apply.
+void panelBlitCoverRow(int x, int y, int n, const uint8_t* cov, uint8_t r, uint8_t g, uint8_t b);
 void panelLine(int x0, int y0, int x1, int y1, uint8_t r, uint8_t g, uint8_t b);   // Bresenham
 void panelCircle(int cx, int cy, int rad, bool fill, uint8_t r, uint8_t g, uint8_t b);  // outline/disc
 void panelTriangle(int x0, int y0, int x1, int y1, int x2, int y2, bool fill, uint8_t r, uint8_t g, uint8_t b);

@@ -40,6 +40,11 @@ volatile unsigned long gCompanionUrlDirtyMs = 0;       // millis() of the LAST c
 // handler; read across tasks.
 volatile bool gOtaInProgress = false;
 volatile bool gCanvasMode    = false;
+// Set by dispReturnToWall() when the flap wall / an effect / a timer takes the panel back, so a
+// canvas STREAM a client left open can't keep re-grabbing canvas mode record-by-record and fight
+// the wall (the "old app keeps flashing through the new one" bug). The stream pump (taskWeb -- the
+// one task that may touch the socket) honors it and closes the stream on its next tick.
+volatile bool gCanvasStreamKill = false;
 // taskDisplay sets this true once it has seen gCanvasMode (or gOtaInProgress) and parked,
 // having finished any in-flight repaint. The canvas take-over waits for it, so the reel
 // renderer's closing swap can never land the wall back over the first canvas frame.

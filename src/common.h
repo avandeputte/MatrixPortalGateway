@@ -143,7 +143,7 @@ static inline uint32_t boardId24() {          // 6 hex digits -- hostname suffix
 // and as "fw" in capabilities. Clients key product-specific behaviour on "product" and on
 // capability tokens, never on version heuristics (the old API_VERSION="3.1.0" masquerade
 // for the physical-gateway companion gate was removed in v3.12).
-#define FW_VERSION           "3.17.0"   // this product's version (UI + boot log)
+#define FW_VERSION           "3.18.0"   // this product's version (UI + boot log)
 #define PRODUCT_NAME         "Matrix Portal Gateway"
 
 /* ---- Network / service defaults (overridable at runtime via Settings) ---- */
@@ -331,6 +331,7 @@ extern volatile unsigned long gCompanionUrlDirtyMs;
 extern volatile bool gOtaInProgress;
 // Raw-canvas mode: HTTP owns the panel and the reel renderer stands down (see /api/canvas).
 extern volatile bool gCanvasMode;
+extern volatile bool gCanvasStreamKill;   // wall takeover -> close any lingering canvas stream
 // Acknowledgement from taskDisplay that it has parked for canvas/OTA; the take-over waits on it.
 extern volatile bool gDispParked;
 extern volatile bool gOtaRebootPending;

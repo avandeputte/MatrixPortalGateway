@@ -654,6 +654,53 @@ bool canvasAtlasBlitEx(int handle, uint16_t i, int x, int y,
   return true;
 }
 
+bool canvasAtlasBlitScaled(int handle, uint16_t i, int x, int y,
+                           bool flipH, bool flipV, uint16_t rot, float scale) {
+  if (handle < 0 || handle >= ATLAS_MAX_SHEETS || !atlasTab[handle].name[0]) return false;
+  AtlasSheet& a = atlasTab[handle];
+  if (i >= a.tiles) return false;
+  if (!(scale > 0.0f)) return false;
+  if (scale > 64.0f) scale = 64.0f;
+  a.lastUsedMs = millis();
+  const uint8_t* t = a.buf + (size_t)i * a.tileBytes;
+  const int tw = a.tileW, th = a.tileH;
+  const bool swap = (rot == 90 || rot == 270);   // rotated dest tile is th x tw
+  const int udw = swap ? th : tw, udh = swap ? tw : th;
+  const int dw = (int)(udw * scale + 0.5f), dh = (int)(udh * scale + 0.5f);
+  if (dw <= 0 || dh <= 0) return true;
+  const float inv = 1.0f / scale;
+  for (int dy = 0; dy < dh; dy++) {
+    int uy = (int)(dy * inv); if (uy >= udh) uy = udh - 1;
+    for (int dx = 0; dx < dw; dx++) {
+      int ux = (int)(dx * inv); if (ux >= udw) ux = udw - 1;
+      int sx, sy;                                 // undo rotate (BlitEx rotates CW)
+      switch (rot) {
+        case 90:  sx = uy;          sy = th - 1 - ux; break;
+        case 180: sx = tw - 1 - ux; sy = th - 1 - uy; break;
+        case 270: sx = tw - 1 - uy; sy = ux;          break;
+        default:  sx = ux;          sy = uy;          break;
+      }
+      const int col = flipH ? tw - 1 - sx : sx;   // undo flip (applied first in tile space)
+      const int row = flipV ? th - 1 - sy : sy;
+      if (col < 0 || col >= tw || row < 0 || row >= th) continue;
+      const uint8_t* p = t + ((size_t)row * tw + col) * a.fmt;
+      uint8_t cr, cg, cb;
+      if (a.fmt == 3) {
+        if (p[0] == 255 && p[1] == 0 && p[2] == 255) continue;
+        cr = p[0]; cg = p[1]; cb = p[2];
+      } else {
+        const uint16_t v = ((uint16_t)p[0] << 8) | p[1];
+        if (v == 0xF81F) continue;
+        cr = (uint8_t)(((v >> 11) & 0x1F) << 3);
+        cg = (uint8_t)(((v >> 5)  & 0x3F) << 2);
+        cb = (uint8_t)((v & 0x1F) << 3);
+      }
+      panelPixel(x + dx, y + dy, cr, cg, cb);
+    }
+  }
+  return true;
+}
+
 bool canvasAtlasBlitFrom(int handle, uint16_t i, int x, int y) {
   return canvasAtlasBlitEx(handle, i, x, y, false, false, 0, 1);
 }

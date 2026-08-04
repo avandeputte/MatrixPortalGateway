@@ -1,5 +1,6 @@
 #include "gateway.h"
 #include "panel.h"   // panelSetColourOrder: a BGR panel is a runtime fact, not a build one
+#include "ttf.h"     // scalable AA TrueType text: the "gtext" op / 0x21 (v0.2)
 #include "effects.h"
 #include "canvas.h"
 #include "sse.h"     // GET /api/events: the live-preview push stream (v3.0)
@@ -805,13 +806,17 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
              "\"triangle\",\"roundrect\",\"gradient\",\"polyline\",\"poly\",\"arc\",\"bezier\","
              "\"clip\",\"origin\",\"save\",\"restore\",\"translate\",\"scale\",\"rotate\","
              "\"layer\",\"composite\",\"define\",\"call\","
-             "\"blend\",\"text\",\"textbox\",\"image\",\"sprite\",\"scroll\",\"show\"],"
+             "\"blend\",\"text\",\"gtext\",\"textbox\",\"image\",\"sprite\",\"scroll\",\"show\"],"
              "\"compositing\":{\"alpha\":true,\"blendModes\":[\"over\",\"add\",\"multiply\",\"screen\",\"max\"],\"aa\":true,"
-             "\"transform\":true,\"layers\":true,\"macros\":true}},"
+             "\"transform\":true,\"layers\":true,\"macros\":true},"
+             "\"text2\":{\"scalable\":%s,\"aa\":false,\"maxSize\":%u,\"charset\":\"cp1252\","
+             "\"outline\":true,\"shadow\":true,\"faces\":[\"sans\",\"mono\",\"custom\"],\"customLoaded\":%s}},"
              "\"effects\":%s,",
              (unsigned)gPanel.panelW, (unsigned)gPanel.panelH,
              (unsigned)ATLAS_MAX_SHEETS, (unsigned)ATLAS_TOTAL_BUDGET,
-             (unsigned)ATLAS_MAX_SHEET_BYTES, effectListJson());
+             (unsigned)ATLAS_MAX_SHEET_BYTES,
+             ttfFaceReady(TTF_SANS) ? "true" : "false", (unsigned)TTF_MAX_SIZE,
+             ttfFaceReady(TTF_CUSTOM) ? "true" : "false", effectListJson());
     // A truncated canvas block would be INVALID JSON for every client; make it loud.
     if (strlen(cv) >= sizeof(cv) - 1) printf("[WEB] capabilities canvas block TRUNCATED -- enlarge cv[]\n");
     capPut(cv); }
@@ -1556,6 +1561,9 @@ static bool csExec() {
 // executes whatever has arrived, up to a per-tick byte budget so taskWeb's other
 // duties (SSE, watchdog cover) keep their cadence.
 void canvasStreamPump() {
+  // The wall/effect/timer took the panel back (dispReturnToWall) while this stream was still open:
+  // close it so a client that didn't stand its app down can't keep painting over the newcomer.
+  if (gCanvasStreamKill && cs.req) { gCanvasStreamKill = false; csClose(false, "superseded"); return; }
   if (!cs.req) return;
   if (gOtaInProgress) { csClose(false, "ota"); return; }
   cs.ticks++;
@@ -1986,7 +1994,16 @@ static esp_err_t handleApiCanvasStreamGet(httpd_req_t* r) {
 static esp_err_t handleApiCanvasStream(httpd_req_t* r) {
   if (!gPanel.ready)     return httpxErr(r, 503, "Panel not running");
   if (quietBlocked(r)) return ESP_OK;
-  if (cs.req)            return httpxErr(r, 409, "a stream is already open");
+  // A stream is still open (the previous canvas app's -- its client didn't stand it down): the
+  // NEWCOMER wins. Ask the pump (taskWeb owns the socket) to close the old one and wait briefly
+  // for it, rather than 409'ing and letting the defunct app keep the panel. The normal path
+  // (companion closes the old stream first) still works -- cs.req is already clear, so this skips.
+  if (cs.req) {
+    gCanvasStreamKill = true;                          // the pump csCloses it on its next tick
+    const uint32_t t0 = millis();
+    while (cs.req && (uint32_t)(millis() - t0) < 400) { wdgWebMs = millis(); vTaskDelay(pdMS_TO_TICKS(10)); }
+    if (cs.req) return httpxErr(r, 409, "previous stream still closing -- retry");
+  }
   if (gOtaInProgress)    return httpxErr(r, 503, "OTA in progress");
   if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP)
     return httpxErr(r, 507, "Low on memory -- try again in a moment");
@@ -2001,6 +2018,7 @@ static esp_err_t handleApiCanvasStream(httpd_req_t* r) {
     return httpxErr(r, 503, "async unavailable");
   }
   cs.req = async;                     // the socket now belongs to the pump (taskWeb)
+  gCanvasStreamKill = false;          // a fresh stream: clear any stale wall-takeover request
   csSockBlocking(false);
   canvasEnter(false);
   printf("[CANVAS] stream open\n");
@@ -2709,6 +2727,22 @@ static const uint8_t* gBinMacroPtr[8] = {};
 static uint16_t       gBinMacroLen[8] = {};
 static uint8_t        gBinAlpha       = 255;    // batch alpha (0x15); scoped across CALL
 
+// Cooperative yield for the ops runners (resilience, parity with the LCD). Canvas ops render on
+// the HTTP worker / the stream pump; a large batch or a flood of small records could, without a
+// yield, hold the CPU long enough to starve the idle task (the ESP task WDT). After every ~40 ms
+// of continuous rendering, sleep one tick so idle runs and the board stays responsive. FILE-STATIC
+// clock, never reset per batch, so the 40 ms bound holds across many back-to-back records too.
+// (This panel renders fast, so it rarely fires -- but it's the same safety the LCD needs.)
+static uint32_t gOpsLastYield = 0;
+static inline void opsYieldMaybe() {
+  const uint32_t now = millis();
+  if ((int32_t)(now - gOpsLastYield) >= 40) {
+    wdgWebMs = now;
+    vTaskDelay(1);
+    gOpsLastYield = millis();
+  }
+}
+
 static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* okOut, int depth) {
   int applied = 0; bool shown = false, ok = true;
   if (depth == 0) {                              // top-level batch: reset all batch-scoped state
@@ -2723,6 +2757,7 @@ static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* o
   #define BXY(o)  const int x = xfX(bops16(p+i+(o)), bops16(p+i+(o)+2)), \
                             y = xfY(bops16(p+i+(o)), bops16(p+i+(o)+2))
   while (i < len) {
+    opsYieldMaybe();                              // resilience: cap CPU hog per batch
     panelSetBlend((uint8_t)gOpsBlend, gBinAlpha); // per op: batch mode + batch alpha
     const uint8_t opb = p[i++];
     switch (opb) {
@@ -2914,6 +2949,36 @@ static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* o
       case 0x20: { BOPS_NEED(11); BXY(0);                                            // AALINE
         canvasAALine(x, y, xfX(bops16(p+i+4), bops16(p+i+6)), xfY(bops16(p+i+4), bops16(p+i+6)),
                      p[i+8], p[i+9], p[i+10]); i += 11; break; }
+      case 0x21: { BOPS_NEED(10); BXY(0);                                            // GTEXT (scalable AA)
+        const uint16_t size = (uint16_t)((p[i+4] << 8) | p[i+5]);   // px, widened from the bitmap op's u8
+        const uint8_t  face = p[i+6], fl = p[i+7];
+        const uint8_t  cr = p[i+8], cg = p[i+9], cb = p[i+10];
+        size_t q = i + 11;
+        uint8_t orr = 0, org = 0, orb = 0, shr = 0, shg = 0, shb = 0;
+        if (fl & 0x08) { if (q + 3 > len) { ok = false; break; } orr = p[q]; org = p[q+1]; orb = p[q+2]; q += 3; }
+        if (fl & 0x10) { if (q + 3 > len) { ok = false; break; } shr = p[q]; shg = p[q+1]; shb = p[q+2]; q += 3; }
+        if (q + 1 > len) { ok = false; break; }
+        const uint8_t slen = p[q]; q += 1;
+        if (q + slen > len) { ok = false; break; }
+        char txt[256];
+        const uint8_t keep = slen < sizeof(txt) - 1 ? slen : (uint8_t)(sizeof(txt) - 1);
+        memcpy(txt, p + q, keep); txt[keep] = 0;
+        char enc[256]; utf8ToCp1252(txt, enc, sizeof(enc));
+        // AA is forced OFF on HUB75: at depth 4 the temporal dither turns grey coverage edges
+        // into visible speckle, so text always renders hard-edged (1-bit coverage) here.
+        ttfDrawText(x, y, size, face, enc, fl & 0x03, cr, cg, cb, false, 0,
+                    (fl & 0x08) != 0, orr, org, orb, (fl & 0x10) != 0, shr, shg, shb);
+        i = q + slen; break; }
+      case 0x22: { BOPS_NEED(9);                                                    // BLUR: no-op on
+        i += 9; break; }   // LED -- a box blur at depth 4 reads as dither noise, not a blur
+      case 0x23: { BOPS_NEED(9);                                                   // SPRITE2 (frac scale)
+        const uint16_t ti = (uint16_t)((p[i] << 8) | p[i+1]);
+        const int sxp = xfX(bops16(p+i+2), bops16(p+i+4)), syp = xfY(bops16(p+i+2), bops16(p+i+4));
+        const uint8_t fl = p[i+6];
+        const float sc = (float)(((uint16_t)p[i+7] << 8) | p[i+8]) / 256.0f;       // u16 8.8 fixed
+        canvasAtlasBlitScaled(canvasAtlasBoundHandle(), ti, sxp, syp,
+                              fl & 1, fl & 2, (uint16_t)(((fl >> 2) & 3) * 90), sc);
+        i += 9; break; }
       default: ok = false; break;
     }
     if (!ok) break;
@@ -2938,6 +3003,7 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut, int depth) {
     panelClearClip(); panelClearBlend(); panelLayerDiscard();
   }
   for (JsonVariantConst op : ops) {
+    opsYieldMaybe();                          // resilience: cap CPU hog per batch (see opsYieldMaybe)
     panelSetBlend((uint8_t)gOpsBlend, 255);   // per op: batch mode, opaque unless a colour sets alpha
     const char* k = op["op"] | "";
     const int lx = op["x"] | 0, ly = op["y"] | 0;
@@ -2991,10 +3057,35 @@ static int canvasOpsRun(JsonArrayConst ops, bool* shownOut, int depth) {
       // transparent pixels skipped. Nothing bound or i out of range: skip, don't count.
       const int ti = op["i"] | -1;
       const char* fl = op["flip"] | "";                  // "h" | "v" | "hv" (v3.5)
-      if (ti < 0 || !canvasAtlasBlitEx(canvasAtlasBoundHandle(), (uint16_t)ti, x, y,
-                                       strchr(fl, 'h') != nullptr, strchr(fl, 'v') != nullptr,
-                                       (uint16_t)(op["rot"] | 0), (uint8_t)(op["scale"] | 1)))
+      const int hnd = canvasAtlasBoundHandle();
+      const bool ih = strchr(fl, 'h') != nullptr, iv = strchr(fl, 'v') != nullptr;
+      const uint16_t rt = (uint16_t)(op["rot"] | 0);
+      const float sc = op["scale"] | 1.0f;               // v0.2: fractional scale allowed
+      const bool useInt = (sc == (float)(int)sc && sc >= 1.0f && sc <= 4.0f);
+      if (ti < 0 || !(useInt ? canvasAtlasBlitEx(hnd, (uint16_t)ti, x, y, ih, iv, rt, (uint8_t)sc)
+                             : canvasAtlasBlitScaled(hnd, (uint16_t)ti, x, y, ih, iv, rt, sc)))
         continue;
+    } else if (!strcmp(k, "gtext")) {
+      // Scalable AA TrueType text (v0.2): {op,x,y,s,size,face,color,align,aa,outline,shadow,tracking}.
+      // "face": "sans"|"mono"|"custom" (default sans). size is px (1..maxSize). (x,y) = top-left.
+      uint8_t r = 255, g = 255, b = 255; canvasColor(op["color"], r, g, b);
+      char enc[256];
+      utf8ToCp1252(op["s"] | "", enc, sizeof(enc));
+      const char* fn = op["face"] | (op["font"] | "sans");
+      uint8_t face = TTF_SANS;
+      if (!strcmp(fn, "mono")) face = TTF_MONO; else if (!strcmp(fn, "custom")) face = TTF_CUSTOM;
+      uint8_t orr, org, orb, shr, shg, shb;
+      const bool hasOut = canvasColorGet(op["outline"], orr, org, orb);
+      const bool hasSh  = canvasColorGet(op["shadow"], shr, shg, shb);
+      // AA forced OFF on HUB75 (see the 0x21 binary op): depth-4 dither speckles grey edges,
+      // so text always renders hard-edged regardless of the op's "aa" field.
+      ttfDrawText(x, y, op["size"] | 24, face, enc, alignIdx(op["align"] | "left", "center"),
+                  r, g, b, false, op["tracking"] | 0,
+                  hasOut, orr, org, orb, hasSh, shr, shg, shb);
+    } else if (!strcmp(k, "blur")) {
+      // {op:"blur",...}: intentionally a NO-OP on the LED. A box blur at depth 4 turns into
+      // dither noise rather than a soft blur, so the op is accepted but does nothing. (The LCD
+      // gateway, a 16-bit panel, does render it -- this is the one place the two diverge.)
     } else if (!strcmp(k, "scroll")) {
       uint8_t r = 0, g = 0, b = 0; canvasColor(op["color"], r, g, b);   // vacated pixels: black default
       panelScroll(op["dx"] | 0, op["dy"] | 0, r, g, b);
@@ -3328,7 +3419,15 @@ static esp_err_t handleApiCanvasFrameGet(httpd_req_t* r) {
   // breaker as the large uploads: refuse a preview rather than risk a reboot. A poller just retries.
   if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) { httpxErr(r, 507, "Low on memory -- try again in a moment"); return ESP_OK; }
   const bool rgb565 = (httpxArg(r, "fmt") == "rgb565");
-  const size_t need = (size_t)gPanel.panelW * gPanel.panelH * (rgb565 ? 2 : 3);
+  const uint8_t bpp = rgb565 ? 2 : 3;
+  // Downscale (parity with the LCD): ?scale=N returns every Nth pixel -> a (W/N)x(H/N) preview,
+  // so a live preview poll ships far fewer bytes and never hogs the single HTTP worker. The
+  // snapshot is always full-res (fast local copy); only the SENT image shrinks. Default 1.
+  int scale = httpxArg(r, "scale").toInt();
+  if (scale < 1) scale = 1; else if (scale > 16) scale = 16;
+  const int fullW = gPanel.panelW, fullH = gPanel.panelH;
+  const int ow = fullW / scale, oh = fullH / scale;
+  const size_t need = (size_t)fullW * fullH * bpp;   // full-res snapshot buffer
   if (rbCap < need) {
     if (rbBuf) free(rbBuf);
     rbBuf = (uint8_t*)ps_malloc(need);
@@ -3341,14 +3440,28 @@ static esp_err_t handleApiCanvasFrameGet(httpd_req_t* r) {
   // response is sent, so a shared stack buffer made both headers read the LAST value
   // written (the width header said "64" -- the sheared-preview bug).
   static char wv[16], hv[16];
-  snprintf(wv, sizeof(wv), "%u", (unsigned)gPanel.panelW);  httpd_resp_set_hdr(r, "X-Canvas-Width", wv);
-  snprintf(hv, sizeof(hv), "%u", (unsigned)gPanel.panelH);  httpd_resp_set_hdr(r, "X-Canvas-Height", hv);
+  snprintf(wv, sizeof(wv), "%u", (unsigned)ow);  httpd_resp_set_hdr(r, "X-Canvas-Width", wv);
+  snprintf(hv, sizeof(hv), "%u", (unsigned)oh);  httpd_resp_set_hdr(r, "X-Canvas-Height", hv);
   httpd_resp_set_hdr(r, "X-Canvas-Format", rgb565 ? "rgb565" : "rgb888");
   httpd_resp_set_type(r, "application/octet-stream");
-  for (size_t off = 0; off < need; off += 4096) {   // bigger chunks: fewer writes, faster drain
-    size_t c = (need - off < 4096) ? (need - off) : 4096;
-    httpxChunk(r, (const char*)(rbBuf + off), c);
-    wdgWebMs = millis();                              // feed the web watchdog on a ~48 KB send
+  if (scale == 1) {
+    for (size_t off = 0; off < need; off += 4096) {   // full res: stream straight from rbBuf
+      size_t c = (need - off < 4096) ? (need - off) : 4096;
+      httpxChunk(r, (const char*)(rbBuf + off), c);
+      wdgWebMs = millis();
+    }
+  } else {
+    static uint8_t orow[PANEL_MAX_W * 3];             // build + send each downscaled row
+    for (int oy = 0; oy < oh; oy++) {
+      const uint8_t* srow = rbBuf + (size_t)(oy * scale) * fullW * bpp;
+      uint8_t* d = orow;
+      for (int ox = 0; ox < ow; ox++) {
+        const uint8_t* s = srow + (size_t)(ox * scale) * bpp;
+        for (int k = 0; k < bpp; k++) *d++ = s[k];
+      }
+      httpxChunk(r, (const char*)orow, (size_t)ow * bpp);
+      wdgWebMs = millis();
+    }
   }
   return httpxChunkEnd(r);
 }
@@ -3434,7 +3547,7 @@ static bool canvasRectsApply(const uint8_t* body, size_t len, int* outDone) {
     }
     off += px;
     done++;
-    if ((i & 15) == 0) wdgWebMs = millis();
+    opsYieldMaybe();                      // resilience: bound CPU across many rects/records (also feeds wdgWebMs)
   }
   if (outDone) *outDone = done;
   return done == count;

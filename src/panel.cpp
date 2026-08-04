@@ -616,6 +616,29 @@ void panelPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b) {
   }
 }
 
+// v0.2 scalable AA text lands here: one glyph row of coverage. The HUB75 back buffer is a
+// bitplane store, not a linear RGB565 buffer, so every covered pixel goes through panelPixel
+// -- which does the blend composite, depth quantisation and dither. Coverage folds into the
+// batch op's own blend mode/alpha (over/add/multiply/... all stay correct), and open layers
+// + the clip window are honoured because panelPixel handles them.
+void panelBlitCoverRow(int x, int y, int n, const uint8_t* cov, uint8_t r, uint8_t g, uint8_t b) {
+  if (!info.ok || y < 0 || y >= H || y < clipY0 || y >= clipY1) return;
+  const uint8_t sMode = gBlendMode, sAlpha = gBlendAlpha; const bool sActive = gBlendActive;
+  for (int i = 0; i < n; i++) {
+    uint16_t a = cov[i];
+    if (!a) continue;
+    if (sActive) a = (uint16_t)(a * sAlpha / 255);
+    if (!a) continue;
+    panelSetBlend(sMode, (uint8_t)a);
+    panelPixel(x + i, y, r, g, b);
+  }
+  gBlendMode = sMode; gBlendAlpha = sAlpha; gBlendActive = sActive;   // restore batch state
+}
+
+// (No panelBoxBlur on HUB75: a box blur at depth 4 turns into dither noise rather than a soft
+// blur, so the gateway does not offer it -- the "blur" op is accepted but ignored. The LCD
+// gateway, a 16-bit panel, keeps its panelBoxBlur.)
+
 void panelHLine(int x, int y, int w, uint8_t r, uint8_t g, uint8_t b) {
   for (int i = 0; i < w; i++) panelPixel(x + i, y, r, g, b);
 }

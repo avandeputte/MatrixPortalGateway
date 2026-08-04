@@ -6,6 +6,7 @@
 #include "backup.h"
 #include "imu.h"
 #include "canvas.h"   // canvasAnimLoadPlay: the boot animation
+#include "ttf.h"      // scalable AA TrueType text faces (v0.2)
 #include <esp_ota_ops.h>   // esp_ota_get_running_partition(): which slot are we actually running?
 
 // After this many crash/watchdog reboots in a row, the boot logic reformats FATFS -- a corrupt
@@ -152,6 +153,7 @@ void setup() {
   // boot -- gets the card's mirror copied back BEFORE anything reads assets
   // (boot animation below, atlas/vmods later). Data loss becomes a log line.
   backupRestoreIfNeeded(sfFsFormatted);
+  ttfBegin();          // scalable AA TrueType faces (v0.2): parse the bundled TTF; cache is lazy
   gTransType = cfg.transType; gTransMs = cfg.transMs;   // restore persisted transition (v3.7.2)
   vmBuildReel();      // the shared reel: every CP1252 glyph, then the colours
   vmInit((int)gPanel.cols * (int)gPanel.rows);

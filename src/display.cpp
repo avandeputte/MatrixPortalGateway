@@ -167,6 +167,9 @@ void dispReturnToWall() {
   gEffectReq  = EFFECT_REQ_IDLE;   // cancel a pending start
   gEffect     = EFFECT_NONE;       // stop rendering the current effect (taskDisplay just stops)
   gCanvasMode = false;             // release the raw canvas
+  gCanvasStreamKill = true;        // and evict any stream the client left open, so it can't
+                                   // re-grab the panel record-by-record and fight the wall
+                                   // (the pump on taskWeb closes it; harmless if none is open)
   canvasAnimStop();                // stop animation playback
   canvasTickerStop();              // exclusive ticker only -- an overlay ticker survives
                                    // page changes by design (canvasTickerStopForce is the

@@ -68,6 +68,10 @@ bool canvasAtlasBlitFrom(int handle, uint16_t i, int x, int y);
 // integer scale 1..4. The plain BlitFrom is the identity-transform shim.
 bool canvasAtlasBlitEx(int handle, uint16_t i, int x, int y,
                        bool flipH, bool flipV, uint16_t rot, uint8_t scale);
+// v0.2 SPRITE2: arbitrary fractional scale (nearest-neighbour), same flip/rotate semantics
+// as BlitEx. The dest tile is upscaled/downscaled by `scale`; transparent keys still honored.
+bool canvasAtlasBlitScaled(int handle, uint16_t i, int x, int y,
+                           bool flipH, bool flipV, uint16_t rot, float scale);
 int  canvasAtlasSave(const char* name);                    // 0 / 404 / 507 / 503
 int  canvasAtlasDelete(const char* name);                  // 0 / 404
 void canvasAtlasListJson(void (*sink)(const char*));       // [{name,tiles,w,h,fmt,bytes,resident,persisted},…]
