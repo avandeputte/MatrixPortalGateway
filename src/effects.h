@@ -22,7 +22,8 @@
   X(MAZE,      "maze")      \
   X(RIPPLE,    "ripple")    \
   X(SCOPE,     "scope")     \
-  X(SPECTRO,   "spectro")
+  X(SPECTRO,   "spectro")   \
+  X(AQUARIUM,  "aquarium")
 
 enum EffectType : uint8_t {
   EFFECT_NONE = 0,
