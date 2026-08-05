@@ -456,6 +456,16 @@ struct AtlasSheet {
   bool          persisted;                 // a same-named /atlas file exists
 };
 static AtlasSheet atlasTab[ATLAS_MAX_SHEETS];
+// Atlas store lock (v3.19, LCD parity): uploads/saves on the httpd worker vs blits on the
+// stream pump (taskWeb) -- eviction/realloc under a blit was a use-after-free, previously
+// prevented by 409ing every atlas REST call while a stream was open. That gate made a
+// streaming app unable to (re)provision its sheets after a reboot; the mutex replaces it.
+static SemaphoreHandle_t gAtlasMx = nullptr;
+struct AtlasLock {
+  AtlasLock()  { if (!gAtlasMx) gAtlasMx = xSemaphoreCreateRecursiveMutex();
+                 xSemaphoreTakeRecursive(gAtlasMx, portMAX_DELAY); }
+  ~AtlasLock() { xSemaphoreGiveRecursive(gAtlasMx); }
+};
 static int        atlasBound = -1;         // sticky bind (the ops "atlas" op); -1 = none
 
 // In-flight upload staging (double buffer: published only at Commit)
@@ -529,6 +539,7 @@ static int atlasFreeSlotIndex() {
 }
 
 int canvasAtlasBegin(const char* name, uint8_t fmt, uint16_t tileW, uint16_t tileH, uint16_t tiles) {
+  AtlasLock lk;   // serialize store access (see gAtlasMx)
   if (!canvasAtlasNameOk(name))      return 400;
   if (fmt != 2 && fmt != 3)          return 400;
   if (!tileW || !tileH || !tiles)    return 400;
@@ -546,6 +557,7 @@ int canvasAtlasBegin(const char* name, uint8_t fmt, uint16_t tileW, uint16_t til
 }
 
 void canvasAtlasFeed(const uint8_t* data, size_t n) {
+  AtlasLock lk;   // serialize store access (see gAtlasMx)
   if (!atlasStage) return;
   if (atlasStageOff + n > atlasStageTotal) n = atlasStageTotal - atlasStageOff;
   memcpy(atlasStage + atlasStageOff, data, n);
@@ -555,10 +567,12 @@ void canvasAtlasFeed(const uint8_t* data, size_t n) {
 // Drop a half-fed staging buffer NOW (an aborted upload used to park up to 2 MB of PSRAM
 // until the next Begin happened to reclaim it).
 void canvasAtlasAbort() {
+  AtlasLock lk;   // serialize store access (see gAtlasMx)
   if (atlasStage) { free(atlasStage); atlasStage = nullptr; }
 }
 
 int canvasAtlasCommit() {
+  AtlasLock lk;   // serialize store access (see gAtlasMx)
   if (!atlasStage || atlasStageOff != atlasStageTotal) {        // short upload
     if (atlasStage) { free(atlasStage); atlasStage = nullptr; }
     return 400;
@@ -604,6 +618,7 @@ static int atlasLoadFromFs(const char* name) {
 }
 
 int canvasAtlasBind(const char* name) {
+  AtlasLock lk;   // serialize store access (see gAtlasMx)
   int i = atlasFindResident(name);
   if (i < 0) i = atlasLoadFromFs(name);    // lazy load; -1 when it exists nowhere
   atlasBound = i;
@@ -618,6 +633,7 @@ int canvasAtlasBoundHandle() { return atlasBound; }
 // (a plain 1x1 panelPixel when scale is 1). Transparency (magenta) skips as always.
 bool canvasAtlasBlitEx(int handle, uint16_t i, int x, int y,
                        bool flipH, bool flipV, uint16_t rot, uint8_t scale) {
+  AtlasLock lk;   // serialize store access (see gAtlasMx)
   if (handle < 0 || handle >= ATLAS_MAX_SHEETS || !atlasTab[handle].name[0]) return false;
   AtlasSheet& a = atlasTab[handle];
   if (i >= a.tiles) return false;
@@ -625,6 +641,47 @@ bool canvasAtlasBlitEx(int handle, uint16_t i, int x, int y,
   a.lastUsedMs = millis();
   const uint8_t* t = a.buf + (size_t)i * a.tileBytes;
   const int tw = a.tileW, th = a.tileH;
+  // Run-batched blit (v3.19, LCD port): rot-0 sprites at any integer scale land contiguous
+  // opaque runs as row spans (panelBlitRow888) instead of per-pixel panelPixel calls.
+  // Flips are index remaps. Blend/layer keeps the general path.
+  if (rot == 0 && !panelBlendActive() && !panelLayerActive()) {
+    static uint8_t runBuf[256 * 3];
+    static uint8_t sclBuf[256 * 4 * 3];
+    for (int row = 0; row < th; row++) {
+      const int srow = flipV ? th - 1 - row : row;
+      const uint8_t* rp = t + (size_t)srow * tw * a.fmt;
+      int runStart = -1, runLen = 0;
+      for (int col = 0; col <= tw; col++) {
+        bool opaque = false; uint8_t cr = 0, cg = 0, cb = 0;
+        if (col < tw) {
+          const uint8_t* p = rp + (size_t)(flipH ? tw - 1 - col : col) * a.fmt;
+          if (a.fmt == 3) { opaque = !(p[0] == 255 && p[1] == 0 && p[2] == 255);
+            if (opaque) { cr = p[0]; cg = p[1]; cb = p[2]; } }
+          else { const uint16_t v = ((uint16_t)p[0] << 8) | p[1]; opaque = (v != 0xF81F);
+            if (opaque) { cr = (uint8_t)(((v >> 11) & 0x1F) << 3);
+                          cg = (uint8_t)(((v >> 5)  & 0x3F) << 2);
+                          cb = (uint8_t)((v & 0x1F) << 3); } }
+        }
+        if (opaque && runLen < 256) {
+          if (runStart < 0) runStart = col;
+          runBuf[runLen*3] = cr; runBuf[runLen*3+1] = cg; runBuf[runLen*3+2] = cb; runLen++;
+        } else if (runStart >= 0) {
+          if (scale == 1) {
+            panelBlitRow888(x + runStart, y + row, runLen, runBuf);
+          } else {
+            for (int i2 = 0; i2 < runLen; i2++)
+              for (int k = 0; k < scale; k++)
+                memcpy(sclBuf + ((size_t)i2 * scale + k) * 3, runBuf + (size_t)i2 * 3, 3);
+            for (int k = 0; k < scale; k++)
+              panelBlitRow888(x + runStart * scale, y + row * scale + k, runLen * scale, sclBuf);
+          }
+          runStart = -1; runLen = 0;
+          if (opaque) { runStart = col; runBuf[0]=cr; runBuf[1]=cg; runBuf[2]=cb; runLen=1; }
+        }
+      }
+    }
+    return true;
+  }
   for (int row = 0; row < th; row++)
     for (int col = 0; col < tw; col++) {
       const uint8_t* p = t + ((size_t)row * tw + col) * a.fmt;
@@ -656,6 +713,7 @@ bool canvasAtlasBlitEx(int handle, uint16_t i, int x, int y,
 
 bool canvasAtlasBlitScaled(int handle, uint16_t i, int x, int y,
                            bool flipH, bool flipV, uint16_t rot, float scale) {
+  AtlasLock lk;   // serialize store access (see gAtlasMx)
   if (handle < 0 || handle >= ATLAS_MAX_SHEETS || !atlasTab[handle].name[0]) return false;
   AtlasSheet& a = atlasTab[handle];
   if (i >= a.tiles) return false;
@@ -706,6 +764,7 @@ bool canvasAtlasBlitFrom(int handle, uint16_t i, int x, int y) {
 }
 
 const uint8_t* canvasAtlasData(const char* name, uint8_t hdr[12], size_t* bytes) {
+  AtlasLock lk;   // serialize store access (see gAtlasMx)
   const int i = atlasFindResident(name);
   if (i < 0) return nullptr;
   const AtlasSheet& a = atlasTab[i];
@@ -719,6 +778,7 @@ const uint8_t* canvasAtlasData(const char* name, uint8_t hdr[12], size_t* bytes)
 }
 
 int canvasAtlasSave(const char* name) {
+  AtlasLock lk;   // serialize store access (see gAtlasMx)
   if (!sfFsReady)                return 503;
   const int i = atlasFindResident(name);
   if (i < 0)                     return 404;
@@ -726,6 +786,30 @@ int canvasAtlasSave(const char* name) {
   char tmp[64], path[64];
   snprintf(tmp, sizeof(tmp), "/atlas/%s.tmp", name);
   atlasPath(name, path, sizeof(path));
+  // Skip-if-identical (v3.19, LCD parity): flash WRITES cost wear + latency; when the
+  // persisted file already matches the resident sheet byte-for-byte, answer success
+  // without touching flash. Companions re-persist sheets on every app start.
+  {
+    const AtlasSheet& a = atlasTab[i];
+    File rf = FFat.open(path, "r");
+    if (rf && (size_t)rf.size() == 12 + a.bytes) {
+      uint8_t want[12] = { 'M','P','T','A', 1, a.fmt,
+                           (uint8_t)(a.tileW >> 8), (uint8_t)a.tileW,
+                           (uint8_t)(a.tileH >> 8), (uint8_t)a.tileH,
+                           (uint8_t)(a.tiles >> 8), (uint8_t)a.tiles };
+      uint8_t got[12];
+      bool same = rf.read(got, 12) == 12 && memcmp(got, want, 12) == 0;
+      static uint8_t cmpBuf[4096];               // httpd worker only -- no concurrent saves
+      for (size_t off = 0; same && off < a.bytes; ) {
+        size_t c = (a.bytes - off < sizeof(cmpBuf)) ? (a.bytes - off) : sizeof(cmpBuf);
+        if (rf.read(cmpBuf, c) != (int)c || memcmp(cmpBuf, a.buf + off, c) != 0) same = false;
+        off += c;
+        wdgWebMs = millis();
+      }
+      rf.close();
+      if (same) { atlasTab[i].persisted = true; return 0; }
+    } else if (rf) rf.close();
+  }
   File f = FFat.open(tmp, "w");
   if (!f) return 507;
   const AtlasSheet& a = atlasTab[i];
@@ -748,6 +832,7 @@ int canvasAtlasSave(const char* name) {
 }
 
 int canvasAtlasDelete(const char* name) {
+  AtlasLock lk;   // serialize store access (see gAtlasMx)
   bool any = false;
   const int i = atlasFindResident(name);
   if (i >= 0) { atlasFreeSlot(i); any = true; }
@@ -772,6 +857,7 @@ static void atlasRowJson(char* out, size_t cap, const char* name, uint16_t tiles
 }
 
 void canvasAtlasListJson(void (*sink)(const char*)) {
+  AtlasLock lk;   // serialize store access (see gAtlasMx)
   char row[192];
   bool first = true;
   sink("[");
@@ -812,6 +898,7 @@ void canvasAtlasListJson(void (*sink)(const char*)) {
 }
 
 void canvasAtlasStateJson(char* out, size_t cap) {
+  AtlasLock lk;   // serialize store access (see gAtlasMx)
   size_t o = (size_t)snprintf(out, cap, "{\"bound\":%s%s%s,\"loaded\":[",
     atlasBound >= 0 ? "\"" : "", atlasBound >= 0 ? atlasTab[atlasBound].name : "null",
     atlasBound >= 0 ? "\"" : "");

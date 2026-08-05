@@ -1543,7 +1543,13 @@ static bool csExec() {
       char name[40];
       const size_t n = min((size_t)cs.need, sizeof(name) - 1);
       memcpy(name, cs.buf, n); name[n] = 0;
-      canvasAtlasBind(name);
+      // A bind miss FAILS the stream (v3.19, LCD parity): silently no-op'ing every later
+      // sprite hid a vanished sheet from the client forever ("invisible fish" mode).
+      if (canvasAtlasBind(name) < 0) {
+        printf("[CANVAS] stream: bind of unknown atlas '%s' -- closing stream\n", name);
+        csClose(false, "atlas missing");
+        return false;
+      }
       return true;
     }
     case 0x05: canvasEnter(false); panelShow(); return true;
@@ -1560,6 +1566,7 @@ static bool csExec() {
 // The stream pump: called from taskWeb every tick while a stream is open. Drains and
 // executes whatever has arrived, up to a per-tick byte budget so taskWeb's other
 // duties (SSE, watchdog cover) keep their cadence.
+static uint32_t csSkipped = 0;   // stale ops batches dropped by freshness coalescing (v3.19)
 void canvasStreamPump() {
   // The wall/effect/timer took the panel back (dispReturnToWall) while this stream was still open:
   // close it so a client that didn't stand its app down can't keep painting over the newcomer.
@@ -1601,11 +1608,56 @@ void canvasStreamPump() {
     wdgWebMs  = millis();
     if (cs.inRec && cs.got == cs.need) {          // record complete (covers len-0 records)
       cs.inRec = false; cs.hdrN = 0;
+      // Perf telemetry (v3.19, LCD port; serialDebug only): per-second record mix.
+      if (gSerialDebug) {
+        static uint32_t statMs = 0, cnt[8] = {0}, byt = 0;
+        const uint8_t ti = cs.type < 8 ? cs.type : 7;
+        cnt[ti]++; byt += (uint32_t)cs.need;
+        const uint32_t nowMs = millis();
+        if (nowMs - statMs >= 1000) {
+          printf("[CS] 1s: frame=%lu rects=%lu ops=%lu atlas=%lu show=%lu other=%lu bytes=%lu\n",
+                 (unsigned long)cnt[1], (unsigned long)cnt[2], (unsigned long)cnt[3],
+                 (unsigned long)cnt[4], (unsigned long)cnt[5],
+                 (unsigned long)(cnt[0] + cnt[6] + cnt[7]), (unsigned long)byt);
+          memset(cnt, 0, sizeof(cnt)); byt = 0; statMs = nowMs;
+        }
+      }
+      // Freshness coalescing (v3.19, LCD port -- the review-hardened form): drop a
+      // completed self-contained full-cover 0x06 batch ONLY when the next queued record
+      // is provably another COMPLETE 0x06 batch (4-byte header peek + FIONREAD payload
+      // check). A peeked 0x05 show / 0x04 bind / partial record never triggers a drop.
+      if (cs.type == 0x06 && cs.need <= 4096 && cs.need >= 16) {
+        const uint8_t f0 = cs.buf[0];
+        bool fullCover = (f0 == 0x01);
+        if (!fullCover && f0 == 0x0B && cs.need >= 15) {
+          const int gx = (int16_t)((cs.buf[1]<<8)|cs.buf[2]), gy = (int16_t)((cs.buf[3]<<8)|cs.buf[4]);
+          const int gw = (int16_t)((cs.buf[5]<<8)|cs.buf[6]), gh = (int16_t)((cs.buf[7]<<8)|cs.buf[8]);
+          fullCover = (gx == 0 && gy == 0 && gw >= gPanel.panelW && gh >= gPanel.panelH);
+        }
+        if (fullCover) {
+          uint8_t nh[4];
+          const int pk = recv(httpd_req_to_sockfd(cs.req), (char*)nh, 4, MSG_PEEK | MSG_DONTWAIT);
+          if (pk == 4 && nh[0] == 0x06) {
+            const size_t nNeed = ((size_t)nh[1] << 16) | ((size_t)nh[2] << 8) | nh[3];
+            int queued = 0;
+            if (nNeed <= 4096 && ioctl(httpd_req_to_sockfd(cs.req), FIONREAD, &queued) == 0
+                && (size_t)queued >= 4 + nNeed) {
+              cs.records++; csSkipped++;
+              if (gSerialDebug && (csSkipped & 15) == 1)
+                printf("[CS] coalesce: %lu stale ops batches dropped\n", (unsigned long)csSkipped);
+              continue;
+            }
+          }
+        }
+      }
+      const uint32_t tExec0 = millis();
       if (!csExec()) {
         printf("[CANVAS] stream: bad record type 0x%02x len %lu\n", cs.type, (unsigned long)cs.need);
         csClose(false, "bad record");
         return;
       }
+      if (gSerialDebug) { const uint32_t d = millis() - tExec0;
+        if (d > 30) printf("[CS] slow exec: type=%02x len=%lu took %lums\n", cs.type, (unsigned long)cs.need, (unsigned long)d); }
       cs.records++;
     }
   }
@@ -2087,10 +2139,13 @@ static void pxDecode(const uint8_t* c, uint8_t bpp, uint8_t& r, uint8_t& g, uint
 // GET  /api/canvas -> {active,width,height,formats}   POST {"active":bool} take over / release.
 static esp_err_t handleApiCanvas(httpd_req_t* r) {
   if (r->method == HTTP_POST) {
-    if (csBusy(r)) return ESP_OK;
+    // NO csBusy gate (v3.19, LCD parity): {"active":false} is how an app is STOPPED; a
+    // 409 while the app's own stream was open made it unstoppable. The stop evicts the
+    // stream via dispReturnToWall's kill flag; a takeover likewise supersedes.
     JsonDocument doc;
     if (!httpxReadJson(r, doc)) return ESP_OK;
-    if (doc["active"] | false) canvasEnter(true); else canvasLeave();
+    if (doc["active"] | false) { gCanvasStreamKill = true; canvasEnter(true); }
+    else canvasLeave();
     char buf[48];
     snprintf(buf, sizeof(buf), "{\"ok\":true,\"active\":%s}", gCanvasMode ? "true" : "false");
     return httpxSend(r, 200, "application/json", buf);
@@ -2114,7 +2169,8 @@ static esp_err_t handleApiCanvas(httpd_req_t* r) {
 // "none", return to the wall. Supersedes raw-canvas mode -- the display task, not HTTP, owns the
 // panel -- so it clears gCanvasMode too.
 static esp_err_t handleApiCanvasEffect(httpd_req_t* r) {
-  if (csBusy(r)) return ESP_OK;
+  // NO csBusy gate (v3.19, LCD parity): an effect SUPERSEDES a raw-canvas stream rather
+  // than being refused by it -- the 409 made a streaming app's effect switch a silent no-op.
   if (!gPanel.ready) { httpxErr(r, 503, "Panel not running"); return ESP_OK; }
   JsonDocument doc;
   if (!httpxReadJson(r, doc)) return ESP_OK;
@@ -2139,6 +2195,8 @@ static esp_err_t handleApiCanvasEffect(httpd_req_t* r) {
     dispReturnToWall();             // stop -> reel wall
   } else {
     gCanvasMode = false;            // an effect owns the panel via taskDisplay, which runs
+    gCanvasStreamKill = true;       // evict a left-open canvas stream (v3.19, LCD parity):
+                                    // its next record would re-raise gCanvasMode and cancel us
     gEffectReq  = e;                // effectReset() + starts it -- no effect state touched off-core
   }
   char buf[128];
@@ -2222,6 +2280,60 @@ static void canvasOpGradientEx(int x, int y, int w, int h,
   }
   const float cx = (w - 1) * 0.5f, cy = (h - 1) * 0.5f;
   const float maxR = sqrtf(cx * cx + cy * cy);
+  // Row-composed fast path (v3.19, LCD perf port): identical per-pixel math composed into
+  // a row scratch and landed with one panelBlitRow888 per line, instead of a per-pixel
+  // panelPixel call each. Non-trivial batch blend keeps the general path.
+  if (!panelBlendActive()) {
+    static uint8_t rowBuf[PANEL_MAX_W * 3];
+    static uint8_t baseRow[PANEL_MAX_W * 3];       // mode 1: per-column base colours, once
+    const int wc = w > PANEL_MAX_W ? PANEL_MAX_W : w;
+    if (mode == 1) {
+      for (int xx = 0; xx < wc; xx++) {
+        int t8 = (w > 1) ? 255 * xx / (w - 1) : 0;
+        if (t8 < 0) t8 = 0; else if (t8 > 255) t8 = 255;
+        baseRow[xx * 3]     = (uint8_t)(r0 + ((r1 - r0) * t8) / 255);
+        baseRow[xx * 3 + 1] = (uint8_t)(g0 + ((g1 - g0) * t8) / 255);
+        baseRow[xx * 3 + 2] = (uint8_t)(b0 + ((b1 - b0) * t8) / 255);
+      }
+    }
+    for (int yy = 0; yy < h; yy++) {
+      const float dy2 = ((float)yy - cy) * ((float)yy - cy);
+      const float ybase = yy * ay - tmin;
+      int rr = 0, rg = 0, rb = 0;
+      if (mode == 0) {
+        int t8 = (h > 1) ? 255 * yy / (h - 1) : 0;
+        if (t8 < 0) t8 = 0; else if (t8 > 255) t8 = 255;
+        rr = r0 + ((r1 - r0) * t8) / 255;
+        rg = g0 + ((g1 - g0) * t8) / 255;
+        rb = b0 + ((b1 - b0) * t8) / 255;
+      }
+      for (int xx = 0; xx < wc; xx++) {
+        int r, g, b;
+        if (mode == 0)      { r = rr; g = rg; b = rb; }
+        else if (mode == 1) { r = baseRow[xx*3]; g = baseRow[xx*3+1]; b = baseRow[xx*3+2]; }
+        else {
+          int t8;
+          if (mode == 2) {
+            const float dx = xx - cx;
+            t8 = (int)(255.0f * sqrtf(dx * dx + dy2) / (maxR > 0 ? maxR : 1));
+          } else t8 = (int)(255.0f * ((xx * ax + ybase)) / tspan);
+          if (t8 < 0) t8 = 0; else if (t8 > 255) t8 = 255;
+          r = r0 + ((r1 - r0) * t8) / 255;
+          g = g0 + ((g1 - g0) * t8) / 255;
+          b = b0 + ((b1 - b0) * t8) / 255;
+        }
+        if (dither) {
+          rowBuf[xx*3]   = ditherCh(r, x + xx, y + yy, q);
+          rowBuf[xx*3+1] = ditherCh(g, x + xx, y + yy, q);
+          rowBuf[xx*3+2] = ditherCh(b, x + xx, y + yy, q);
+        } else {
+          rowBuf[xx*3] = (uint8_t)r; rowBuf[xx*3+1] = (uint8_t)g; rowBuf[xx*3+2] = (uint8_t)b;
+        }
+      }
+      panelBlitRow888(x, y + yy, wc, rowBuf);
+    }
+    return;
+  }
   for (int yy = 0; yy < h; yy++)
     for (int xx = 0; xx < w; xx++) {
       int t8;
@@ -2430,16 +2542,22 @@ static void opsApplyClip() {
 static void canvasThickLine(int x0, int y0, int x1, int y1, int t,
                             uint8_t r, uint8_t g, uint8_t b) {
   if (t <= 1) { panelLine(x0, y0, x1, y1, r, g, b); return; }
+  // v3.19 (LCD perf port): one initial stamp, then only the stamp's LEADING edges per
+  // Bresenham step -- identical coverage to full t x t stamps, each pixel written once
+  // (also blends correctly under batch alpha, where overlap double-blended before).
   const int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
   const int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
   int err = dx + dy;
   const int off = t >> 1;
+  panelFillRect(x0 - off, y0 - off, t, t, r, g, b);
   for (;;) {
-    panelFillRect(x0 - off, y0 - off, t, t, r, g, b);
     if (x0 == x1 && y0 == y1) break;
     const int e2 = 2 * err;
-    if (e2 >= dy) { err += dy; x0 += sx; }
-    if (e2 <= dx) { err += dx; y0 += sy; }
+    bool mx = false, my = false;
+    if (e2 >= dy) { err += dy; x0 += sx; mx = true; }
+    if (e2 <= dx) { err += dx; y0 += sy; my = true; }
+    if (mx) panelVLine(x0 + (sx > 0 ? off : -off), y0 - off, t, r, g, b);
+    if (my) panelHLine(x0 - off, y0 + (sy > 0 ? off : -off), t, r, g, b);
   }
 }
 
@@ -2750,6 +2868,10 @@ static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* o
     memset(gBinMacroPtr, 0, sizeof(gBinMacroPtr));
     panelClearClip(); panelClearBlend(); panelLayerDiscard();
   }
+  // Per-opcode cost histogram (v3.19, LCD port; serialDebug diag): names the op that eats
+  // a slow batch -- the first tool for any "app renders slowly" report.
+  static uint32_t opMs[0x28], opCnt[0x28]; static uint32_t opT0;
+  if (depth == 0 && gSerialDebug) { memset(opMs,0,sizeof(opMs)); memset(opCnt,0,sizeof(opCnt)); opT0 = millis(); }
   size_t i = 0;
   #define BOPS_NEED(n) if (i + (n) > len) { ok = false; break; }
   // Transformed point / size helpers: read s16 pairs through the shared affine matrix
@@ -2760,6 +2882,7 @@ static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* o
     opsYieldMaybe();                              // resilience: cap CPU hog per batch
     panelSetBlend((uint8_t)gOpsBlend, gBinAlpha); // per op: batch mode + batch alpha
     const uint8_t opb = p[i++];
+    const uint32_t tOp0 = gSerialDebug ? millis() : 0;
     switch (opb) {
       case 0x01: { BOPS_NEED(3);
         panelFillRect(0, 0, gPanel.panelW, gPanel.panelH, p[i], p[i+1], p[i+2]); i += 3; break; }
@@ -2982,11 +3105,19 @@ static int canvasOpsRunBin(const uint8_t* p, size_t len, bool* shownOut, bool* o
       default: ok = false; break;
     }
     if (!ok) break;
+    if (gSerialDebug && opb < 0x28) { opMs[opb] += millis() - tOp0; opCnt[opb]++; }
     applied++;                                    // counts like the JSON path (state ops too)
   }
   #undef BOPS_NEED
   #undef BXY
   if (depth == 0) {
+    if (gSerialDebug && millis() - opT0 > 20) {    // slow batch (small panel): name the culprits
+      char line[160]; int n2 = snprintf(line, sizeof(line), "[OPS] %lums:", (unsigned long)(millis()-opT0));
+      for (int o = 0; o < 0x28; o++)
+        if (opMs[o] > 3 && n2 < (int)sizeof(line) - 20)
+          n2 += snprintf(line + n2, sizeof(line) - n2, " %02x=%lux/%lums", o, (unsigned long)opCnt[o], (unsigned long)opMs[o]);
+      printf("%s\n", line);
+    }
     gOpsClipOn = false; gOpsBlend = 0; gBinAlpha = 255; xfReset();
     memset(gBinMacroPtr, 0, sizeof(gBinMacroPtr));
     panelClearClip(); panelClearBlend(); panelLayerDiscard();
@@ -3743,9 +3874,9 @@ static esp_err_t atlasRawReply(httpd_req_t* r, int e) {
   return httpxErr(r, 503, "Out of memory");
 }
 static esp_err_t handleApiAtlasPut(httpd_req_t* r) {
-  // The stream pump (taskWeb) may be mid-blit from a resident sheet; an upload here can
-  // evict/realloc that very sheet (atlasEvictFor) -> use-after-free. Same guard as anim PUT.
-  if (csBusy(r)) return ESP_OK;
+  // NO csBusy gate (v3.19, LCD parity): the atlas store has its own lock (gAtlasMx in
+  // canvas.cpp), so a streaming app can (re)provision its sheets -- after a reboot cleared
+  // the resident store, the old 409 left sprites silently blank forever.
   if (ESP.getFreeHeap() < CANVAS_MIN_UPLOAD_HEAP) return atlasRawReply(r, 507);   // stressed: back off
   const String name = httpxPathTail(r, "/api/canvas/atlas/");
   if (!canvasAtlasNameOk(name.c_str())) return atlasRawReply(r, 400);
@@ -3837,7 +3968,7 @@ static esp_err_t handleApiAtlasPost(httpd_req_t* r) {
   return httpxSend(r, 200, "application/json", "{\"ok\":true}");
 }
 static esp_err_t handleApiAtlasDelete(httpd_req_t* r) {
-  if (csBusy(r)) return ESP_OK;      // delete frees a resident sheet the stream pump may be blitting
+  // NO csBusy gate (v3.19): the store lock (gAtlasMx) serializes against the pump's blits.
   const String name = httpxPathTail(r, "/api/canvas/atlas/");
   if (canvasAtlasDelete(name.c_str()) != 0) return atlasRawReply(r, 404);
   { char cd[64]; snprintf(cd, sizeof(cd), "atlas '%.32s' deleted", name.c_str()); logCommand('R', cd); }

@@ -534,6 +534,7 @@ void panelSetBlend(uint8_t mode, uint8_t alpha) {
   gBlendActive = (mode != 0 || alpha != 255);
 }
 void panelClearBlend() { gBlendActive = false; gBlendMode = 0; gBlendAlpha = 255; }
+bool panelBlendActive() { return gBlendActive; }        // fast-path gates (v3.19, LCD perf port)
 
 // Offscreen layers (v3.9): while a layer is open, every drawing primitive redirects into
 // this full-panel RGBA shadow (a[3] marks written pixels / carries AA coverage) instead
@@ -541,7 +542,9 @@ void panelClearBlend() { gBlendActive = false; gBlendMode = 0; gBlendAlpha = 255
 // one group blend+alpha -- i.e. group opacity, the thing per-op alpha can't express. One
 // layer at a time; the buffer lives in PSRAM only between begin and composite/discard.
 static uint8_t* gLayerBuf = nullptr;          // W*H*4 RGBA, or null when no layer is open
+bool panelLayerActive();                       // fwd-used by fast paths; defined below
 static bool panelLayerOpen() { return gLayerBuf != nullptr; }
+bool panelLayerActive() { return gLayerBuf != nullptr; }   // public gate (v3.19, LCD perf port)
 
 bool panelLayerBegin() {
   if (gLayerBuf) { memset(gLayerBuf, 0, (size_t)W * H * 4); return true; }
@@ -639,11 +642,15 @@ void panelBlitCoverRow(int x, int y, int n, const uint8_t* cov, uint8_t r, uint8
 // blur, so the gateway does not offer it -- the "blur" op is accepted but ignored. The LCD
 // gateway, a 16-bit panel, keeps its panelBoxBlur.)
 
+// v3.19 (LCD perf port): spans ride panelFillRect's fast word-loop path -- hoisted
+// per-(row,plane) masks instead of a per-pixel panelPixel call each. fillRect already
+// falls back per-pixel under blend/layer, so semantics are unchanged. Polygon fills,
+// filled circles and thick lines all funnel through these.
 void panelHLine(int x, int y, int w, uint8_t r, uint8_t g, uint8_t b) {
-  for (int i = 0; i < w; i++) panelPixel(x + i, y, r, g, b);
+  panelFillRect(x, y, w, 1, r, g, b);
 }
 void panelVLine(int x, int y, int h, uint8_t r, uint8_t g, uint8_t b) {
-  for (int i = 0; i < h; i++) panelPixel(x, y + i, r, g, b);
+  panelFillRect(x, y, 1, h, r, g, b);
 }
 void panelFillRect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b) {
   // Fast path (v3.0.1): a fill is the hottest canvas op -- ops apps clear the whole

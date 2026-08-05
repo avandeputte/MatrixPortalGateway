@@ -71,6 +71,8 @@ void panelClearClip();
 // drawing uses this with coverage as alpha. The ops layer resets it per op.
 void panelSetBlend(uint8_t mode, uint8_t alpha);
 void panelClearBlend();
+bool panelBlendActive();   // true while a batch blend mode/alpha is set (span fast paths bail)
+bool panelLayerActive();   // an offscreen layer is open
 // Offscreen layers (v3.9): panelLayerBegin() redirects every drawing primitive into a
 // full-panel RGBA shadow; panelLayerComposite() blends that group back at (ox,oy) with one
 // group blend mode + alpha (group opacity). panelLayerDiscard() drops it undrawn. The ops
