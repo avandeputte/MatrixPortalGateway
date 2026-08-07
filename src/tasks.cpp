@@ -3,7 +3,7 @@
 #include "sensor.h"   // SHTC3 temp/humidity, polled from taskRTC (v3.7)
 #include "panel.h"    // panelSetBrightness: the brightness schedule (v3.13)
 #include "timer.h"    // alarmTick: daily alarms fire from taskRTC (v3.14)
-#include "audio.h"    // audioClapPoll + capture re-arm for clap detection (v3.15)
+#include "audio.h"    // mic frontend; shared full-duplex I2S with sound.cpp (v3.7)
 #include "imu.h"      // QMI8658 tap engine poll -- I2C stays on taskRTC (v3.15)
 #include "sdcard.h"   // sdLog: gesture-dismissal audit trail (v3.15)
 
@@ -148,8 +148,6 @@ void taskRTC(void* pv) {
       rtcRead();
       rtcChipService();        // queued RTC-chip writeback + verify (I2C on THIS task, v3.15)
       alarmTick();             // daily alarms, ~1/s (v3.14; overrides quiet by design)
-      // Clap detection is a standing mic consumer: (re)arm capture if it self-stopped.
-      if (cfg.clapEnabled && audioAvailable() && !audioCapturing()) audioMaybeStart();
     }
     if (lastSched == 0 || millis() - lastSched > 5000UL) {
       lastSched = millis();
@@ -186,26 +184,17 @@ void taskWeb(void* pv) {
     const unsigned long busy = httpxBusySince();
     if (!busy || now - busy < 110000UL) wdgWebMs = now;
 
-    // Gesture events (v3.15): the detectors publish, this pump delivers. A live
-    // timer/alarm CONSUMES the gesture as its stop/dismiss (clap the timer away,
-    // tap the alarm quiet); only otherwise does it reach the companion over SSE.
+    // Gesture events (v3.15): the tap detector publishes, this pump delivers. A live
+    // timer/alarm CONSUMES the tap as its stop/dismiss (tap the alarm quiet); only
+    // otherwise does it reach the companion over SSE.
     { uint8_t gc; uint32_t gs;
-      // Dismissal requires a DOUBLE gesture: a single clap-like transient -- a dish,
-      // a door, one keystroke thump -- must never kill a timer. Singles still reach
-      // the companion, which sets its own bar. For taps, the chip's own double-tap
-      // window is stricter than human rhythm, so two single-tap EVENTS within 1.5 s
-      // also count as a double (live-tested: real double-taps arrived as 2 singles).
-      static unsigned long lastTapEvMs = 0, lastClapEvMs = 0;
-      // Pair window 1.0 s (was 1.5): deliberate doubles land ~0.3-0.6 s apart, but desk
-      // activity (typing bursts) could pair two accidental singles inside 1.5 s -- the
-      // 2026-08-01 false dismissal. Every dismissal is SD-logged with its channel so a
-      // surprise dismissal is diagnosable from the log, not from guesswork.
-      if (audioClapPoll(&gc, &gs)) {
-        const bool dbl = (gc >= 2) || (millis() - lastClapEvMs < 1000);
-        lastClapEvMs = millis();
-        if (dbl && timerAlarmGestureDismiss()) sdLog("gesture dismiss: clap x%u", (unsigned)(gc >= 2 ? gc : 2));
-        else { sseBroadcastGesture("clap", gc, gs); panelGestureBlip(0, 200, 255); }   // cyan = clap
-      }
+      // Dismissal requires a DOUBLE tap: a single knock -- a dish, a door -- must never
+      // kill a timer. Singles still reach the companion, which sets its own bar. The
+      // chip's own double-tap window is stricter than human rhythm, so two single-tap
+      // EVENTS within 1.0 s also count as a double (live-tested: real double-taps
+      // arrived as 2 singles). Every dismissal is SD-logged so a surprise dismissal is
+      // diagnosable from the log, not from guesswork.
+      static unsigned long lastTapEvMs = 0;
       if (imuTapPoll(&gc, &gs)) {
         const bool dbl = (gc >= 2) || (millis() - lastTapEvMs < 1000);
         lastTapEvMs = millis();

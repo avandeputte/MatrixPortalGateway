@@ -32,12 +32,12 @@
 
 static uint8_t  qmiAddr   = 0;
 static bool     gImuReady = false;
-// Published tap event (written on taskRTC, read from taskWeb) -- same pattern as claps.
+// Published tap event (written on taskRTC, read from taskWeb).
 static portMUX_TYPE imuMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint8_t  gTapPending = 0;
 static volatile uint32_t gTapSeq = 0;
 static volatile uint32_t gTapTotal = 0;       // events since boot (diagnostics)
-// Tuning telemetry (like the clap detector's): the strongest accel deviation from 1 g
+// Tuning telemetry: the strongest accel deviation from 1 g
 // seen since last read, in milli-g. Shows what a physical knock MEASURES even when the
 // tap engine ignores it -- misses become numbers instead of silence. Reset on read.
 static volatile int32_t  gAccelPeakMg = 0;

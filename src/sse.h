@@ -28,6 +28,6 @@ int  sseClientCount();           // open streams right now (0..SSE_MAX_CLIENTS)
 void sseBroadcastDisplay();      // push the current display state to every stream
 void sseBroadcastStatus();       // push the status JSON (the dashboard drops its 3 s poll)
 void sseKeepalive();
-void sseBroadcastGesture(const char* kind, uint8_t count, uint32_t seq);  // "clap"/"tap" (v3.15)             // ": ka" comment so proxies/timeouts keep the pipe warm
+void sseBroadcastGesture(const char* kind, uint8_t count, uint32_t seq);  // "tap" (v3.15)
 
 #endif // SFGW_SSE_H

@@ -34,7 +34,6 @@ void cfgSetDefaults() {
     strlcpy(cfg.almTime[i], "07:00", sizeof(cfg.almTime[i]));
     cfg.almDays[i] = 0x7F; cfg.almEnabled[i] = false;
   }
-  cfg.clapEnabled = false;
   cfg.tapEnabled  = false;
   cfg.backupEnabled = true;
   cfg.hostname[0] = 0;          // blank -> derived from the MAC
@@ -81,7 +80,6 @@ void loadConfig() {
   strlcpy(cfg.dimEnd,           prefs.getString("dimEnd",   "07:00").c_str(), sizeof(cfg.dimEnd));
   cfg.dimLevel      =           prefs.getUChar("dimLvl", 40);
   if (cfg.dimLevel < 1) cfg.dimLevel = 40;
-  cfg.clapEnabled = prefs.getBool("clapEn", false);
   cfg.tapEnabled  = prefs.getBool("tapEn",  false);
   cfg.backupEnabled = prefs.getBool("bakEn", true);
   for (int i = 0; i < 4; i++) {
@@ -151,7 +149,6 @@ void saveConfig() {
   prefs.putString("dimStart", cfg.dimStart);
   prefs.putString("dimEnd",   cfg.dimEnd);
   prefs.putUChar ("dimLvl",   cfg.dimLevel);
-  prefs.putBool  ("clapEn",   cfg.clapEnabled);
   prefs.putBool  ("tapEn",    cfg.tapEnabled);
   prefs.putBool  ("bakEn",    cfg.backupEnabled);
   for (int i = 0; i < 4; i++) {
@@ -211,7 +208,6 @@ void cfgExportJson(JsonDocument& doc) {
     JsonObject a = al.add<JsonObject>();
     a["time"] = cfg.almTime[i]; a["days"] = cfg.almDays[i]; a["enabled"] = cfg.almEnabled[i];
   }
-  doc["clapEnabled"]   = cfg.clapEnabled;
   doc["tapEnabled"]    = cfg.tapEnabled;
   doc["backupEnabled"] = cfg.backupEnabled;
 }
@@ -276,7 +272,6 @@ bool cfgImportJson(const JsonDocument& doc, int& applied, bool& rebootNeeded) {
     }
     if (i) applied++;
   }
-  IMP_BOOL("clapEnabled", cfg.clapEnabled);
   IMP_BOOL("tapEnabled",  cfg.tapEnabled);
   IMP_BOOL("backupEnabled", cfg.backupEnabled);
 

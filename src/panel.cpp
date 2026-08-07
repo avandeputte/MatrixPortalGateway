@@ -995,7 +995,7 @@ void panelScroll(int dx, int dy, uint8_t fr, uint8_t fg, uint8_t fb) {
 static void (*sOverlay)(void) = nullptr;
 void panelSetOverlay(void (*fn)(void)) { sOverlay = fn; }
 
-// ---- Gesture ack blip (v3.15): a 4x4 corner flash acknowledging a clap/tap that no
+// ---- Gesture ack blip (v3.15): a 4x4 corner flash acknowledging a tap that no
 // alert consumed. Composited here rather than in any presenter: panelShow() stamps it
 // onto whatever frame is going out (saving the pixels underneath first), and
 // panelBlipService() -- pumped from taskWeb -- presents it when the panel is otherwise

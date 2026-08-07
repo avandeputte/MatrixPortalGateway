@@ -1,8 +1,7 @@
 // imu.h -- QMI8658 IMU: hardware TAP detection (v3.15). The chip's own tap engine
 // (accel @500 Hz, on-die peak detection) recognises single and double taps on the
-// board/enclosure; the firmware polls its status registers and publishes events the
-// same way clap detection does -- SSE "tap" {count, seq} -- advertised as the `taps`
-// capability token.
+// board/enclosure; the firmware polls its status registers and publishes events on the
+// SSE stream as "tap" {count, seq} -- advertised as the `taps` capability token.
 //
 // I2C discipline (the bus has NO lock, see sensor.h): imuInit() configures the chip at
 // boot while the system is single-threaded; imuTapTick() -- the ONLY runtime I2C here

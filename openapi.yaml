@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Matrix Portal Gateway API
-  version: "3.21"
+  version: "3.22"
   description: |
     REST API for the **Matrix Portal Gateway** firmware, running on a
     Waveshare ESP32-S3-RGB-Matrix driver board. It emulates a wall of split-flap modules on a
@@ -511,21 +511,19 @@ paths:
   /api/gestures:
     get:
       tags: [Status]
-      summary: Gesture detection state (v3.15, `claps`/`taps` tokens)
+      summary: Gesture detection state (v3.15, `taps` token)
       description: |
-        Clap (microphone transient) and tap (QMI8658 hardware tap engine) detection.
-        Enable via `clapEnabled`/`tapEnabled` in `POST /api/config/settings` (both default
-        off; clap detection keeps the microphone capturing). Events are pushed on the SSE
-        stream (`GET /api/events`) as `event: clap` / `event: tap` with `{count, seq}` —
-        count 2 = a double (clap bursts are counted; two single events within 1 s also
-        pair). **A double gesture dismisses a running timer or ringing alarm on-device**
-        (logged to the on-card event log) and is not forwarded to SSE. Any gesture not consumed by a dismissal flashes a
-        4×4 acknowledgment square in the panel's top-right corner (~220 ms, cyan =
-        clap, amber = tap). This endpoint also
-        carries tuning telemetry (peak mic RMS + spectral fraction, peak accel deviation
-        in milli-g, reset on read) and lifetime event counters.
+        Tap detection via the QMI8658 hardware tap engine. Enable via `tapEnabled` in
+        `POST /api/config/settings` (default off). Events are pushed on the SSE stream
+        (`GET /api/events`) as `event: tap` with `{count, seq}` — count 2 = a double (the
+        chip's own double-tap, or two single events within 1 s, pair). **A double tap
+        dismisses a running timer or ringing alarm on-device** (logged to the on-card
+        event log) and is not forwarded to SSE. A tap not consumed by a dismissal flashes
+        a 4×4 acknowledgment square in the panel's top-right corner (~220 ms, amber). This
+        endpoint also carries tuning telemetry (peak accel deviation in milli-g, reset on
+        read) and a lifetime event counter.
       responses:
-        "200": { description: "{claps:{available,enabled,total,peakRms,peakBright,peakFloor}, taps:{available,enabled,total,peakMg}}" }
+        "200": { description: "{taps:{available,enabled,total,peakMg}}" }
   /api/timer:
     get:
       tags: [Status]
@@ -2261,7 +2259,7 @@ paths:
                     example: [plasma, fire, matrix, fliporama, clock, life]
                   features:
                     type: array
-                    description: "Capability tokens a client checks instead of sniffing the firmware version. 'canvas', 'effects' and 'ticker' appear on the Matrix gateway only. 'brightness' (v2.2) says the panel brightness is live-settable via GET/POST /api/display/brightness (also persisted as panelBright in POST /api/config/settings, 1..255, applied on the next frame). 'timer' and 'alarms' (v3.14) advertise the countdown timer and the daily alarm slots. 'claps' (microphones) and 'taps' (IMU) advertise gesture detection (v3.15): enable via clapEnabled/tapEnabled; events arrive on the SSE stream as `clap`/`tap` `{count,seq}`; a DOUBLE gesture dismisses a running timer or ringing alarm on-device. Hardware-conditional tokens appear only when the peripheral is present: 'audio' (mics), 'sound' (speaker), 'environment' (SHTC3), 'sd' (mounted microSD card, v3.10)."
+                    description: "Capability tokens a client checks instead of sniffing the firmware version. 'canvas', 'effects' and 'ticker' appear on the Matrix gateway only. 'brightness' (v2.2) says the panel brightness is live-settable via GET/POST /api/display/brightness (also persisted as panelBright in POST /api/config/settings, 1..255, applied on the next frame). 'timer' and 'alarms' (v3.14) advertise the countdown timer and the daily alarm slots. 'taps' (IMU) advertises tap-gesture detection (v3.15): enable via tapEnabled; events arrive on the SSE stream as `tap` `{count,seq}`; a DOUBLE tap dismisses a running timer or ringing alarm on-device. Hardware-conditional tokens appear only when the peripheral is present: 'audio' (mics), 'sound' (speaker), 'environment' (SHTC3), 'sd' (mounted microSD card, v3.10)."
                     items: { type: string }
                     example: ["cells","colors","index","lowercase","pictographs","quiet","ota","canvas","effects","ticker","brightness","events"]
 

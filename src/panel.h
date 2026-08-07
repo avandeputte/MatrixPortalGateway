@@ -106,7 +106,7 @@ void panelReadback(uint8_t* out, bool rgb565);
 void panelSetOverlay(void (*fn)(void));
 
 // Gesture ack blip (v3.15): flash a 4x4 square in the top-right corner for ~220 ms,
-// composited over whatever any presenter is showing -- visual proof a clap/tap
+// composited over whatever any presenter is showing -- visual proof a tap
 // registered when no alert was there to dismiss. panelBlipService() must be pumped
 // regularly (taskWeb); it presents the blip on a static panel and cleans up after.
 void panelGestureBlip(uint8_t r, uint8_t g, uint8_t b);

@@ -834,12 +834,11 @@ static esp_err_t handleApiCapabilities(httpd_req_t* r) {
     snprintf(ft, sizeof(ft),
              "\"features\":[\"cells\",\"colors\",\"index\",\"lowercase\",\"pictographs\","
              "\"quiet\",\"ota\",\"canvas\",\"effects\",\"ticker\",\"brightness\",\"events\","
-             "\"effectDefs\",\"timer\",\"alarms\",\"settingsStore\"%s%s%s%s%s%s]}",
+             "\"effectDefs\",\"timer\",\"alarms\",\"settingsStore\"%s%s%s%s%s]}",
              audioAvailable() ? ",\"audio\"" : "",
              soundAvailable() ? ",\"sound\"" : "",
              sensorAvailable() ? ",\"environment\"" : "",
              sdReady() ? ",\"sd\"" : "",
-             audioAvailable() ? ",\"claps\"" : "",
              imuAvailable() ? ",\"taps\"" : "");
     capPut(ft); }
   capFlush();
@@ -967,7 +966,6 @@ static esp_err_t handleApiConfigGet(httpd_req_t* r) {
   doc["dimStart"]      = cfg.dimStart;
   doc["dimEnd"]        = cfg.dimEnd;
   doc["dimLevel"]      = cfg.dimLevel;
-  doc["clapEnabled"]   = cfg.clapEnabled;
   doc["tapEnabled"]    = cfg.tapEnabled;
   doc["backupEnabled"] = cfg.backupEnabled;
   doc["flapMs"]        = cfg.flapMs;
@@ -1073,7 +1071,6 @@ static esp_err_t handleApiConfigSettings(httpd_req_t* r) {
   if (doc["dimLevel"].is<int>()) { int v = doc["dimLevel"];
     if (v >= 1 && v <= 255) cfg.dimLevel = (uint8_t)v; }
   if (doc["dimTzOffsetMin"].is<int>()) cfg.quietTzOffsetMin = (int16_t)doc["dimTzOffsetMin"].as<int>();
-  if (doc["clapEnabled"].is<bool>()) cfg.clapEnabled = doc["clapEnabled"].as<bool>();
   if (doc["tapEnabled"].is<bool>())  cfg.tapEnabled  = doc["tapEnabled"].as<bool>();
   if (doc["backupEnabled"].is<bool>()) cfg.backupEnabled = doc["backupEnabled"].as<bool>();
   if (doc["panelBright"].is<int>())   { int v = doc["panelBright"];
@@ -1751,19 +1748,13 @@ static esp_err_t handleApiEnvironment(httpd_req_t* r) {
   return httpxSend(r, 200, "application/json", buf);
 }
 
-/* ---- gestures (v3.15): clap + tap state ------------------------------------------- */
-// GET /api/gestures -- hardware presence + enables. Events ride SSE ("clap"/"tap"
+/* ---- gestures (v3.15): tap state ------------------------------------------- */
+// GET /api/gestures -- hardware presence + enable. Events ride SSE ("tap"
 // {count,seq}); this is the discovery/diagnostic view.
 static esp_err_t handleApiGestures(httpd_req_t* r) {
-  char buf[256];   // 160 truncated once peakMg joined -- clients got unparseable JSON
-  float mr, br, fl;
-  audioClapDebug(&mr, &br, &fl);
+  char buf[160];
   snprintf(buf, sizeof(buf),
-           "{\"claps\":{\"available\":%s,\"enabled\":%s,\"total\":%lu,"
-           "\"peakRms\":%.4f,\"peakBright\":%.2f,\"peakFloor\":%.4f},"
-           "\"taps\":{\"available\":%s,\"enabled\":%s,\"total\":%lu,\"peakMg\":%ld}}",
-           audioAvailable() ? "true" : "false", cfg.clapEnabled ? "true" : "false",
-           (unsigned long)audioClapTotal(), mr, br, fl,
+           "{\"taps\":{\"available\":%s,\"enabled\":%s,\"total\":%lu,\"peakMg\":%ld}}",
            imuAvailable() ? "true" : "false",  cfg.tapEnabled ? "true" : "false",
            (unsigned long)imuTapTotal(), (long)imuAccelPeakMg());
   return httpxSend(r, 200, "application/json", buf);
