@@ -116,8 +116,11 @@ extern volatile bool gTickerActive;
 // panel. An overlay ticker survives wall page changes; only an explicit stop ({"text":""}),
 // Quiet Time, or a non-overlay ticker replaces it. font (v2.1) overrides the panel-sized
 // built-in face -- pass canvasFontByName()'s result, or NULL for the default.
+// seconds (ported from LCD v0.4.7): auto-dismiss after this many seconds; 0 = persistent
+// until replaced or explicitly stopped (an overlay ticker otherwise never goes away).
 void canvasTickerSet(const char* text, uint8_t r, uint8_t g, uint8_t b, int speed,
-                     bool overlay = false, bool band = true, const Font1252* font = nullptr);
+                     bool overlay = false, bool band = true, const Font1252* font = nullptr,
+                     int seconds = 0);
 void canvasTickerRender();     // taskDisplay: exclusive mode -- draw + advance one step
 void canvasTickerTick(uint32_t now);  // taskDisplay: overlay mode -- advance scroll, repaint idle wall
 void canvasTickerStop();              // stops an exclusive ticker; overlay survives (see force)

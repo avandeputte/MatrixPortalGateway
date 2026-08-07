@@ -1032,6 +1032,10 @@ static int             tickSpeed = 2;                 // px per step
 static int             tickScroll = 0, tickTextW = 0;
 static const Font1252* tickFont = &FONT_6x10;
 static uint32_t        tickLastMs = 0;
+static uint32_t        tickExpireAt = 0;   // millis deadline (ticker TTL, ported from LCD v0.4.7); 0 = persistent
+
+// True once a TTL ticker has passed its deadline. Signed compare keeps it millis()-wrap-safe.
+static bool tickerExpired(uint32_t now) { return tickExpireAt && (int32_t)(now - tickExpireAt) >= 0; }
 
 static const Font1252* tickerFace() {
   int H = gPanel.panelH;
@@ -1072,7 +1076,7 @@ static void tickerOverlayDraw() {
 }
 
 void canvasTickerSet(const char* text, uint8_t r, uint8_t g, uint8_t b, int speed,
-                     bool overlay, bool band, const Font1252* font) {
+                     bool overlay, bool band, const Font1252* font, int seconds) {
   gTickerActive = false;                     // stop the renderer reading half-updated state
   panelSetOverlay(nullptr);
   gTickerOverlay = false;
@@ -1085,6 +1089,7 @@ void canvasTickerSet(const char* text, uint8_t r, uint8_t g, uint8_t b, int spee
   const int gw = tickFont->width + 1;        // 1 px between glyphs
   tickTextW = (int)strlen(tickText) * gw;
   tickScroll = 0; tickLastMs = 0;
+  tickExpireAt = seconds > 0 ? millis() + (uint32_t)seconds * 1000u : 0;   // TTL; 0 = persistent
   if (overlay) {
     // Composite over whatever is presenting: no panel claim, no mode change.
     gTickerOverlay = true;
@@ -1114,12 +1119,21 @@ void canvasTickerTick(uint32_t now) {
   // tick exists for one case: the IDLE wall, which presents nothing on its own --
   // mark it dirty at the scroll cadence so repaints keep coming.
   if (!gTickerOverlay || !gTickerActive) return;
-  (void)now;
+  if (tickerExpired(now)) {          // TTL: self-dismiss; the wall/effect repaint clears the band
+    canvasTickerStopForce();
+    dispMarkDirty();
+    return;
+  }
   dispMarkDirty();
 }
 
 void canvasTickerRender() {
   uint32_t now = millis();
+  if (tickerExpired(now)) {          // TTL: exclusive ticker hands the panel back to the wall
+    canvasTickerStopForce();
+    dispReturnToWall();
+    return;
+  }
   if (now - tickLastMs < 33) { vTaskDelay(pdMS_TO_TICKS(2)); return; }   // ~30 steps/s
   tickLastMs = now;
   const Font1252* f = tickFont;

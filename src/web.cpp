@@ -4099,15 +4099,18 @@ static esp_err_t handleApiCanvasTicker(httpd_req_t* r) {
   int speed = doc["speed"] | 2;
   bool overlay = doc["overlay"] | false;
   bool band    = doc["band"]    | true;
+  int  secs    = doc["seconds"] | 0;        // TTL (ported from LCD v0.4.7): 0 = persistent
+  if (secs < 0) secs = 0;
+  if (secs > 86400) secs = 86400;
   // v2.1: optional "font" -- "custom" is the uploaded PSRAM face, any other name loads
   // /fonts/<name>.fnt into the slot. Absent or unresolvable falls back to the built-in
   // panel-sized face (NULL below); a missing font must scroll text, not 500.
   const Font1252* face = nullptr;
   if (doc["font"].is<const char*>()) face = canvasFontByName(doc["font"].as<const char*>());
-  canvasTickerSet(text, cr, cg, cb, speed, overlay, band, face);
+  canvasTickerSet(text, cr, cg, cb, speed, overlay, band, face, secs);
   char resp[64];
-  snprintf(resp, sizeof(resp), "{\"ok\":true,\"active\":true,\"overlay\":%s}",
-           overlay ? "true" : "false");
+  snprintf(resp, sizeof(resp), "{\"ok\":true,\"active\":true,\"overlay\":%s,\"seconds\":%d}",
+           overlay ? "true" : "false", secs);
   return httpxSend(r, 200, "application/json", resp);
 }
 
